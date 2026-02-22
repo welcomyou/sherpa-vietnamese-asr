@@ -2219,39 +2219,68 @@ class FileProcessingTab(QWidget):
                 return
         
         current_sec = position / 1000.0
-        best_anchor = -1
-        min_future_distance = float('inf')
         
-        # Logic giống Tab Live: tìm partial chunk có timestamp > current_sec gần nhất
+        # Tìm segment phù hợp nhất với current_time
+        # Ưu tiên: 
+        # 1. Segment có chứa current_time (start <= current <= end)
+        #    - Nếu có overlap (nhiều segment chứa current_time), ưu tiên segment có start_time gần với current_time nhất
+        # 2. Nếu không có segment nào chứa current_time, tìm segment có start_time gần nhất trong tương lai
+        
+        candidates = []  # Các segment chứa current_time
+        future_candidates = []  # Các segment trong tương lai
+        
         for i, seg in enumerate(self.segments):
-            partials = seg.get('partials', [])
-            if partials:
-                for chunk_idx, partial in enumerate(partials):
-                    chunk_ts = partial.get('timestamp', 0)
-                    
-                    if chunk_ts > current_sec:
-                        distance = chunk_ts - current_sec
-                        if distance < min_future_distance:
-                            min_future_distance = distance
-                            best_anchor = 1000000 + i * 1000 + chunk_idx
-                    elif chunk_ts <= current_sec:
-                        if min_future_distance == float('inf'):
-                            distance = current_sec - chunk_ts
-                            if distance < 2.0:
-                                best_anchor = 1000000 + i * 1000 + chunk_idx
-            else:
-                # Fallback: dùng start hoặc start_time
-                seg_start = seg.get('start', seg.get('start_time', 0))
-                if seg_start > current_sec:
-                    distance = seg_start - current_sec
-                    if distance < min_future_distance:
-                        min_future_distance = distance
-                        best_anchor = 1000000 + i * 1000
-                elif seg_start <= current_sec and min_future_distance == float('inf'):
-                    best_anchor = 1000000 + i * 1000
+            seg_start = seg.get('start', seg.get('start_time', 0))
+            seg_end = seg.get('end', seg_start + 1.0)
+            
+            if seg_start <= current_sec <= seg_end:
+                # Segment này chứa current_time
+                candidates.append((i, seg_start, seg_end))
+            elif seg_start > current_sec:
+                # Segment trong tương lai
+                future_candidates.append((i, seg_start, seg_end))
         
-        if best_anchor != -1 and best_anchor != self.current_highlight_index:
-            self.highlight_segment(best_anchor)
+        best_idx = -1
+        
+        if candidates:
+            # Ưu tiên segment có start_time gần với current_time nhất (segment mới bắt đầu)
+            # Nếu current_time nằm trong khoảng 3 giây đầu của segment, ưu tiên segment đó
+            best_candidate = None
+            min_start_diff = float('inf')
+            
+            for idx, start, end in candidates:
+                # Tính khoảng cách từ start_time đến current_time
+                start_diff = current_sec - start
+                
+                # Ưu tiên segment mới bắt đầu (start_diff nhỏ) nhưng vẫn trong vòng 5 giây đầu
+                if start_diff <= 5.0 and start_diff < min_start_diff:
+                    min_start_diff = start_diff
+                    best_candidate = idx
+            
+            # Nếu không có segment nào trong vòng 5 giây đầu, chọn segment có end_time xa nhất
+            if best_candidate is None:
+                max_end = -1
+                for idx, start, end in candidates:
+                    if end > max_end:
+                        max_end = end
+                        best_candidate = idx
+            
+            best_idx = best_candidate
+            
+        elif future_candidates:
+            # Không có segment nào chứa current_time, chọn segment có start_time gần nhất
+            min_future_distance = float('inf')
+            for idx, start, end in future_candidates:
+                distance = start - current_sec
+                if distance < min_future_distance:
+                    min_future_distance = distance
+                    best_idx = idx
+        
+        # Tính anchor_id từ best_idx
+        if best_idx != -1:
+            best_anchor = 1000000 + best_idx * 1000
+            if best_anchor != self.current_highlight_index:
+                self.highlight_segment(best_anchor)
 
     def fmt_ms(self, ms):
         s = int(ms / 1000)
