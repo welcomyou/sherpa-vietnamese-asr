@@ -242,9 +242,11 @@ Giao diện ứng dụng sẽ mở ra với 2 tab chính:
    - Click chuột phải - phân tách, gộp người nói
    - Ví dụ: Nhấn "1" khi người A nói, nhấn "2" khi người B nói
 
-5. **Dừng ghi âm**:
-   - Click "Dừng ghi âm"
-   - Kết quả lưu tự động
+5. **Dừng/Kết thúc ghi âm**:
+   - Click "Dừng" để tạm dừng ghi âm.
+   - Click "Kết thúc" để kết thúc ghi âm.
+   - Click "Xuất file WAV" để lưu thành file WAV kèm JSON (có thể đưa lại vào tab xử lý file để reprocess với độ chính xác ASR cao hơn và bảo toàn phân tách người nói)
+   
 ---
 
 ## 📁 Cấu trúc dự án
@@ -386,6 +388,11 @@ Dự án này sử dụng [MIT License](LICENSE).
 
 ### Audio Quality
 - [DNSMOS](https://github.com/microsoft/DNS-Challenge) - Audio Quality Assessment
+
+
+### Audio Quality
+- [Antigravity] (https://antigravity.google)
+- [KimiCode] (https://www.kimi.com/code)
 
 ---
 ---
