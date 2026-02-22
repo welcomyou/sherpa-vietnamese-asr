@@ -1,0 +1,39 @@
+# Core ASR
+sherpa-onnx>=1.12.0
+
+# Audio Processing
+soundfile>=0.12.0
+librosa>=0.10.0
+pydub>=0.25.0
+sounddevice>=0.4.6
+
+# Deep Learning
+torch>=2.0.0
+transformers>=4.30.0
+onnxruntime>=1.15.0
+huggingface_hub>=0.16.0
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# NLP & Text Processing
+sentence-transformers>=2.2.0
+wtpsplit>=2.1.0
+
+# Speaker Diarization
+speechbrain>=0.5.15
+einops>=0.7.0
+
+# GUI
+PyQt6>=6.5.0
+PyQt6-Qt6>=6.5.0
+
+# Utilities
+psutil>=5.9.0
+matplotlib>=3.7.0
+filelock>=3.12.0
+
+# Build (optional)
+pyinstaller>=6.0.0

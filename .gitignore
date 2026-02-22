@@ -1,0 +1,84 @@
+# Configuration files (user-specific)
+config.ini
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+venv_new/
+.env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python test & cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build & Distribution
+build/
+dist/
+*.spec
+*.egg-info/
+*.egg
+
+# Models (large files - auto-downloaded)
+models/*/
+!models/.gitkeep
+models/dnsmos/*.onnx
+
+# Temp directory
+temp/*
+!temp/.gitkeep
+
+# Logs
+*.log
+
+# Debug output
+debug_output.html
+debug_output.txt
+test_result.txt
+test_mic_results.txt
+
+# Large audio files (test files)
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+!test_audio.wav      # Keep small test file
+
+# Large binary files
+*.exe
+python-embedded.zip
+sherpa-onnx.zip
+sherpa-onnx-prebuilt.zip
+
+# Environment & Libraries
+.envtietkiem/
+Thuvien/
+
+# Agent config
+.agent/
+
+# Project specific
+1hour_qh_10min.asr.json
+output.txt
+
+test*
+debug*
