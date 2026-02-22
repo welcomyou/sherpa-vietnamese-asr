@@ -390,7 +390,7 @@ Dự án này sử dụng [MIT License](LICENSE).
 - [DNSMOS](https://github.com/microsoft/DNS-Challenge) - Audio Quality Assessment
 
 
-### Audio Quality
+### Vide code
 - [Antigravity] (https://antigravity.google)
 - [KimiCode] (https://www.kimi.com/code)
 
