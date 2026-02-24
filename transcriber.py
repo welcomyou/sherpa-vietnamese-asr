@@ -1,10 +1,224 @@
+import logging
 import os
 import re
 import sys
 import time
 import unicodedata
+from difflib import SequenceMatcher
 from PyQt6.QtCore import QThread, pyqtSignal
+
+# Setup logger
+logger = logging.getLogger(__name__)
 from punctuation_restorer_improved import ImprovedPunctuationRestorer
+
+# =============================================================================
+# OVERLAP CHUNKING CONFIGURATION
+# =============================================================================
+OVERLAP_SEC = 2.0  # Overlap duration in seconds (2s = sweet spot)
+OVERLAP_SAMPLES = int(OVERLAP_SEC * 16000)  # 32000 samples @ 16kHz
+MAX_OVERLAP_WORDS = 100  # Nới lỏng thành 100 từ, trành cắt xén rác vì tiếng Việt phát âm đơn âm tiết nhanh
+FUZZY_MATCH_THRESHOLD = 0.8  # Ngưỡng Levenshtein similarity
+MIN_MATCH_RATIO = 0.5  # Ngưỡng tối thiểu để chấp nhận overlap match
+
+
+def normalize_word_for_overlap(word):
+    """Chuẩn hóa từ để so sánh overlap: lowercase, bỏ dấu câu, Unicode NFC."""
+    word = word.lower().strip()
+    word = unicodedata.normalize('NFC', word)
+    word = re.sub(r'[^\w]', '', word, flags=re.UNICODE)
+    return word
+
+
+def words_match(w1, w2, threshold=FUZZY_MATCH_THRESHOLD):
+    """
+    So sánh 2 từ đã normalize.
+    Returns True nếu:
+    - Giống hệt, HOẶC
+    - Một từ chứa từ kia (substring), HOẶC
+    - Levenshtein similarity >= threshold
+    """
+    if w1 == w2:
+        return True
+    if not w1 or not w2:
+        return False
+    # Substring match (cho trường hợp BPE cắt khác nhau)
+    if len(w1) > 2 and len(w2) > 2:
+        if w1 in w2 or w2 in w1:
+            return True
+    # Levenshtein similarity
+    ratio = SequenceMatcher(None, w1, w2).ratio()
+    return ratio >= threshold
+
+
+def find_overlap_alignment(tail_words, head_words):
+    """
+    Tìm alignment tối ưu giữa tail (cuối chunk trước) và head (đầu chunk sau)
+    sử dụng thuật toán LCS (Longest Common Subsequence) kết hợp fuzzy matching.
+    
+    Trả về: (best_cut_index_in_head, action, num_words_to_drop)
+        - best_cut_index_in_head: index đầu tiên trong head_words MÀ KHÔNG thuộc overlap
+        - action: "cut_head", "drop_tail", "drop_head"
+        - num_words_to_drop: Số từ cần pop khỏi merged_words ở chunk trước
+    
+    Nguyên tắc: 
+    Nếu có match đáng kể, nối tiếp.
+    Nếu không có match đáng kể giữa 2 vùng overlap, tiến hành drop bề phía có CONFIDENCE (prob) thấp hơn, tránh lặp lại cùng đoạn âm thanh mà lại bị lệch text.
+    """
+    if not tail_words or not head_words:
+        return 0, "none", 0
+    
+    # Ghi nhận số lượng từ thực sự (nếu drop tail/head sẽ drop toàn bộ số này)
+    original_tail_len = len(tail_words)
+    original_head_len = len(head_words)
+    
+    # Giới hạn số từ để tối ưu hiệu năng (nâng MAX_OVERLAP_WORDS = 100)
+    tail_words_truncated = tail_words[-MAX_OVERLAP_WORDS:]
+    head_words_truncated = head_words[:MAX_OVERLAP_WORDS]
+    
+    tail_normalized = [normalize_word_for_overlap(w["text"]) for w in tail_words_truncated]
+    head_normalized = [normalize_word_for_overlap(w["text"]) for w in head_words_truncated]
+    
+    best_score = 0
+    best_cut_index = 0  # Mặc định: không cắt gì ở head
+    best_pop_count = 0  # Mặc định: không pop từ nào ở tail
+    
+    # Thử tất cả offset có thể: tail bắt đầu khớp với head tại vị trí nào?
+    min_offset = -len(tail_normalized) + 1
+    max_offset = len(head_normalized)
+    
+    for offset in range(min_offset, max_offset):
+        score = 0
+        matched_tail_indices = []
+        matched_head_indices = []
+        
+        for i, tail_w in enumerate(tail_normalized):
+            head_idx = i + offset
+            if 0 <= head_idx < len(head_normalized):
+                if words_match(tail_w, head_normalized[head_idx]):
+                    score += 1
+                    matched_tail_indices.append(i)
+                    matched_head_indices.append(head_idx)
+        
+        # Tính tỉ lệ match dựa trên cửa sổ overlap thực tế
+        overlap_window = min(len(head_normalized), len(tail_normalized) + offset) - max(0, offset)
+        match_ratio = score / max(1, overlap_window)
+        # Bỏ overall_ratio gò bó, thay bằng số lượng từ overlap tối thiểu tương đối
+        
+        if score > best_score and match_ratio >= MIN_MATCH_RATIO:
+            # Điều kiện thêm: nếu match ít, cần phải nằm sát mép (ví dụ đầu mốc)
+            best_score = score
+            best_cut_index = matched_head_indices[-1] + 1
+            # Tính số từ cần pop khỏi original_tail_words
+            # Số từ không match nằm ở cuối: len(tail_truncated) - 1 - match_idx
+            # Cộng thêm phần bị cắt bên ngoài (original - truncated) nếu có
+            truncated_diff = original_tail_len - len(tail_normalized)
+            best_pop_count = (len(tail_normalized) - 1 - matched_tail_indices[-1])
+    
+    # GUARD: Kiểm tra xem có sự khác biệt (divergence) giữa 2 chuỗi không
+    # Nếu hai bên không khớp hoàn hảo trong vùng overlap nhỏ nhất, coi là phân kỳ.
+    min_len = min(len(tail_normalized), len(head_normalized))
+    
+    # Chỉ coi là phân kỳ nếu điểm khớp nhỏ hơn số từ của chuỗi ngắn nhất VÀ có cắt xén rác
+    is_diverged = (best_score < min_len) and (best_pop_count > 0)
+    
+    if best_score == 0 or is_diverged:
+        # Tách riêng phần bị lệch (divergent) để so sánh xác suất
+        # Nếu score == 0, mâu thuẫn là toàn bộ overlap.
+        # Nếu score > 0, mâu thuẫn là đoạn đuôi dư ra sau khớp của Tail và đoạn nằm sau khớp của Head.
+        if best_score == 0:
+            div_tail = tail_words
+            div_head = head_words
+        else:
+            div_tail = tail_words[-best_pop_count:] if best_pop_count > 0 else []
+            div_head = head_words[best_cut_index:] if best_cut_index < len(head_words) else []
+            
+        tail_prob = sum(w.get("prob", 1.0) for w in div_tail) / max(1, len(div_tail))
+        head_prob = sum(w.get("prob", 1.0) for w in div_head) / max(1, len(div_head))
+        
+        # Log chi tiết các từ và xác suất để debug
+        tail_words_str = " ".join([f"{w['text']}({w.get('prob', 1.0):.2f})" for w in div_tail])
+        head_words_str = " ".join([f"{w['text']}({w.get('prob', 1.0):.2f})" for w in div_head])
+        
+        reason = "không có match (score=0)" if best_score == 0 else "đọ phần bị lệch (divergent words)"
+        debug_msg = f"[OVERLAP RESOLVE DEBUG] So sánh xác suất do {reason}:\n"
+        debug_msg += f"  - TAIL (phần lệch cuối chunk trước): AvgProb={tail_prob:.3f} | Words: {tail_words_str}\n"
+        debug_msg += f"  - HEAD (phần lệch đầu chunk sau): AvgProb={head_prob:.3f} | Words: {head_words_str}"
+        print(debug_msg)
+        logger.info(debug_msg)
+        
+        # Nếu tail tự tin vượt trội hơn đoạn đầu chuỗi mới
+        if tail_prob > head_prob:
+            decision_msg = f"[OVERLAP RESOLVE] Quyết định: DROP HEAD (Xóa phần đầu của chunk sau). Tail ({tail_prob:.3f}) > Head ({head_prob:.3f})"
+            print(decision_msg)
+            logger.info(decision_msg)
+            # Xóa phần overlap của head, giữ nguyên chunk trước
+            return len(head_words), "drop_head", 0 
+        else:
+            decision_msg = f"[OVERLAP RESOLVE] Quyết định: DROP TAIL (Xóa tail của chunk trước). Head ({head_prob:.3f}) >= Tail ({tail_prob:.3f})"
+            print(decision_msg)
+            logger.info(decision_msg)
+            return 0, "drop_tail", original_tail_len # Giữ toàn bộ head, xoá TOÀN BỘ tail
+            
+    # Debug khi lặp chữ an toàn (Perfect match)
+    print(f"[OVERLAP RESOLVE] PERFECT MATCH (score={best_score}). Pop {best_pop_count} words from Tail. Cut {best_cut_index} words from Head.")
+    return best_cut_index, "cut_head", best_pop_count
+
+
+def merge_chunks_with_overlap(chunk_results, overlap_duration_sec=OVERLAP_SEC):
+    """
+    Merge danh sách chunk results, loại bỏ text trùng lặp ở vùng overlap.
+    
+    Args:
+        chunk_results: list of dict, mỗi dict chứa:
+            - "words": list of {"text", "start", "end", "local_start", "local_end"}
+            - "audio_start_abs": float (giây tuyệt đối trong file gốc)
+            - "audio_end_abs": float
+            - "overlap_sec": float (thờigian overlap ở đầu chunk)
+        overlap_duration_sec: float, thờigian overlap (giây)
+    
+    Returns:
+        merged_words: list of {"text", "start", "end"} - danh sách words toàn bộ audio
+        merged_text: str - full text đã merge
+    """
+    if not chunk_results:
+        return [], ""
+    
+    merged_words = []
+    
+    for chunk_idx, chunk in enumerate(chunk_results):
+        chunk_words = chunk["words"]
+        
+        if chunk_idx == 0:
+            # Chunk đầu tiên: lấy toàn bộ words
+            merged_words.extend(chunk_words)
+        else:
+            # Chunk từ thứ 2 trở đi: cần xử lý overlap
+            prev_chunk = chunk_results[chunk_idx - 1]
+            prev_words = prev_chunk["words"]
+            
+            # Lấy tail words từ chunk trước (nằm trong vùng overlap)
+            prev_audio_duration = prev_chunk["audio_end_abs"] - prev_chunk["audio_start_abs"]
+            overlap_start_local = prev_audio_duration - overlap_duration_sec
+            tail_words = [w for w in prev_words if w.get("local_start", 0) >= max(0, overlap_start_local)]
+            
+            # Lấy head words từ chunk hiện tại (nằm trong vùng overlap)
+            head_words = [w for w in chunk_words if w.get("local_start", 0) < overlap_duration_sec]
+            
+            # Tìm điểm cắt tối ưu
+            cut_index, action, pop_count = find_overlap_alignment(tail_words, head_words)
+            
+            # Xử lý xoá text hụt (trường hợp tự tin bên chunk mới hơn so với rác bên chunk cũ HOẶC đuôi rác khi có match)
+            if pop_count > 0:
+                print(f"   -> Popping {pop_count} words from merged_words tail")
+                del merged_words[-pop_count:]
+            
+            # Chỉ lấy words SAU điểm cắt (bỏ phần đã trùng)
+            remaining_words = chunk_words[cut_index:] if cut_index < len(chunk_words) else []
+            
+            merged_words.extend(remaining_words)
+    
+    merged_text = " ".join([w["text"] for w in merged_words])
+    return merged_words, merged_text
 
 # sherpa_onnx is imported lazily to ensure DLL paths are set up first
 _sherpa_onnx = None
@@ -65,6 +279,145 @@ def diarization_progress_callback(num_processed_chunk: int, num_total_chunks: in
         QThread.msleep(1)
     
     return 0
+
+
+def split_long_segments(segments: list, max_duration: float = 20.0) -> list:
+    """
+    Chia nhỏ các segment dài thành nhiều segment ngắn hơn dựa trên số từ.
+    
+    Quy tắc chia:
+    - >20s: chia làm 2 phần
+    - >40s: chia làm 3 phần  
+    - >60s: chia làm 4 phần
+    - Cứ thêm 20s thì thêm 1 phần
+    
+    Chia theo số từ (không chia theo thờigian), đảm bảo mỗi phần có số từ đều nhau.
+    Timestamp được tính lại tuyến tính dựa trên số từ.
+    
+    Args:
+        segments: List các segment dict với 'text', 'start', 'end'
+        max_duration: Thờigian tối đa cho mỗi segment (mặc định 20s)
+        
+    Returns:
+        List các segment đã được chia nhỏ
+    """
+    if not segments:
+        return segments
+    
+    result = []
+    
+    for seg in segments:
+        duration = seg.get('end', 0) - seg.get('start', 0)
+        text = seg.get('text', '').strip()
+        
+        # Nếu segment không quá dài, giữ nguyên
+        if duration <= max_duration or not text:
+            result.append(seg)
+            continue
+        
+        # Tính số phần cần chia
+        # >20s -> 2 phần, >40s -> 3 phần, >60s -> 4 phần, ...
+        num_parts = int(duration / max_duration) + 1
+        if duration % max_duration == 0:  # Nếu chia hết, ví dụ 40s -> 2 phần (không phải 3)
+            num_parts = int(duration / max_duration)
+        num_parts = max(2, num_parts)  # Ít nhất chia làm 2 phần
+        
+        # Tách từ
+        words = text.split()
+        total_words = len(words)
+        
+        if total_words == 0:
+            result.append(seg)
+            continue
+        
+        # Nếu số từ ít hơn số phần, không chia
+        if total_words < num_parts:
+            result.append(seg)
+            continue
+        
+        # Tính số từ mỗi phần (chia đều)
+        words_per_part = total_words // num_parts
+        remainder = total_words % num_parts
+        
+        # Lấy raw_words nếu có để gán timestamp chính xác
+        raw_words = seg.get('raw_words', [])
+        total_raw = len(raw_words)
+        
+        # Thờigian mỗi từ (tuyến tính)
+        start_time = seg.get('start', 0)
+        end_time = seg.get('end', 0)
+        time_per_word = (end_time - start_time) / total_words if total_words > 0 else 0
+        
+        # Chia thành các phần
+        word_idx = 0
+        raw_idx = 0
+        
+        for part_idx in range(num_parts):
+            # Phần đầu được thêm phần dư nếu có
+            current_part_words = words_per_part + (1 if part_idx < remainder else 0)
+            
+            if current_part_words == 0:
+                continue
+            
+            # Lấy từ cho phần này
+            part_words = words[word_idx:word_idx + current_part_words]
+            part_text = ' '.join(part_words)
+            
+            if raw_words:
+                raw_per_part = total_raw // num_parts
+                raw_remainder = total_raw % num_parts
+                current_raw_words = raw_per_part + (1 if part_idx < raw_remainder else 0)
+                
+                if current_raw_words > 0 and raw_idx < total_raw:
+                    part_start = raw_words[raw_idx]['start']
+                    last_raw_idx = min(raw_idx + current_raw_words - 1, total_raw - 1)
+                    part_end = raw_words[last_raw_idx]['end']
+                    
+                    # Truyền raw_words tương ứng cho part này
+                    part_raw_words = raw_words[raw_idx:last_raw_idx + 1]
+                    raw_idx += current_raw_words
+                else:
+                    part_start = start_time + word_idx * time_per_word
+                    part_end = start_time + (word_idx + current_part_words) * time_per_word
+                    part_raw_words = []
+            else:
+                # Tính timestamp tuyến tính
+                part_start = start_time + word_idx * time_per_word
+                part_end = start_time + (word_idx + current_part_words) * time_per_word
+                part_raw_words = []
+            
+            # Đảm bảo phần đầu và cuối cùng không vượt qua biên giới gốc của segment
+            if part_end > end_time:
+                part_end = end_time
+            if part_start < start_time:
+                part_start = start_time
+                
+            # Đảm bảo tính nhất quán giữa các part, part kế tiếp không bắt đầu trước part hiện tại kết thúc
+            if part_idx > 0 and part_start < result[-1]['end']:
+                part_start = result[-1]['end']
+                if part_end < part_start:
+                    part_end = part_start + 0.1
+            
+            part_seg = {
+                'text': part_text,
+                'start': round(part_start, 3),
+                'end': round(part_end, 3)
+            }
+            # Không gán raw_words để tránh nặng bộ nhớ
+            # if part_raw_words:
+            #     part_seg['raw_words'] = part_raw_words
+                
+            # Copy các thuộc tính khác
+            for k, v in seg.items():
+                if k not in ['text', 'start', 'end', 'raw_words']:
+                    part_seg[k] = v
+                    
+            result.append(part_seg)
+            
+            word_idx += current_part_words
+    
+    return result
+
 
 class TranscriberThread(QThread):
     progress = pyqtSignal(str) # Emits log messages
@@ -245,6 +598,10 @@ class TranscriberThread(QThread):
             segment_samples = 16000 * segment_duration
             total_samples = len(audio)
             
+            # Sử dụng overlap configuration đã định nghĩa ở đầu file
+            overlap_sec = OVERLAP_SEC
+            overlap_samples = OVERLAP_SAMPLES
+            
             # Find silent positions for smart splitting
             def find_silent_regions(audio_data, sample_rate=16000, threshold=0.01, min_silence_duration=0.3):
                 """Find silent regions in audio. Returns list of (start_sample, end_sample).
@@ -330,14 +687,26 @@ class TranscriberThread(QThread):
             segment_boundaries.append(total_samples)  # End at total length
             num_segments = len(segment_boundaries) - 1
             
-            full_text_parts = []
-            all_words = [] # List of {"text": str, "start": float, "end": float}
+            # Lưu kết quả mỗi chunk để merge overlap sau
+            chunk_results = []
 
             self.progress.emit(f"PHASE:Transcription|Đang chuyển thành văn bản|0")
             
             for i in range(num_segments):
-                start_sample = segment_boundaries[i]
-                end_sample = segment_boundaries[i + 1]
+                # Tính vùng audio CÓ OVERLAP
+                logical_start = segment_boundaries[i]
+                logical_end = segment_boundaries[i + 1]
+                
+                if i == 0:
+                    # Chunk đầu: không có overlap phía trước
+                    actual_start = logical_start
+                    overlap_at_start = 0
+                else:
+                    # Chunk từ thứ 2: thêm overlap phía trước
+                    actual_start = max(0, logical_start - overlap_samples)
+                    overlap_at_start = logical_start - actual_start
+                
+                actual_end = logical_end
                 
                 # Check cancellation
                 if not self.is_running:
@@ -346,7 +715,7 @@ class TranscriberThread(QThread):
                 # Create a NEW stream for each segment to reset context/memory
                 s = recognizer.create_stream()
                 
-                chunk = audio[start_sample:end_sample]
+                chunk = audio[actual_start:actual_end]
                 s.accept_waveform(16000, chunk)
                 recognizer.decode_stream(s)
                 
@@ -356,33 +725,107 @@ class TranscriberThread(QThread):
                 if segment_text:
                     # Zipformer output is uppercase, normalize it
                     segment_text = segment_text.lower()
-                    full_text_parts.append(segment_text)
                     
                     # Process timestamps if available
+                    chunk_words = []
                     if hasattr(result, 'timestamps') and hasattr(result, 'tokens'):
                         ts = result.timestamps
                         toks = result.tokens
                         
                         # Calculate time offset for this chunk (in seconds)
-                        time_offset = start_sample / 16000
+                        time_offset = actual_start / 16000
                         
+                        # Grab log probabilities if available
+                        ys_log_probs = getattr(result, 'ys_log_probs', None)
+                        
+                        import math
                         for j, (t_val, tok) in enumerate(zip(ts, toks)):
-                            start_abs = t_val + time_offset
-                            
-                            # Estimate end time using next token or arbitrary duration (e.g. 0.3s)
+                            local_start = t_val
                             if j < len(ts) - 1:
-                                end_abs = ts[j+1] + time_offset
+                                local_end = ts[j + 1]
                             else:
-                                end_abs = start_abs + 0.3 # default duration for last token
+                                local_end = local_start + 0.3  # default duration for last token
+                            
+                            if ys_log_probs is not None and j < len(ys_log_probs):
+                                prob = math.exp(ys_log_probs[j])
+                            else:
+                                prob = 1.0
+                            
+                            # Timestamp tuyệt đối trong file gốc
+                            abs_start = local_start + time_offset
+                            abs_end = local_end + time_offset
                             
                             # Normalize token
                             tok_display = tok.lower()
                             
-                            all_words.append({
-                                "text": tok_display, 
-                                "start": start_abs, 
-                                "end": end_abs
+                            chunk_words.append({
+                                "text": tok_display,
+                                "start": abs_start,
+                                "end": abs_end,
+                                "local_start": local_start,
+                                "local_end": local_end,
+                                "prob": prob
                             })
+                    
+                    # === XỬ LÝ MERGE BPE NGAY TẠI ĐÂY CHO TỪNG CHUNK ===
+                    merged_chunk_words = []
+                    current_word = None
+                    for tok_info in chunk_words:
+                        tok = tok_info["text"]
+                        # Xử lý cả 2 loại space phổ biến U+0020 và U+2581
+                        if tok.startswith(" ") or tok.startswith("\u2581"):
+                            if current_word is not None:
+                                current_word["prob"] = sum(current_word["probs"]) / len(current_word["probs"])
+                                merged_chunk_words.append(current_word)
+                            current_word = {
+                                "text": tok.lstrip(" ").lstrip("\u2581"),
+                                "start": tok_info["start"],
+                                "end": tok_info["end"],
+                                "local_start": tok_info["local_start"],
+                                "local_end": tok_info["local_end"],
+                                "probs": [tok_info.get("prob", 1.0)]
+                            }
+                        else:
+                            if current_word is not None:
+                                current_word["text"] += tok
+                                current_word["end"] = tok_info["end"]
+                                current_word["local_end"] = tok_info["local_end"]
+                                current_word["probs"].append(tok_info.get("prob", 1.0))
+                            else:
+                                current_word = {
+                                    "text": tok,
+                                    "start": tok_info["start"],
+                                    "end": tok_info["end"],
+                                    "local_start": tok_info["local_start"],
+                                    "local_end": tok_info["local_end"],
+                                    "probs": [tok_info.get("prob", 1.0)]
+                                }
+                    if current_word is not None:
+                        current_word["prob"] = sum(current_word["probs"]) / len(current_word["probs"])
+                        merged_chunk_words.append(current_word)
+                    
+                    # Update lại danh sách words đã merge BPE
+                    chunk_words = merged_chunk_words
+                    
+                    # Cập nhật segment_text từ chunk_words đã merge
+                    segment_text = " ".join(w["text"] for w in chunk_words)
+                    
+                    chunk_results.append({
+                        "text": segment_text,
+                        "words": chunk_words,
+                        "audio_start_abs": actual_start / 16000.0,
+                        "audio_end_abs": actual_end / 16000.0,
+                        "overlap_sec": overlap_at_start / 16000.0,
+                    })
+                else:
+                    # Nếu chunk không có text, vẫn lưu để giữ đúng thứ tự
+                    chunk_results.append({
+                        "text": "",
+                        "words": [],
+                        "audio_start_abs": actual_start / 16000.0,
+                        "audio_end_abs": actual_end / 16000.0,
+                        "overlap_sec": overlap_at_start / 16000.0,
+                    })
                 
                 # Update progress for transcription phase (0% -> 100%)
                 percent = int((i + 1) / num_segments * 100)
@@ -391,67 +834,15 @@ class TranscriberThread(QThread):
                 # Explicit delete to help GC
                 del s
             
-            full_text = " ".join(full_text_parts)
+            # Merge chunks với overlap handling
+            all_words, full_text = merge_chunks_with_overlap(chunk_results, overlap_sec)
             
             # Post-processing for Zipformer output (often lower cased and generic)
             # Zipformer output for Vietnamese might need basic formatting
             if full_text:
                 full_text = full_text.capitalize()
             
-            # --- MERGE BPE TOKENS INTO WORDS ---
-            # Sherpa-ONNX trả về BPE tokens (e.g., " kính", "thưa", " đồng")
-            # Tokens bắt đầu bằng SPACE -> word mới
-            # Cần gộp thành words hoàn chỉnh để alignment chính xác
-            def merge_tokens_to_words(tokens_list):
-                """Merge BPE tokens into complete words.
-                
-                Sherpa-ONNX convention: SPACE prefix indicates start of new word.
-                Example: [' kính', 'thưa', ' đồng'] -> ['kính', 'thưa', 'đồng']
-                """
-                if not tokens_list:
-                    return []
-                
-                merged = []
-                current_word = None
-                
-                for tok_info in tokens_list:
-                    tok = tok_info["text"]
-                    # Token bắt đầu bằng SPACE -> bắt đầu word mới
-                    if tok.startswith(" "):
-                        # Lưu word cũ nếu có
-                        if current_word is not None:
-                            merged.append(current_word)
-                        # Tạo word mới (bỏ space prefix)
-                        current_word = {
-                            "text": tok.lstrip(" "),
-                            "start": tok_info["start"],
-                            "end": tok_info["end"]
-                        }
-                    else:
-                        # Nối vào word hiện tại
-                        if current_word is not None:
-                            current_word["text"] += tok
-                            current_word["end"] = tok_info["end"]
-                        else:
-                            # Edge case: token đầu tiên không có space
-                            current_word = {
-                                "text": tok,
-                                "start": tok_info["start"],
-                                "end": tok_info["end"]
-                            }
-                
-                # Đừng quên word cuối cùng
-                if current_word is not None:
-                    merged.append(current_word)
-                
-                return merged
-            
-            # Thực hiện merge
-            if all_words:
-                original_count = len(all_words)
-                all_words = merge_tokens_to_words(all_words)
-                merged_count = len(all_words)
-                print(f"[Transcriber] Merged {original_count} BPE tokens into {merged_count} words")
+            print(f"[Transcriber] Merged chunks into {len(all_words)} words")
             
             transcription_end_time = time.time()
             timing_details["transcription"] = transcription_end_time - start_time - timing_details["upload_convert"]
@@ -702,48 +1093,44 @@ class TranscriberThread(QThread):
                         if match_start is not None:
                             start_t = all_words[match_start]['start']
                             end_t = all_words[match_end]['end']
+                            seg_words = all_words[match_start:match_end + 1]
                             current_word_idx = match_end + 1
                         else:
-                            # Fallback: tìm từ đầu tiên bằng cách đơn giản
+                            # Fallback: không tìm thấy nguyên chuỗi khớp, tìm theo từ đầu tiên
                             first_word = normalize_word(sent_words_clean[0]) if sent_words_clean else ""
                             temp_idx = current_word_idx
+                            seg_words = []
+                            found_first = False
                             while temp_idx < len(all_words):
                                 asr_word = normalize_word(all_words[temp_idx]['text'])
-                                if first_word in asr_word or asr_word in first_word:
-                                    start_t = all_words[temp_idx]['start']
-                                    # Estimate end dựa trên số từ và duration trung bình
-                                    # Sử dụng median duration từ các words đã match trước đó nếu có
-                                    if current_word_idx > 0 and all_words:
-                                        # Tính trung bình duration của các words đã qua
-                                        past_durations = [
-                                            all_words[k]['end'] - all_words[k]['start'] 
-                                            for k in range(min(current_word_idx, len(all_words)))
-                                            if all_words[k]['end'] > all_words[k]['start']
-                                        ]
-                                        avg_word_duration = sum(past_durations) / len(past_durations) if past_durations else 0.3
-                                    else:
-                                        avg_word_duration = 0.3
-                                    
-                                    estimated_duration = len(sent_words_clean) * avg_word_duration
-                                    end_t = min(start_t + estimated_duration, 
-                                               all_words[-1]['end'] if all_words else start_t + 1.0)
-                                    # NHẢY ĐÚNG SỐ TỪ để tránh overlap với câu sau
-                                    current_word_idx = min(temp_idx + len(sent_words_clean), len(all_words))
+                                if first_word and (first_word in asr_word or asr_word in first_word):
+                                    found_first = True
                                     break
                                 temp_idx += 1
-                            
-                            if start_t == -1:
-                                # Last resort fallback - đảm bảo không quay lại vị trí cũ
+                                
+                            if found_first:
+                                # Nhảy đúng số từ của câu để lấy đoạn raw_words
+                                end_idx = min(temp_idx + len(sent_words_clean) - 1, len(all_words) - 1)
+                                start_t = all_words[temp_idx]['start']
+                                end_t = all_words[end_idx]['end']
+                                seg_words = all_words[temp_idx:end_idx + 1]
+                                current_word_idx = end_idx + 1
+                            else:
+                                # Last resort fallback: Nếu không khớp chữ nào, gán đại đoạn tiếp theo có số lượng từ tương ứng
                                 fallback_idx = min(current_word_idx, len(all_words)-1) if all_words else 0
+                                end_idx = min(fallback_idx + len(sent_words_clean) - 1, len(all_words)-1) if all_words else 0
+                                
                                 start_t = all_words[fallback_idx]['start'] if all_words else 0.0
-                                end_t = start_t + 1.0
-                                # Vẫn nhảy current_word_idx để tránh câu sau bị lặp
-                                current_word_idx = min(current_word_idx + len(sent_words_clean), len(all_words))
+                                end_t = all_words[end_idx]['end'] if all_words else 0.0
+                                
+                                seg_words = all_words[fallback_idx:end_idx + 1] if all_words else []
+                                current_word_idx = end_idx + 1
 
                         final_segments.append({
                             "text": sent,
                             "start": start_t,
-                            "end": end_t
+                            "end": end_t,
+                            "raw_words": seg_words
                         })
                         
                         # Emit progress mỗi 10%
@@ -754,7 +1141,34 @@ class TranscriberThread(QThread):
                     
                     # Kết thúc đo thờigian alignment
                     timing_details["alignment"] = time.time() - align_start
-
+                    
+                    # Fix lỗi thời gian kết thúc vượt quá thời gian bắt đầu của câu kế tiếp
+                    if final_segments:
+                        for i in range(len(final_segments) - 1):
+                            next_start = final_segments[i+1]['start']
+                            # Nếu kết thúc vượt quá bắt đầu câu sau -> ép bằng
+                            if final_segments[i]['end'] > next_start:
+                                final_segments[i]['end'] = next_start
+                            # Ép luôn các từ bên trong (nếu có)
+                            if 'raw_words' in final_segments[i]:
+                                for w in final_segments[i]['raw_words']:
+                                    if w['end'] > next_start:
+                                        w['end'] = next_start
+                                    if w['start'] > next_start:
+                                        w['start'] = next_start
+                    # Chia nhỏ các segment dài (>20s) theo số từ
+                    if final_segments:
+                        original_count = len(final_segments)
+                        final_segments = split_long_segments(final_segments, max_duration=20.0)
+                        new_count = len(final_segments)
+                        if new_count > original_count:
+                            logger.info(f"Đã chia nhỏ {original_count} segment thành {new_count} segment (các segment >20s)")
+                        
+                        # Xóa raw_words sau khi split xong để tránh làm bộ nhớ và UI cồng kềnh
+                        for seg in final_segments:
+                            if 'raw_words' in seg:
+                                del seg['raw_words']
+                
                 except Exception as e:
                      self.progress.emit(f"Lỗi khi thêm dấu câu: {e}")
                      import traceback

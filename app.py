@@ -59,7 +59,7 @@ from tab_live import LiveProcessingTab
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Lightweight ASR")
+        self.setWindowTitle("sherpa-vietnamese-asr")
         self.resize(950, 750)
         
         # Flag to prevent saving config during initialization
@@ -495,7 +495,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # Tiêu đề
-        title = QLabel("<h2 style='color: #007bff; margin-bottom: 10px;'>Lightweight ASR</h2>")
+        title = QLabel("<h2 style='color: #007bff; margin-bottom: 10px;'>sherpa-vietnamese-asr</h2>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
