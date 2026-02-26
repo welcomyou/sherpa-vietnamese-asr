@@ -18,7 +18,7 @@ def get_torch():
     return _torch
 
 class ImprovedPunctuationRestorer:
-    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu"):  # Tăng confidence từ -0.5 lên 0.3
+    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu", case_confidence=0.0): 
         self.device = device
         self.model_name = model_name
         self.confidence = confidence
@@ -40,8 +40,12 @@ class ImprovedPunctuationRestorer:
             vocab_path=vocab_path,
             model_paths=[model_to_load],
             split_chunk=True,
+            chunk_size=48,
+            overlap_size=12,
+            max_len=64,
             device=device,
-            confidence=confidence
+            confidence=confidence,
+            case_confidence=case_confidence
         )
         
         if self.device == "cpu":
@@ -55,7 +59,7 @@ class ImprovedPunctuationRestorer:
                 del model
                 gc.collect()
     
-    def restore(self, text):
+    def restore(self, text, progress_callback=None):
         """Thêm dấu với post-processing để tăng độ chính xác."""
         if not text or not text.strip():
             return ""
@@ -63,7 +67,7 @@ class ImprovedPunctuationRestorer:
         try:
             torch = get_torch()
             with torch.no_grad():
-                results = self.gec_model(text)
+                results = self.gec_model(text, progress_callback=progress_callback)
             
             if isinstance(results, list):
                 result = results[0]
@@ -127,6 +131,11 @@ class ImprovedPunctuationRestorer:
         
         # 8. Chuẩn hóa khoảng trắng
         text = re.sub(r'\s+', ' ', text)
+        
+        # 9. Viết hoa chữ cái đầu và sau dấu chấm câu (an toàn thủ công)
+        def capitalize_match(match):
+            return match.group(1) + match.group(2).upper()
+        text = re.sub(r'(^|[.!?]\s+)([^\W_])', capitalize_match, text)
         
         return text.strip()
     

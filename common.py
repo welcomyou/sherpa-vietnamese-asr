@@ -173,7 +173,7 @@ class DragDropLabel(QLabel):
 
     def setDefaultText(self):
         self.has_file = False
-        self.setText("📁 Kéo thả file âm thanh (mp3, wav, m4a, ogg, wma, flac, aac) hoặc bấm để chọn")
+        self.setText("📁 Kéo thả file âm thanh/video (mp3, wav, m4a, mp4, mkv, avi...) hoặc bấm để chọn")
         self.setToolTip("")
 
     def setFileText(self, filename):
@@ -1136,13 +1136,13 @@ MODEL_DOWNLOAD_INFO = {
         "name": "Zipformer-30M-RNNT-6000h",
         "hf_url": "https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h",
         "description": "Model ASR nhẹ, nhanh",
-        "files": ["encoder-epoch-20-avg-10.int8.onnx"]
+        "files": ["encoder-epoch-20-avg-10.onnx", "decoder-epoch-20-avg-10.onnx", "joiner-epoch-20-avg-10.onnx"]
     },
     "zipformer-30m-rnnt-streaming-6000h": {
         "name": "Zipformer-30M-RNNT-Streaming-6000h",
         "hf_url": "https://huggingface.co/hynt/Zipformer-30M-RNNT-Streaming-6000h",
         "description": "Model ASR streaming cho thu âm trực tiếp (chunk 64)",
-        "files": ["encoder-epoch-20-avg-10-chunk-64-left-128.int8.onnx"]
+        "files": ["encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx", "decoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx", "joiner-epoch-31-avg-11-chunk-64-left-128.fp16.onnx"]
     },
     "sat-12l-sm": {
         "name": "SAT (Segment Any Text)",

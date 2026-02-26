@@ -20,7 +20,6 @@ scikit-learn>=1.3.0
 
 # NLP & Text Processing
 sentence-transformers>=2.2.0
-wtpsplit>=2.1.0
 
 # Speaker Diarization
 speechbrain>=0.5.15

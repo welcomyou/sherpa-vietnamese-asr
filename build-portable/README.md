@@ -45,15 +45,14 @@ Script sẽ:
 - Đặt vào đúng thư mục `models/`
 
 Danh sách models:
-1. `sherpa-onnx-zipformer-vi-2025-04-20` - ASR chính
-2. `zipformer-30m-rnnt-6000h` - ASR nhẹ
+1. `sherpa-onnx-zipformer-vi-2025-04-20` - ASR
+2. `zipformer-30m-rnnt-6000h` - ASR
 3. `zipformer-30m-rnnt-streaming-6000h` - ASR streaming
-4. `sat-12l-sm` - Tách câu
-5. `vibert-capu` - Thêm dấu câu
-6. `nemo_en_titanet_small` - Speaker embedding
-7. `eres2netv2_zh` - Speaker embedding (ZH+EN)
-8. `sherpa-onnx-pyannote-segmentation-3-0` - Voice segmentation
-9. `dnsmos` - Audio quality assessment
+4. `vibert-capu` - Thêm dấu câu
+5. `nemo_en_titanet_small` - Speaker embedding
+6. `eres2netv2_zh` - Speaker embedding (ZH+EN)
+7. `sherpa-onnx-pyannote-segmentation-3-0` - Voice segmentation
+8. `dnsmos` - Audio quality assessment
 
 > ⏱️ Thờigian: 10-30 phút tùy tốc độ mạng (tổng ~2GB)
 
@@ -78,15 +77,15 @@ Script sẽ:
 
 > ⏱️ Thờigian: 5-10 phút
 
-Kết quả sẽ nằm tại: `dist/Lightweight_ASR/`
+Kết quả sẽ nằm tại: `dist/sherpa-vietnamese-asr/`
 
 ---
 
 ## 📁 Cấu trúc sau khi build
 
 ```
-dist/Lightweight_ASR/
-├── Lightweight_ASR.bat     # ← File chạy chính (double-click vào đây)
+dist/sherpa-vietnamese-asr/
+├── sherpa-vietnamese-asr.bat     # ← File chạy chính (double-click vào đây)
 ├── python/                 # Python embedded runtime
 │   ├── python.exe
 │   └── Lib/site-packages/  # Thư viện đã cài
@@ -103,11 +102,11 @@ dist/Lightweight_ASR/
 
 Sau khi build xong:
 
-1. Vào thư mục `dist/Lightweight_ASR/`
-2. **Double-click file `Lightweight_ASR.bat`**
+1. Vào thư mục `dist/sherpa-vietnamese-asr/`
+2. **Double-click file `build.bat`**
 3. Ứng dụng sẽ khởi động
 
-> **Lưu ý**: Không cần cài Python trên máy đích. Copy cả folder `Lightweight_ASR/` sang máy khác vẫn chạy được.
+> **Lưu ý**: Không cần cài Python trên máy đích. Copy cả folder `sherpa-vietnamese-asr/` sang máy khác vẫn chạy được.
 
 ---
 
@@ -140,7 +139,7 @@ rmdir /s /q dist
 build-portable/build.bat
 ```
 
-### Lỗi khi chạy Lightweight_ASR.bat
+### Lỗi khi chạy sherpa-vietnamese-asr.bat
 
 1. Kiểm tra file `python/python.exe` có tồn tại không
 2. Kiểm tra Windows Defender có chặn không

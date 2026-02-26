@@ -163,7 +163,7 @@ class StreamingASRThread(QThread):
         self.silence_frames = 0
         self.speech_frames = 0
         self.max_silence_chunks = int(0.6 / 0.05) # ~12 chunks = 0.6s
-        self.max_speech_duration = 15.0 # seconds (Reduced to 15s to avoid lag)
+        self.max_speech_duration = 12.0 # seconds (Reduced to 12s)
         self.current_speech_duration = 0.0
         
         # For partial results
@@ -241,7 +241,8 @@ class StreamingASRThread(QThread):
                 num_threads=1,
                 sample_rate=16000,
                 feature_dim=80,
-                decoding_method="greedy_search"
+                decoding_method="modified_beam_search",
+                max_active_paths=8
             )
             
             print("[StreamingASR] Model loaded.")

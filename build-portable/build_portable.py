@@ -21,13 +21,13 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 
 # Configuration
 VENV_DIR = PROJECT_ROOT / ".envtietkiem"
-DIST_DIR = PROJECT_ROOT / "dist" / "Lightweight_ASR"
+DIST_DIR = PROJECT_ROOT / "dist" / "sherpa-vietnamese-asr"
 BUILD_DIR = PROJECT_ROOT / "build"
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed-amd64.zip"
 
 # Source files to copy (relative to project root)
 SOURCE_FILES = [
-    "app.py", "transcriber.py", "speaker_diarization.py", "sat_segmenter.py",
+    "app.py", "transcriber.py", "speaker_diarization.py",
     "punctuation_restorer_improved.py", "gec_model.py", "modeling_seq2labels.py",
     "configuration_seq2labels.py", "vocabulary.py", "utils.py",
     "common.py", "tab_file.py", "tab_live.py", "audio_analyzer.py",
@@ -316,14 +316,14 @@ set "PATH=%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%PATH%"
 exit /b %errorlevel%
 '''
     
-    launcher_path = DIST_DIR / "Lightweight_ASR.bat"
+    launcher_path = DIST_DIR / "sherpa-vietnamese-asr.bat"
     launcher_path.write_text(bat_content, encoding='utf-8')
     
     # Create README
     readme = '''ASR-VN Portable
 ===============
 
-Run: Double-click Lightweight_ASR.bat
+Run: Double-click sherpa-vietnamese-asr.bat
 
 Requirements:
 - Windows 10/11 64-bit
@@ -334,11 +334,11 @@ Folder structure:
 - models/           : AI models
 - vocabulary/       : Vocabulary data
 - *.py              : Source code
-- Lightweight_ASR.bat : Launcher
+- sherpa-vietnamese-asr.bat : Launcher
 '''
     (DIST_DIR / "README.txt").write_text(readme, encoding='utf-8')
     
-    print(f"[OK] Launcher created: Lightweight_ASR.bat")
+    print(f"[OK] Launcher created: sherpa-vietnamese-asr.bat")
 
 
 def clean_build():
@@ -400,7 +400,7 @@ def main():
         print("BUILD SUCCESS!")
         print("="*60)
         print(f"Location: {DIST_DIR.absolute()}")
-        print(f"Run:      {DIST_DIR / 'Lightweight_ASR.bat'}")
+        print(f"Run:      {DIST_DIR / 'sherpa-vietnamese-asr.bat'}")
         print(f"Size:     {calculate_size():.2f} GB")
         print()
         print("You can zip the folder and distribute it.")

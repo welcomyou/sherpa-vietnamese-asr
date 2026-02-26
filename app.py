@@ -96,9 +96,8 @@ class MainWindow(QMainWindow):
             config['FileSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
                 'cpu_threads': '4',
-                'punctuation_confidence_slider': '4',
-                'sat_threshold': '3',
-                'sat_paragraph_threshold': '3',
+                'punctuation_confidence_slider': '7',
+                'case_confidence_slider': '3',
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
@@ -120,9 +119,8 @@ class MainWindow(QMainWindow):
             config['FileSettings'] = {
                 'model': old.get('model', 'a-little-better-model'),
                 'cpu_threads': old.get('cpu_threads', '4'),
-                'punctuation_confidence_slider': old.get('punctuation_confidence_slider', '4'),
-                'sat_threshold': old.get('sat_threshold', '3'),
-                'sat_paragraph_threshold': old.get('sat_paragraph_threshold', '3'),
+                'punctuation_confidence_slider': old.get('punctuation_confidence_slider', '7'),
+                'case_confidence_slider': old.get('case_confidence_slider', '3'),
                 'speaker_diarization': old.get('speaker_diarization', 'True'),
                 'show_speaker_labels': old.get('show_speaker_labels', 'True'),
                 'num_speakers': old.get('num_speakers', '0'),
@@ -144,9 +142,8 @@ class MainWindow(QMainWindow):
             config['FileSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
                 'cpu_threads': '4',
-                'punctuation_confidence_slider': '4',
-                'sat_threshold': '3',
-                'sat_paragraph_threshold': '3',
+                'punctuation_confidence_slider': '7',
+                'case_confidence_slider': '3',
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
@@ -186,8 +183,7 @@ class MainWindow(QMainWindow):
             # Block signals to prevent saving during initialization
             widgets_to_block = [
                 file_tab.combo_model, file_tab.slider_threads, file_tab.slider_punct_conf,
-                file_tab.slider_sat_threshold, file_tab.slider_sat_para_threshold,
-                file_tab.check_speaker_diarization, file_tab.check_show_speaker_labels,
+                file_tab.slider_case_conf, file_tab.check_speaker_diarization, file_tab.check_show_speaker_labels,
                 file_tab.spin_num_speakers, file_tab.combo_speaker_model, file_tab.check_save_ram,
                 file_tab.slider_diarization_threshold
             ]
@@ -204,17 +200,13 @@ class MainWindow(QMainWindow):
                 file_tab.slider_threads.setValue(threads)
                 file_tab.label_threads.setText(str(threads))
                 
-                punct_conf = file_settings.getint('punctuation_confidence_slider', 4)
+                punct_conf = file_settings.getint('punctuation_confidence_slider', 7)
                 file_tab.slider_punct_conf.setValue(punct_conf)
                 file_tab.on_punct_conf_changed(punct_conf)
                 
-                sat_threshold = file_settings.getint('sat_threshold', 3)
-                file_tab.slider_sat_threshold.setValue(sat_threshold)
-                file_tab.on_sat_threshold_changed(sat_threshold)
-                
-                sat_para_threshold = file_settings.getint('sat_paragraph_threshold', 3)
-                file_tab.slider_sat_para_threshold.setValue(sat_para_threshold)
-                file_tab.on_sat_para_threshold_changed(sat_para_threshold)
+                case_conf = file_settings.getint('case_confidence_slider', 3)
+                file_tab.slider_case_conf.setValue(case_conf)
+                file_tab.on_case_conf_changed(case_conf)
                 
                 speaker_diarization = file_settings.getboolean('speaker_diarization', True)
                 file_tab.check_speaker_diarization.setChecked(speaker_diarization)
@@ -303,8 +295,7 @@ class MainWindow(QMainWindow):
             'model': model,
             'cpu_threads': str(file_tab.slider_threads.value()),
             'punctuation_confidence_slider': str(file_tab.slider_punct_conf.value()),
-            'sat_threshold': str(file_tab.slider_sat_threshold.value()),
-            'sat_paragraph_threshold': str(file_tab.slider_sat_para_threshold.value()),
+            'case_confidence_slider': str(file_tab.slider_case_conf.value()),
             'speaker_diarization': str(file_tab.check_speaker_diarization.isChecked()),
             'show_speaker_labels': str(file_tab.check_show_speaker_labels.isChecked()),
             'num_speakers': str(num_speakers),
@@ -445,8 +436,7 @@ class MainWindow(QMainWindow):
         file_tab.combo_model.currentIndexChanged.connect(self.save_file_config)
         file_tab.slider_threads.valueChanged.connect(self.save_file_config)
         file_tab.slider_punct_conf.valueChanged.connect(self.save_file_config)
-        file_tab.slider_sat_threshold.valueChanged.connect(self.save_file_config)
-        file_tab.slider_sat_para_threshold.valueChanged.connect(self.save_file_config)
+        file_tab.slider_case_conf.valueChanged.connect(self.save_file_config)
         file_tab.check_speaker_diarization.stateChanged.connect(self.save_file_config)
         file_tab.check_show_speaker_labels.stateChanged.connect(self.save_file_config)
         file_tab.spin_num_speakers.currentIndexChanged.connect(self.save_file_config)

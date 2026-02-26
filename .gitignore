@@ -82,3 +82,8 @@ output.txt
 
 test*
 debug*
+__pycache__/*
+amthanhhoitruong.asr.json
+amthanhhoitruong.txt
+*.bak
+*.dll

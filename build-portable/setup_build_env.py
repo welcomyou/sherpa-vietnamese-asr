@@ -55,9 +55,7 @@ def install_packages():
         "huggingface_hub",
         "scipy",
         "numba",
-        "wtpsplit",
         "sentence-transformers",
-        "rapidfuzz",
     ]
     
     # Upgrade pip first
@@ -111,7 +109,6 @@ import soundfile
 import PyQt6
 import psutil
 import sherpa_onnx
-import wtpsplit
 print("All imports OK!")
 print(f"numpy: {numpy.__version__}")
 print(f"torch: {torch.__version__}")

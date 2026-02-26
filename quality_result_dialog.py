@@ -55,9 +55,9 @@ def get_dnsmos_label(score: float) -> str:
 def get_confidence_color(confidence: float) -> str:
     if confidence >= 0.85:
         return COLOR_GOOD
-    elif confidence >= 0.70:
+    elif confidence >= 0.75:
         return COLOR_OK
-    elif confidence >= 0.50:
+    elif confidence >= 0.60:
         return COLOR_MEDIUM
     else:
         return COLOR_BAD
@@ -65,10 +65,10 @@ def get_confidence_color(confidence: float) -> str:
 
 def get_confidence_label(confidence: float) -> str:
     if confidence >= 0.85:
+        return "Xuất sắc"
+    elif confidence >= 0.75:
         return "Tốt"
-    elif confidence >= 0.70:
-        return "Khá"
-    elif confidence >= 0.50:
+    elif confidence >= 0.60:
         return "Trung bình"
     else:
         return "Kém"

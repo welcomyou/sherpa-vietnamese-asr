@@ -266,11 +266,12 @@ class FileProcessingTab(QWidget):
         punct_conf_layout.addWidget(self.label_punct_conf)
         form_config.addRow("Mức độ thêm dấu:", punct_conf_layout)
         
-        # SAT Threshold Slider
-        self.slider_sat_threshold = QSlider(Qt.Orientation.Horizontal)
-        self.slider_sat_threshold.setRange(1, 10)
-        self.slider_sat_threshold.setValue(3)
-        self.slider_sat_threshold.setStyleSheet(f"""
+        # Casing Confidence Slider
+        self.slider_case_conf = QSlider(Qt.Orientation.Horizontal)
+        self.slider_case_conf.setRange(1, 10)
+        self.slider_case_conf.setValue(3)
+        self.slider_case_conf.setEnabled(True)
+        self.slider_case_conf.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 border: 1px solid {COLORS['border']};
                 height: 6px;
@@ -288,46 +289,16 @@ class FileProcessingTab(QWidget):
                 border-radius: 3px;
             }}
         """)
-        self.label_sat_threshold = QLabel("0.3")
-        self.label_sat_threshold.setStyleSheet(f"color: {COLORS['text_secondary']}; min-width: 30px; padding-bottom: 4px;")
-        self.slider_sat_threshold.valueChanged.connect(self.on_sat_threshold_changed)
+        self.label_case_conf = QLabel("Ít")
+        self.label_case_conf.setStyleSheet(f"color: {COLORS['text_secondary']}; min-width: 30px; padding-bottom: 4px;")
+        self.slider_case_conf.valueChanged.connect(self.on_case_conf_changed)
         
-        sat_thresh_layout = QHBoxLayout()
-        sat_thresh_layout.addWidget(self.slider_sat_threshold)
-        sat_thresh_layout.addWidget(self.label_sat_threshold)
-        form_config.addRow("Ngưỡng tách câu (SAT):", sat_thresh_layout)
+        case_conf_layout = QHBoxLayout()
+        case_conf_layout.addWidget(self.slider_case_conf)
+        case_conf_layout.addWidget(self.label_case_conf)
+        form_config.addRow("Mức độ tự viết hoa:", case_conf_layout)
         
-        # SAT Paragraph Threshold Slider
-        self.slider_sat_para_threshold = QSlider(Qt.Orientation.Horizontal)
-        self.slider_sat_para_threshold.setRange(1, 10)
-        self.slider_sat_para_threshold.setValue(3)
-        self.slider_sat_para_threshold.setStyleSheet(f"""
-            QSlider::groove:horizontal {{
-                border: 1px solid {COLORS['border']};
-                height: 6px;
-                background: {COLORS['bg_dark']};
-                border-radius: 3px;
-            }}
-            QSlider::handle:horizontal {{
-                background: {COLORS['accent']};
-                width: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {COLORS['accent']};
-                border-radius: 3px;
-            }}
-        """)
-        self.label_sat_para_threshold = QLabel("0.3")
-        self.label_sat_para_threshold.setStyleSheet(f"color: {COLORS['text_secondary']}; min-width: 30px; padding-bottom: 4px;")
-        self.slider_sat_para_threshold.valueChanged.connect(self.on_sat_para_threshold_changed)
-        
-        sat_para_layout = QHBoxLayout()
-        sat_para_layout.addWidget(self.slider_sat_para_threshold)
-        sat_para_layout.addWidget(self.label_sat_para_threshold)
-        form_config.addRow("Ngưỡng tách đoạn (SAT):", sat_para_layout)
-        
+
         # Speaker Diarization
         self.check_speaker_diarization = QCheckBox("Phân tách Người nói (Speaker diarization - Chạy lâu)")
         self.check_speaker_diarization.setChecked(False)
@@ -729,16 +700,15 @@ class FileProcessingTab(QWidget):
         self.render_text_content(immediate=True)
         self._do_render()
 
-    def on_sat_threshold_changed(self, value):
-        self.label_sat_threshold.setText(str(value/10.0))
-        
-    def on_sat_para_threshold_changed(self, value):
-        self.label_sat_para_threshold.setText(str(value/10.0))
-
     def on_punct_conf_changed(self, value):
         labels = {1: "Rất ít", 3: "Ít", 5: "Vừa", 7: "Nhiều", 10: "Rất nhiều"}
         label = labels.get(value, str(value))
         self.label_punct_conf.setText(label)
+
+    def on_case_conf_changed(self, value):
+        labels = {1: "Rất ít", 3: "Ít", 5: "Vừa", 7: "Nhiều", 10: "Rất nhiều"}
+        label = labels.get(value, str(value))
+        self.label_case_conf.setText(label)
 
     def _get_playback_path(self, file_path):
         """Convert non-WAV files to temp WAV for accurate QMediaPlayer seeking.
@@ -773,7 +743,8 @@ class FileProcessingTab(QWidget):
             return file_path
 
     def set_file(self, file_path):
-        valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.wma', '.ogg', '.opus']
+        valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.wma', '.ogg', '.opus', 
+                            '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
         file_ext = os.path.splitext(file_path)[1].lower()
         
         if file_ext not in valid_extensions:
@@ -825,7 +796,7 @@ class FileProcessingTab(QWidget):
 
     def open_file_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Chọn file âm thanh", "", "Audio Files (*.mp3 *.wav *.m4a *.ogg *.wma *.flac *.aac *.opus);;All Files (*)")
+            self, "Chọn file âm thanh/video", "", "Media Files (*.mp3 *.wav *.m4a *.ogg *.wma *.flac *.aac *.opus *.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv);;All Files (*)")
         if file_path:
             self.set_file(file_path)
 
@@ -834,16 +805,20 @@ class FileProcessingTab(QWidget):
         # Đồng nhất công thức với start_transcription()
         confidence = 0.8 - (slider_val - 1) * (0.6 / 9)
         
-        sat_threshold = self.slider_sat_threshold.value() / 10.0
-        sat_para_threshold = self.slider_sat_para_threshold.value() / 10.0
+        case_val = self.slider_case_conf.value()
+        # Slider=1 -> -1.5 (rút hoàn toàn viết hoa)
+        # Slider=10 -> 0.5 (khuyến khích viết hoa)
+        case_confidence = -1.5 + (case_val - 1) * (2.0 / 9)
+        
+        # Nếu kéo 1 trong 2 thanh về mức 1 -> Bypass model phục hồi hoàn toàn
+        bypass_restorer = (slider_val == 1 or case_val == 1)
         
         return {
             "cpu_threads": self.slider_threads.value(),
             "restore_punctuation": True,
+            "bypass_restorer": bypass_restorer,
             "punctuation_confidence": confidence,
-            "use_sat_pipeline": True,
-            "sat_threshold": sat_threshold,
-            "sat_paragraph_threshold": sat_para_threshold,
+            "case_confidence": case_confidence,
             "speaker_diarization": self.check_speaker_diarization.isChecked() and DIARIZATION_AVAILABLE,
             "num_speakers": -1 if self.spin_num_speakers.currentIndex() == 0 else int(self.spin_num_speakers.currentText()),
             "speaker_model": self.combo_speaker_model.currentData(),
@@ -2279,6 +2254,18 @@ class FileProcessingTab(QWidget):
         # Tính anchor_id từ best_idx
         if best_idx != -1:
             best_anchor = 1000000 + best_idx * 1000
+            
+            # Phân giải đến mức partial chunk nếu có
+            seg = self.segments[best_idx]
+            partials = seg.get('partials', [])
+            if partials:
+                best_chunk_idx = len(partials) - 1
+                for chunk_idx, partial in enumerate(partials):
+                    if partial.get('timestamp', 0) > current_sec:
+                        best_chunk_idx = chunk_idx
+                        break
+                best_anchor += best_chunk_idx
+
             if best_anchor != self.current_highlight_index:
                 self.highlight_segment(best_anchor)
 
@@ -2499,11 +2486,66 @@ class FileProcessingTab(QWidget):
         match = re.search(r'(\d+)$', str(speaker_name))
         return match.group(1) if match else speaker_name
     
+    def _ensure_segment_split(self, sentence_idx, chunk_idx, direction=None):
+        if chunk_idx < 0 or sentence_idx >= len(self.segments):
+            return sentence_idx
+            
+        seg = self.segments[sentence_idx]
+        partials = seg.get('partials', [])
+        if not partials:
+            return sentence_idx
+            
+        if direction == 'prev':
+            split_point = chunk_idx + 1
+            if split_point >= len(partials):
+                return sentence_idx
+        elif direction == 'next':
+            split_point = chunk_idx
+            if split_point <= 0:
+                return sentence_idx
+        else:
+            split_point = chunk_idx
+            if split_point <= 0 or split_point >= len(partials):
+                return sentence_idx
+            
+        left_partials = partials[:split_point]
+        right_partials = partials[split_point:]
+        
+        split_time = right_partials[0].get('timestamp', seg.get('start', 0))
+        
+        import copy
+        left_seg = copy.deepcopy(seg)
+        left_seg['partials'] = left_partials
+        left_seg['text'] = ' '.join([p.get('text', '').strip() for p in left_partials if p.get('text', '').strip()]).strip()
+        left_seg['end'] = split_time
+        
+        right_seg = copy.deepcopy(seg)
+        right_seg['partials'] = right_partials
+        right_seg['text'] = ' '.join([p.get('text', '').strip() for p in right_partials if p.get('text', '').strip()]).strip()
+        right_seg['start'] = split_time
+        if 'start_time' in right_seg:
+            right_seg['start_time'] = split_time
+            
+        self.segments[sentence_idx] = left_seg
+        self.segments.insert(sentence_idx + 1, right_seg)
+        
+        for i in range(sentence_idx, len(self.segments)):
+            self.segments[i]['index'] = i
+            
+        if direction == 'prev':
+            return sentence_idx
+        return sentence_idx + 1
     def on_split_speaker_requested(self, anchor_id):
         """Xử lý khi yêu cầu tách Người nói"""
         # Convert anchor_id to segment index
         print(f"[TAB_FILE][SPLIT] === SPLIT SPEAKER === anchor_id={anchor_id}")
-        sentence_idx = (anchor_id - 1000000) // 1000 if anchor_id >= 1000000 else anchor_id
+        if anchor_id >= 1000000:
+            adjusted = anchor_id - 1000000
+            sentence_idx = adjusted // 1000
+            chunk_idx = adjusted % 1000
+            sentence_idx = self._ensure_segment_split(sentence_idx, chunk_idx, 'next')
+        else:
+            sentence_idx = anchor_id
         
         if sentence_idx >= len(self.segments):
             return
@@ -2613,7 +2655,13 @@ class FileProcessingTab(QWidget):
     def on_merge_speaker_requested(self, anchor_id, direction):
         """Xử lý khi yêu cầu gộp Người nói"""
         # Convert anchor_id to segment index
-        sentence_idx = (anchor_id - 1000000) // 1000 if anchor_id >= 1000000 else anchor_id
+        if anchor_id >= 1000000:
+            adjusted = anchor_id - 1000000
+            sentence_idx = adjusted // 1000
+            chunk_idx = adjusted % 1000
+            sentence_idx = self._ensure_segment_split(sentence_idx, chunk_idx, direction)
+        else:
+            sentence_idx = anchor_id
         
         if sentence_idx >= len(self.segments):
             return
@@ -2712,9 +2760,9 @@ class FileProcessingTab(QWidget):
                         return None
                     files = [f for f in os.listdir(model_path) 
                             if f.startswith(pattern) and f.endswith(".onnx")]
-                    int8_files = [f for f in files if "int8" in f]
-                    if int8_files:
-                        return os.path.join(model_path, int8_files[0])
+                    float_files = [f for f in files if "int8" not in f]
+                    if float_files:
+                        return os.path.join(model_path, float_files[0])
                     if files:
                         return os.path.join(model_path, files[0])
                     return None
@@ -2733,7 +2781,8 @@ class FileProcessingTab(QWidget):
                         num_threads=4,
                         sample_rate=16000,
                         feature_dim=80,
-                        decoding_method="greedy_search",
+                        decoding_method="modified_beam_search",
+                        max_active_paths=8,
                     )
                     self.quality_analyzer = AudioQualityAnalyzer(
                         offline_recognizer=recognizer,

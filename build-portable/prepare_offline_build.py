@@ -24,14 +24,14 @@ MODELS_CONFIG = {
         "repo_id": "hynt/Zipformer-30M-RNNT-6000h",
         "local_dir": "zipformer-30m-rnnt-6000h",
         "description": "Zipformer 30M RNNT (lightweight)",
-        "check_file": "encoder-epoch-20-avg-10.int8.onnx"
+        "check_file": "encoder-epoch-20-avg-10.onnx"
     },
     "zipformer-30m-rnnt-streaming-6000h": {
         "type": "huggingface",
         "repo_id": "hynt/Zipformer-30M-RNNT-Streaming-6000h",
         "local_dir": "zipformer-30m-rnnt-streaming-6000h",
         "description": "Zipformer 30M Streaming (chunk 64)",
-        "check_file": "encoder-epoch-20-avg-10-chunk-64-left-128.int8.onnx"
+        "check_file": "encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx"
     },
     "sherpa-onnx-zipformer-vi-2025-04-20": {
         "type": "huggingface",
@@ -42,13 +42,6 @@ MODELS_CONFIG = {
     },
     
     # NLP Models
-    "sat-12l-sm": {
-        "type": "huggingface",
-        "repo_id": "segment-any-text/sat-12l-sm",
-        "local_dir": "sat-12l-sm",
-        "description": "SAT (Segment Any Text)",
-        "check_file": "model_optimized.onnx"
-    },
     "vibert-capu": {
         "type": "huggingface",
         "repo_id": "dragonSwing/vibert-capu",

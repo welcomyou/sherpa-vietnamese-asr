@@ -37,6 +37,7 @@ class GecBERTModel(torch.nn.Module):
         overlap_size=12,
         min_words_cut=6,
         punc_dict={':', ".", ",", "?"},
+        case_confidence=0.0,
     ):
         r"""
         Args:
@@ -85,9 +86,9 @@ class GecBERTModel(torch.nn.Module):
             torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else torch.device(device)
         )
         
-        # Auto-determine iterations: giảm xuống 1 cho CPU để tăng tốc, 3 cho GPU
+        # Auto-determine iterations: Force 3 cho chất lượng tốt nhất dù trên CPU
         if iterations is None:
-            self.iterations = 1 if self.device.type == "cpu" else 3
+            self.iterations = 3
         else:
             self.iterations = iterations
         self.max_len = max_len
@@ -109,8 +110,16 @@ class GecBERTModel(torch.nn.Module):
         self.min_words_cut = min_words_cut
         self.stride = chunk_size - overlap_size
         self.punc_dict = punc_dict
+        self.case_confidence = case_confidence
         self.punc_str = '[' + ''.join([f'\\{x}' for x in punc_dict]) + ']'
         self.noop_index = self.vocab.get_token_index("$KEEP", "labels")
+        
+        self.case_indices = []
+        for i in range(self.vocab.get_vocab_size("labels")):
+            token = self.vocab.get_token_from_index(i, namespace="labels")
+            if token.startswith("$TRANSFORM_CASE_"):
+                self.case_indices.append(i)
+                
         # set training parameters and operations
 
         self.indexers = []
@@ -222,7 +231,7 @@ class GecBERTModel(torch.nn.Module):
             tokenizer.vocab[START_TOKEN] = len(tokenizer) - 1
         return tokenizer
     
-    def forward(self, text: Union[str, List[str], List[List[str]]], is_split_into_words=False):
+    def forward(self, text: Union[str, List[str], List[List[str]]], is_split_into_words=False, progress_callback=None):
         # Input type checking for clearer error
         def _is_valid_text_input(t):
             if isinstance(t, str):
@@ -262,7 +271,7 @@ class GecBERTModel(torch.nn.Module):
         if not is_batched:
             text = [text]
         
-        return self.handle_batch(text)
+        return self.handle_batch(text, progress_callback=progress_callback)
 
     def split_chunks(self, batch):
         # return batch pairs of indices
@@ -349,13 +358,43 @@ class GecBERTModel(torch.nn.Module):
         result = " ".join(result)
         return result
 
-    def predict(self, batches):
+    def predict(self, batches, progress_callback=None):
         t11 = time()
         predictions = []
         for batch, model in zip(batches, self.models):
-            batch = batch.to(self.device)
-            with torch.no_grad():
-                prediction = model.forward(**batch)
+            batch_size = len(batch['input_ids']) if 'input_ids' in batch else 0
+            mini_batch_size = 32
+            
+            if batch_size > mini_batch_size:
+                all_logits = []
+                all_detect_logits = []
+                all_max_error_probability = []
+                
+                for i in range(0, batch_size, mini_batch_size):
+                    end_idx = min(i + mini_batch_size, batch_size)
+                    mini_batch = {k: v[i:end_idx].to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+                    
+                    with torch.no_grad():
+                        pred = model.forward(**mini_batch)
+                        all_logits.append(pred['logits'].cpu())
+                        all_detect_logits.append(pred['detect_logits'].cpu())
+                        all_max_error_probability.append(pred['max_error_probability'].cpu())
+                    
+                    if progress_callback is not None:
+                        progress_callback(end_idx, batch_size)
+                
+                prediction = {
+                    'logits': torch.cat(all_logits, dim=0).to(self.device),
+                    'detect_logits': torch.cat(all_detect_logits, dim=0).to(self.device),
+                    'max_error_probability': torch.cat(all_max_error_probability, dim=0).to(self.device)
+                }
+            else:
+                batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
+                with torch.no_grad():
+                    prediction = model.forward(**batch)
+                if progress_callback is not None:
+                    progress_callback(batch_size, batch_size)
+                    
             predictions.append(prediction)
 
         preds, idx, error_probs = self._convert(predictions)
@@ -369,13 +408,25 @@ class GecBERTModel(torch.nn.Module):
         # cases when we don't need to do anything
         if prob < self.min_error_probability or sugg_token in [UNK, PAD, '$KEEP']:
             return None
-
-        if sugg_token.startswith('$REPLACE_') or sugg_token.startswith('$TRANSFORM_') or sugg_token == '$DELETE':
-            start_pos = index
-            end_pos = index + 1
-        elif sugg_token.startswith("$APPEND_") or sugg_token.startswith("$MERGE_"):
+            
+        # CHỈ CẤP QUYỀN: Thêm dấu câu ($APPEND_. , ? !) và Viết hoa ($TRANSFORM_CASE_)
+        # CẤM QUYỀN: Thay thế chữ ($REPLACE_), Xóa chữ ($DELETE), Đính chữ ($APPEND_chữ)
+        if sugg_token == '$DELETE' or sugg_token.startswith('$REPLACE_'):
+            return None
+        
+        if sugg_token.startswith('$APPEND_'):
+            # Lấy ký tự/từ muốn đính kèm để kiểm tra
+            added_text = sugg_token.replace('$APPEND_', '')
+            if added_text not in self.punc_dict:
+                # Nếu không phải đính kèm dấu câu hợp lệ -> Bỏ qua
+                return None
             start_pos = index + 1
             end_pos = index + 1
+        elif sugg_token.startswith('$TRANSFORM_CASE_'):
+            start_pos = index
+            end_pos = index + 1
+        else:
+            return None # Block everything else just to be safe
 
         if sugg_token == "$DELETE":
             sugg_token_clear = ""
@@ -432,6 +483,10 @@ class GecBERTModel(torch.nn.Module):
 
         if self.confidence != 0.0:
             all_class_probs[:, :, self.noop_index] += self.confidence
+            
+        if self.case_confidence != 0.0 and hasattr(self, 'case_indices'):
+            for idx in self.case_indices:
+                all_class_probs[:, :, idx] += self.case_confidence
 
         max_vals = torch.max(all_class_probs, dim=-1)
         probs = max_vals[0].tolist()
@@ -494,7 +549,7 @@ class GecBERTModel(torch.nn.Module):
             all_results.append(get_target_sent_by_edits(tokens, edits))
         return all_results
 
-    def handle_batch(self, full_batch, merge_punc=True):
+    def handle_batch(self, full_batch, merge_punc=True, progress_callback=None):
         """
         Handle batch of requests.
         """
@@ -526,7 +581,7 @@ class GecBERTModel(torch.nn.Module):
 
             if not sequences:
                 break
-            probabilities, idxs, error_probs = self.predict(sequences)
+            probabilities, idxs, error_probs = self.predict(sequences, progress_callback=progress_callback)
 
             pred_batch = self.postprocess_batch(orig_batch, probabilities, idxs, error_probs)
             if self.log:

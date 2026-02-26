@@ -548,10 +548,10 @@ class AudioQualityAnalyzer:
             
             # Xác định ready - chỉ dựa ASR nếu không có DNSMOS
             if all_dnsmos_scores:
-                is_ready = (metrics.asr_confidence >= 0.5 and 
+                is_ready = (metrics.asr_confidence >= 0.60 and 
                            metrics.dnsmos_ovrl >= 2.5)
             else:
-                is_ready = (metrics.asr_confidence >= 0.5)
+                is_ready = (metrics.asr_confidence >= 0.60)
             
             return AnalysisResult(
                 metrics=metrics,
@@ -648,10 +648,10 @@ class AudioQualityAnalyzer:
             suggestions = self._generate_suggestions(metrics)
             # Xác định ready - chỉ dựa ASR nếu không có DNSMOS
             if dnsmos:
-                is_ready = (metrics.asr_confidence >= 0.5 and 
+                is_ready = (metrics.asr_confidence >= 0.60 and 
                            metrics.dnsmos_ovrl >= 2.5)
             else:
-                is_ready = (metrics.asr_confidence >= 0.5)
+                is_ready = (metrics.asr_confidence >= 0.60)
             
             return AnalysisResult(
                 metrics=metrics,
@@ -685,9 +685,9 @@ class AudioQualityAnalyzer:
             suggestions.append("🔴 Chất lượng tổng thể kém: Kiểm tra lại thiết bị và môi trường")
         
         # ASR Confidence
-        if metrics.asr_confidence < 0.50:
+        if metrics.asr_confidence < 0.60:
             suggestions.append("🔴 ASR khó nhận diện: Nói chậm rãi, phát âm rõ ràng từng từ")
-        elif metrics.asr_confidence < 0.70:
+        elif metrics.asr_confidence < 0.75:
             suggestions.append("🟡 ASR có thể sai sót: Kiểm tra kết quả sau khi nhận dạng")
         
         # Nếu tất cả tốt
@@ -703,9 +703,9 @@ class AudioQualityAnalyzer:
         """
         if confidence >= 0.85:
             return "Xuất sắc", "#28a745"  # Xanh lá
-        elif confidence >= 0.70:
+        elif confidence >= 0.75:
             return "Tốt", "#5cb85c"  # Xanh nhạt
-        elif confidence >= 0.50:
+        elif confidence >= 0.60:
             return "Trung bình", "#ffc107"  # Vàng
         else:
             return "Kém", "#dc3545"  # Đỏ

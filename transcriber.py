@@ -231,12 +231,6 @@ def get_sherpa_onnx():
         _sherpa_onnx = so
     return _sherpa_onnx
 
-# Import SAT pipeline
-try:
-    from sat_segmenter import SATPunctuationPipeline, ChunkedSATProcessor, SATSegmenter
-    SAT_AVAILABLE = True
-except ImportError:
-    SAT_AVAILABLE = False
 
 try:
     from speaker_diarization import SpeakerDiarizer
@@ -281,22 +275,22 @@ def diarization_progress_callback(num_processed_chunk: int, num_total_chunks: in
     return 0
 
 
-def split_long_segments(segments: list, max_duration: float = 20.0) -> list:
+def split_long_segments(segments: list, max_duration: float = 12.0, preserve_raw_words: bool = False) -> list:
     """
     Chia nhỏ các segment dài thành nhiều segment ngắn hơn dựa trên số từ.
     
     Quy tắc chia:
-    - >20s: chia làm 2 phần
-    - >40s: chia làm 3 phần  
-    - >60s: chia làm 4 phần
-    - Cứ thêm 20s thì thêm 1 phần
+    - >12s: chia làm 2 phần
+    - >24s: chia làm 3 phần  
+    - >36s: chia làm 4 phần
+    - Cứ thêm 12s thì thêm 1 phần
     
     Chia theo số từ (không chia theo thờigian), đảm bảo mỗi phần có số từ đều nhau.
     Timestamp được tính lại tuyến tính dựa trên số từ.
     
     Args:
         segments: List các segment dict với 'text', 'start', 'end'
-        max_duration: Thờigian tối đa cho mỗi segment (mặc định 20s)
+        max_duration: Thờigian tối đa cho mỗi segment (mặc định 12s)
         
     Returns:
         List các segment đã được chia nhỏ
@@ -310,112 +304,134 @@ def split_long_segments(segments: list, max_duration: float = 20.0) -> list:
         duration = seg.get('end', 0) - seg.get('start', 0)
         text = seg.get('text', '').strip()
         
-        # Nếu segment không quá dài, giữ nguyên
         if duration <= max_duration or not text:
             result.append(seg)
             continue
-        
-        # Tính số phần cần chia
-        # >20s -> 2 phần, >40s -> 3 phần, >60s -> 4 phần, ...
-        num_parts = int(duration / max_duration) + 1
-        if duration % max_duration == 0:  # Nếu chia hết, ví dụ 40s -> 2 phần (không phải 3)
-            num_parts = int(duration / max_duration)
-        num_parts = max(2, num_parts)  # Ít nhất chia làm 2 phần
-        
-        # Tách từ
-        words = text.split()
-        total_words = len(words)
-        
-        if total_words == 0:
-            result.append(seg)
-            continue
-        
-        # Nếu số từ ít hơn số phần, không chia
-        if total_words < num_parts:
-            result.append(seg)
-            continue
-        
-        # Tính số từ mỗi phần (chia đều)
-        words_per_part = total_words // num_parts
-        remainder = total_words % num_parts
-        
-        # Lấy raw_words nếu có để gán timestamp chính xác
-        raw_words = seg.get('raw_words', [])
-        total_raw = len(raw_words)
-        
-        # Thờigian mỗi từ (tuyến tính)
-        start_time = seg.get('start', 0)
-        end_time = seg.get('end', 0)
-        time_per_word = (end_time - start_time) / total_words if total_words > 0 else 0
-        
-        # Chia thành các phần
-        word_idx = 0
-        raw_idx = 0
-        
-        for part_idx in range(num_parts):
-            # Phần đầu được thêm phần dư nếu có
-            current_part_words = words_per_part + (1 if part_idx < remainder else 0)
             
-            if current_part_words == 0:
-                continue
+        def process_sub_text(sub_text, sub_start, sub_end, sub_raw_words):
+            sub_duration = sub_end - sub_start
+            if sub_duration <= max_duration or not sub_text:
+                part_seg = {'text': sub_text, 'start': round(sub_start, 3), 'end': round(sub_end, 3)}
+                if preserve_raw_words and sub_raw_words:
+                    part_seg['raw_words'] = sub_raw_words
+                for k, v in seg.items():
+                    if k not in ['text', 'start', 'end', 'raw_words']:
+                        part_seg[k] = v
+                result.append(part_seg)
+                return
+
+            # Cần chia đôi/ba nếu vẫn quá dài (chia theo số từ bù trừ tuyến tính - logic cũ)
+            num_parts = int(sub_duration / max_duration) + 1
+            if sub_duration % max_duration == 0:
+                num_parts = int(sub_duration / max_duration)
+            num_parts = max(2, num_parts)
             
-            # Lấy từ cho phần này
-            part_words = words[word_idx:word_idx + current_part_words]
-            part_text = ' '.join(part_words)
-            
-            if raw_words:
-                raw_per_part = total_raw // num_parts
-                raw_remainder = total_raw % num_parts
-                current_raw_words = raw_per_part + (1 if part_idx < raw_remainder else 0)
+            words = sub_text.split()
+            total_words = len(words)
+            if total_words < num_parts:
+                part_seg = {'text': sub_text, 'start': round(sub_start, 3), 'end': round(sub_end, 3)}
+                if preserve_raw_words and sub_raw_words:
+                    part_seg['raw_words'] = sub_raw_words
+                for k, v in seg.items():
+                    if k not in ['text', 'start', 'end', 'raw_words']:
+                        part_seg[k] = v
+                result.append(part_seg)
+                return
                 
-                if current_raw_words > 0 and raw_idx < total_raw:
-                    part_start = raw_words[raw_idx]['start']
-                    last_raw_idx = min(raw_idx + current_raw_words - 1, total_raw - 1)
-                    part_end = raw_words[last_raw_idx]['end']
+            words_per_part = total_words // num_parts
+            remainder = total_words % num_parts
+            total_raw = len(sub_raw_words)
+            time_per_word = (sub_end - sub_start) / total_words if total_words > 0 else 0
+            
+            word_idx = 0
+            raw_idx = 0
+            
+            for part_idx in range(num_parts):
+                current_part_words = words_per_part + (1 if part_idx < remainder else 0)
+                if current_part_words == 0:
+                    continue
                     
-                    # Truyền raw_words tương ứng cho part này
-                    part_raw_words = raw_words[raw_idx:last_raw_idx + 1]
-                    raw_idx += current_raw_words
+                part_words = words[word_idx:word_idx + current_part_words]
+                part_text = ' '.join(part_words)
+                
+                if sub_raw_words:
+                    raw_per_part = total_raw // num_parts
+                    raw_remainder = total_raw % num_parts
+                    current_raw_words = raw_per_part + (1 if part_idx < raw_remainder else 0)
+                    
+                    if current_raw_words > 0 and raw_idx < total_raw:
+                        part_start = sub_raw_words[raw_idx]['start']
+                        last_raw_idx = min(raw_idx + current_raw_words - 1, total_raw - 1)
+                        part_end = sub_raw_words[last_raw_idx]['end']
+                        part_raw_words = sub_raw_words[raw_idx:last_raw_idx + 1]
+                        raw_idx += current_raw_words
+                    else:
+                        part_start = sub_start + word_idx * time_per_word
+                        part_end = sub_start + (word_idx + current_part_words) * time_per_word
+                        part_raw_words = []
                 else:
-                    part_start = start_time + word_idx * time_per_word
-                    part_end = start_time + (word_idx + current_part_words) * time_per_word
+                    part_start = sub_start + word_idx * time_per_word
+                    part_end = sub_start + (word_idx + current_part_words) * time_per_word
                     part_raw_words = []
-            else:
-                # Tính timestamp tuyến tính
-                part_start = start_time + word_idx * time_per_word
-                part_end = start_time + (word_idx + current_part_words) * time_per_word
-                part_raw_words = []
-            
-            # Đảm bảo phần đầu và cuối cùng không vượt qua biên giới gốc của segment
-            if part_end > end_time:
-                part_end = end_time
-            if part_start < start_time:
-                part_start = start_time
-                
-            # Đảm bảo tính nhất quán giữa các part, part kế tiếp không bắt đầu trước part hiện tại kết thúc
-            if part_idx > 0 and part_start < result[-1]['end']:
-                part_start = result[-1]['end']
-                if part_end < part_start:
-                    part_end = part_start + 0.1
-            
-            part_seg = {
-                'text': part_text,
-                'start': round(part_start, 3),
-                'end': round(part_end, 3)
-            }
-            # Không gán raw_words để tránh nặng bộ nhớ
-            # if part_raw_words:
-            #     part_seg['raw_words'] = part_raw_words
-                
-            # Copy các thuộc tính khác
-            for k, v in seg.items():
-                if k not in ['text', 'start', 'end', 'raw_words']:
-                    part_seg[k] = v
                     
-            result.append(part_seg)
-            
-            word_idx += current_part_words
-    
+                if part_end > sub_end: part_end = sub_end
+                if part_start < sub_start: part_start = sub_start
+                if part_idx > 0 and part_start < result[-1]['end']:
+                    part_start = result[-1]['end']
+                    if part_end < part_start: part_end = part_start + 0.1
+                    
+                part_seg = {'text': part_text, 'start': round(part_start, 3), 'end': round(part_end, 3)}
+                if preserve_raw_words and part_raw_words:
+                    part_seg['raw_words'] = part_raw_words
+                for k, v in seg.items():
+                    if k not in ['text', 'start', 'end', 'raw_words']:
+                        part_seg[k] = v
+                result.append(part_seg)
+                word_idx += current_part_words
+
+        # Ưu tiên chia theo dấu phẩy trước
+        if ',' in text:
+            # Tách chuỗi theo dấu phẩy, giữ lại dấu phẩy
+            parts = re.split(r'(?<=,)\s+', text)
+            if len(parts) > 1:
+                # Nếu chia được theo phẩy, tính timestamp cho từng đoạn
+                all_seg_words = text.split()
+                total_seg_words = len(all_seg_words)
+                raw_words = seg.get('raw_words', [])
+                
+                time_per_word = duration / total_seg_words if total_seg_words > 0 else 0
+                word_offset = 0
+                raw_offset = 0
+                
+                for part in parts:
+                    part = part.strip()
+                    if not part: continue
+                    part_word_count = len(part.split())
+                    
+                    if raw_words:
+                        # Map raw words roughly
+                        part_raw_words = raw_words[raw_offset:raw_offset + part_word_count]
+                        if part_raw_words:
+                            p_start = part_raw_words[0]['start']
+                            p_end = part_raw_words[-1]['end']
+                        else:
+                            p_start = seg.get('start', 0) + word_offset * time_per_word
+                            p_end = seg.get('start', 0) + (word_offset + part_word_count) * time_per_word
+                        raw_offset += part_word_count
+                    else:
+                        p_start = seg.get('start', 0) + word_offset * time_per_word
+                        p_end = seg.get('start', 0) + (word_offset + part_word_count) * time_per_word
+                        part_raw_words = []
+                        
+                    word_offset += part_word_count
+                    
+                    # Gọi đệ quy/xử lý mảng (dùng hàm con)
+                    process_sub_text(part, p_start, p_end, part_raw_words)
+                continue
+                
+        # Nếu không có dấu phẩy hoặc chia qua dấu phẩy xong, xử lý trực tiếp
+        process_sub_text(text, seg.get('start', 0), seg.get('end', 0), seg.get('raw_words', []))
+        
     return result
 
 
@@ -473,12 +489,8 @@ class TranscriberThread(QThread):
             }
             phase_start_time = start_time
             
-            # Extract config (some are unused but kept for compatibility or future use)
             cpu_threads = self.config.get("cpu_threads", 4)
             restore_punctuation = self.config.get("restore_punctuation", False)
-            use_sat_pipeline = self.config.get("use_sat_pipeline", False) and SAT_AVAILABLE
-            sat_threshold = self.config.get("sat_threshold", 0.3)  # Ngưỡng tách câu SAT (thấp = tách nhiều)
-            sat_paragraph_threshold = self.config.get("sat_paragraph_threshold", 0.3)  # Ngưỡng tách đoạn
             
             # Check if model path exists
             if not os.path.exists(self.model_path):
@@ -489,10 +501,10 @@ class TranscriberThread(QThread):
             def find_file(pattern):
                 try:
                     files = [f for f in os.listdir(self.model_path) if f.startswith(pattern) and f.endswith(".onnx")]
-                    # Prefer int8 if available
-                    int8_files = [f for f in files if "int8" in f]
-                    if int8_files:
-                        return os.path.join(self.model_path, int8_files[0])
+                    # Prefer float (non-int8) if available for better accuracy
+                    float_files = [f for f in files if "int8" not in f]
+                    if float_files:
+                        return os.path.join(self.model_path, float_files[0])
                     if files:
                         return os.path.join(self.model_path, files[0])
                 except Exception:
@@ -523,7 +535,8 @@ class TranscriberThread(QThread):
                 "num_threads": cpu_threads,
                 "sample_rate": 16000,
                 "feature_dim": 80,
-                "decoding_method": "greedy_search",
+                "decoding_method": "modified_beam_search",
+                "max_active_paths": 8,
             }
             pass_bpe = False
             if os.path.exists(bpe_model):
@@ -551,8 +564,9 @@ class TranscriberThread(QThread):
             file_to_load = self.file_path
             file_ext = os.path.splitext(self.file_path)[1].lower()
             
-            # Các định dạng cần chuyển đổi
-            needs_conversion = ['.m4a', '.ogg', '.wma', '.opus']
+            # Các định dạng cần chuyển đổi (bao gồm cả video)
+            needs_conversion = ['.m4a', '.ogg', '.wma', '.opus', 
+                                '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
             
             if file_ext in needs_conversion:
                 try:
@@ -569,11 +583,15 @@ class TranscriberThread(QThread):
                         
                         temp_wav = self.file_path + '.temp.wav'
                         
-                        # Xác định format cho pydub
+                        # Xác định format cho pydub (một số định dạng video pydub tự detect được, không cần ép format)
                         format_map = {'.m4a': 'm4a', '.ogg': 'ogg', '.wma': 'wma', '.opus': 'opus'}
-                        audio_format = format_map.get(file_ext, file_ext[1:])
-                        
-                        audio_segment = AudioSegment.from_file(self.file_path, format=audio_format)
+                        if file_ext in format_map:
+                            audio_format = format_map[file_ext]
+                            audio_segment = AudioSegment.from_file(self.file_path, format=audio_format)
+                        else:
+                            # Để pydub (ffmpeg) tự phát hiện codec/format đối với file video
+                            audio_segment = AudioSegment.from_file(self.file_path)
+                            
                         audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
                         audio_segment.export(temp_wav, format='wav')
                         file_to_load = temp_wav
@@ -854,121 +872,51 @@ class TranscriberThread(QThread):
             paragraphs = []  # Lưu paragraph boundaries từ SAT
 
             if restore_punctuation and full_text:
+                punct_start = time.time()
                 try:
-                    if use_sat_pipeline and SAT_AVAILABLE:
-                        # --- CHUNKED SAT PIPELINE: Tách câu theo chunk → Gán dấu từng câu ---
-                        save_ram = self.config.get("save_ram", False)
-                        punct_confidence = self.config.get("punctuation_confidence", 0.3)
-                        
-                        self.progress.emit("PHASE:SAT|Đang khởi tạo SAT model|0")
-                        
-                        # Initialize SAT segmenter
-                        sat_segmenter = SATSegmenter(
-                            threshold=sat_threshold,
-                            paragraph_threshold=sat_paragraph_threshold
-                        )
-                        sat_segmenter.initialize()
-                        
-                        # Create chunked processor
-                        chunked_processor = ChunkedSATProcessor(
-                            chunk_size=500,  # 500 words per chunk
-                            segmenter=sat_segmenter
-                        )
-                        
-                        # Progress callback for chunked SAT
-                        def sat_progress_callback(current_chunk, total_chunks, sentences_so_far):
-                            percent = int((current_chunk / total_chunks) * 100)
-                            self.progress.emit(f"PHASE:SAT|Đang tách câu (chunk {current_chunk}/{total_chunks})|{percent}")
-                        
-                        # Early exit check
-                        def should_stop():
-                            return not self.is_running
-                        
-                        sat_start = time.time()
-                        
-                        # Process text in chunks
-                        sentences = chunked_processor.process_chunked(
-                            full_text,
-                            threshold=sat_threshold,
-                            progress_callback=sat_progress_callback,
-                            should_stop=should_stop
-                        )
-                        
-                        # Check if cancelled
-                        if not self.is_running:
-                            return
-                        
-                        timing_details["sentence_segmentation"] = time.time() - sat_start
-                        
-                        # Unload SAT model if save_ram is enabled
-                        if save_ram:
-                            sat_segmenter.unload()
-                            import gc
-                            gc.collect()
-                            self.progress.emit("PHASE:Punctuation|Đã giải phóng SAT model|0")
-                        
-                        # Punctuation restoration per sentence
-                        self.progress.emit("PHASE:Punctuation|Đang khởi tạo Punctuation model|0")
-                        punct_restorer = ImprovedPunctuationRestorer(device="cpu", confidence=punct_confidence)
-                        
-                        punct_start = time.time()
-                        punctuated_sentences = []
-                        total_sentences = len(sentences)
-                        
-                        for i, sentence in enumerate(sentences):
-                            # Check for early exit
-                            if not self.is_running:
-                                return
-                            
-                            punctuated = punct_restorer.restore(sentence)
-                            punctuated_sentences.append(punctuated)
-                            
-                            # Progress per sentence (every 5 sentences or at end)
-                            if (i + 1) % 5 == 0 or i + 1 == total_sentences:
-                                percent = int((i + 1) / total_sentences * 100)
-                                self.progress.emit(f"PHASE:Punctuation|Đang thêm dấu câu ({i+1}/{total_sentences})|{percent}")
-                        
-                        # Update sentences with punctuated versions
-                        sentences = punctuated_sentences
-                        
-                        # Unload punctuation model if save_ram is enabled
-                        if save_ram:
-                            punct_restorer.unload()
-                            import gc
-                            gc.collect()
-                        
-                        timing_details["punctuation"] = time.time() - punct_start
-                        
-                        # Reconstruct full text
-                        full_text = '. '.join(sentences)
-                        if full_text and not full_text.endswith('.'):
-                            full_text += '.'
-                        
-                        # Empty paragraphs for chunked mode (no paragraph info)
-                        paragraphs = []
-                        
-                        self.progress.emit("PHASE:Align|Đang căn chỉnh thời gian|0")
-                        
+                    if self.config.get("bypass_restorer", False):
+                        # Bỏ qua hoàn toàn model GecBERT nếu User kéo cả 2 mốc về Rất Ít (1)
+                        self.progress.emit("PHASE:Punctuation|Bỏ qua model (Mức độ Rất Ít)|100")
                     else:
-                        # --- ORIGINAL PIPELINE: Gán dấu toàn bộ → Tách câu bằng regex ---
-                        self.progress.emit("PHASE:Punctuation|Đang thêm dấu câu|0")
+                        self.progress.emit("PHASE:Punctuation|Đang thêm dấu câu (Sliding Window)|0")
                         
                         punct_confidence = self.config.get("punctuation_confidence", 0.3)
-                        punct_start = time.time()
-                        restorer = ImprovedPunctuationRestorer(device="cpu", confidence=punct_confidence)
-                        restored_text_raw = restorer.restore(full_text)
+                        case_confidence = self.config.get("case_confidence", -1.0)
+                        
+                        # Sliding Window cần model dứt khoát hơn (confidence thấp hơn)
+                        # UI Map:
+                        # Mức Trượt = 1  (Ít dấu) -> confidence UI trả về = 0.8
+                        # Mức Trượt = 5  (Vừa)    -> confidence UI trả về = ~0.53
+                        # Mức Trượt = 10 (Nhiều)  -> confidence UI trả về = 0.2
+                        # GecBERT model: tự tin chèn dấu cao nhất ở mốc ÂM
+                        # Ta sẽ shift giá trị để được mức âm tương đương:
+                        window_confidence = punct_confidence - 0.8  
+                        restorer = ImprovedPunctuationRestorer(device="cpu", confidence=window_confidence, case_confidence=case_confidence)
+                        
+                        def punct_progress_cb(current, total):
+                            if not self.is_running:
+                                raise Exception("Cancelled by user")
+                            percent = int((current / max(1, total)) * 100)
+                            self.progress.emit(f"PHASE:Punctuation|Đang thêm dấu câu ({current}/{total})|{percent}")
+
+                        restored_text_raw = restorer.restore(full_text, progress_callback=punct_progress_cb)
                         full_text = restored_text_raw
-                        timing_details["punctuation"] = time.time() - punct_start
                         
-                        self.progress.emit("PHASE:Punctuation|Đang thêm dấu câu|100")
-                        
-                        self.progress.emit("PHASE:Align|Đang căn chỉnh thời gian|0")
-                        
-                        # Split by sentence endings (. ? !)
-                        sentences = re.split(r'(?<=[.?!])\s+', full_text)
-                        
-                        # Không có paragraph info với original pipeline
-                        paragraphs = []
+                        # Giải phóng RAM nếu được yêu cầu
+                        if self.config.get("save_ram", False):
+                            restorer.unload()
+                            import gc
+                            gc.collect()
+                            
+                    timing_details["punctuation"] = time.time() - punct_start
+                    
+                    self.progress.emit("PHASE:Align|Đang căn chỉnh thời gian|0")
+                    
+                    # Tách câu bằng regex (tách theo . ? !) để tạo thành các segment riêng biệt
+                    # Giữ nguyên dấu câu bằng positive lookbehind
+                    sentences = re.split(r'(?<=[.?!])\s+', full_text)
+                    
+                    paragraphs = []
                     
                     # --- ALIGNMENT LOGIC (dùng chung cho cả 2 pipeline) ---
                     # Sử dụng thuật toán DTW-style alignment để mapping từ ASR tokens sang câu sau punctuation
@@ -1156,27 +1104,32 @@ class TranscriberThread(QThread):
                                         w['end'] = next_start
                                     if w['start'] > next_start:
                                         w['start'] = next_start
-                    # Chia nhỏ các segment dài (>20s) theo số từ
+                    # Chia nhỏ các segment dài (>12s) theo số từ
+                    do_diarization = self.config.get("speaker_diarization", False) and DIARIZATION_AVAILABLE
                     if final_segments:
                         original_count = len(final_segments)
-                        final_segments = split_long_segments(final_segments, max_duration=20.0)
+                        final_segments = split_long_segments(final_segments, max_duration=12.0, preserve_raw_words=do_diarization)
                         new_count = len(final_segments)
                         if new_count > original_count:
-                            logger.info(f"Đã chia nhỏ {original_count} segment thành {new_count} segment (các segment >20s)")
+                            logger.info(f"Đã chia nhỏ {original_count} segment thành {new_count} segment (các segment >12s)")
                         
-                        # Xóa raw_words sau khi split xong để tránh làm bộ nhớ và UI cồng kềnh
-                        for seg in final_segments:
-                            if 'raw_words' in seg:
-                                del seg['raw_words']
-                
+                        # Xóa raw_words sau khi split xong nếu không làm diarization để tránh làm bộ nhớ và UI cồng kềnh
+                        if not do_diarization:
+                            for seg in final_segments:
+                                if 'raw_words' in seg:
+                                    del seg['raw_words']
                 except Exception as e:
-                     self.progress.emit(f"Lỗi khi thêm dấu câu: {e}")
-                     import traceback
-                     traceback.print_exc()
+                    if 'restorer' in locals() and restorer:
+                        restorer.unload()
+                    if str(e) == "Cancelled by user":
+                        return
+                    self.progress.emit(f"Lỗi khi thêm dấu câu: {e}")
+                    import traceback
+                    traceback.print_exc()
                      
-                     restore_end_time = time.time()
-                     restore_duration = restore_end_time - transcription_end_time
-                     timing_details["punctuation"] = restore_duration
+                    restore_end_time = time.time()
+                    restore_duration = restore_end_time - transcription_end_time
+                    timing_details["punctuation"] = restore_duration
             
             else:
                  # No punctuation restoration - still need alignment progress

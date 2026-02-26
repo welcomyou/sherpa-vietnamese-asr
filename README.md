@@ -21,10 +21,9 @@
 ## ✨ Tính năng chính
 
 ### 🎙️ Xử lý File Âm thanh (Offline)
-- **📝 Nhận dạng giọng nói**: Hỗ trợ nhiều định dạng (MP3, M4A, WAV, OGG, FLAC, AAC, WMA)
+- **📝 Nhận dạng giọng nói (Audio & Video)**: Hỗ trợ nhiều định dạng (MP3, M4A, WAV, OGG, FLAC, AAC, WMA, MP4, MKV, AVI, MOV...)
 - **👥 Phân tách người nói (Speaker Diarization)**: Tự động nhận diện hoặc gán thủ công các người nói khác nhau
 - **✏️ Thêm dấu câu tự động**: Sử dụng BERT để phục hồi dấu câu tiếng Việt
-- **📄 Tách đoạn thông minh (SAT)**: Tách văn bản thành các câu có nghĩa dựa trên ngữ nghĩa
 - **📊 Phân tích chất lượng âm thanh**: Đánh giá SIG/BAK/OVRL theo chuẩn DNSMOS và đánh giá độ tự tin nhận dạng của model ASR
 - **▶️ Phát lại đồng bộ**: Click vào câu để nghe đoạn âm thanh tương ứng
 - **🔍 Tìm kiếm nội dung**: Tìm kiếm có dấu/không dấu
@@ -130,7 +129,6 @@ Nếu bạn muốn tải thủ công hoặc script tự động bị lỗi:
 
 | Model | Link | Thư mục | Dung lượng |
 |-------|------|---------|------------|
-| **sat-12l-sm** | [HuggingFace](https://huggingface.co/segment-any-text/sat-12l-sm) | `models/sat-12l-sm/` | ~530 MB |
 | **vibert-capu** | [HuggingFace](https://huggingface.co/dragonSwing/vibert-capu) | `models/vibert-capu/` | ~437 MB |
 
 #### 3. Speaker Diarization Models
@@ -153,25 +151,22 @@ Nếu bạn muốn tải thủ công hoặc script tự động bị lỗi:
 
 ```
 models/
-├── sherpa-onnx-zipformer-vi-2025-04-20/    # ASR chính
+├── sherpa-onnx-zipformer-vi-2025-04-20/    
 │   ├── encoder-epoch-12-avg-8.onnx
 │   ├── decoder-epoch-12-avg-8.onnx
 │   ├── joiner-epoch-12-avg-8.onnx
 │   ├── tokens.txt
 │   └── bpe.model
-├── zipformer-30m-rnnt-6000h/               # ASR nhẹ
-│   ├── encoder-epoch-20-avg-10.int8.onnx
+├── zipformer-30m-rnnt-6000h/               
+│   ├── encoder-epoch-20-avg-10.onnx
 │   ├── decoder-epoch-20-avg-10.onnx
 │   ├── joiner-epoch-20-avg-10.onnx
 │   └── tokens.txt
 ├── zipformer-30m-rnnt-streaming-6000h/     # ASR streaming
-│   ├── encoder-epoch-20-avg-10-chunk-64-left-128.int8.onnx
-│   ├── decoder-epoch-20-avg-10.onnx
-│   ├── joiner-epoch-20-avg-10.onnx
+│   ├── encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx
+│   ├── decoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx
+│   ├── joiner-epoch-31-avg-11-chunk-64-left-128.fp16.onnx
 │   └── tokens.txt
-├── sat-12l-sm/                             # Tách câu
-│   ├── model_optimized.onnx
-│   └── config.json
 ├── vibert-capu/                            # Thêm dấu câu
 │   ├── pytorch_model.bin
 │   └── config.json
@@ -202,12 +197,11 @@ Giao diện ứng dụng sẽ mở ra với 2 tab chính:
 1. **Chọn file âm thanh**:
    - Kéo thả file vào vùng "Kéo thả file âm thanh vào đây"
    - Hoặc click để chọn file
-   - Hỗ trợ: MP3, M4A, WAV, OGG, FLAC, AAC, WMA
+   - Hỗ trợ các định dạng Âm thanh & Video: MP3, M4A, WAV, OGG, FLAC, AAC, WMA, MP4, MKV, AVI, MOV, WEBM, FLV, WMV
 
 2. **Cấu hình**:
    - **Model**: Chọn model ASR (khuyến nghị: sherpa-onnx-zipformer-vi-2025-04-20)
    - **CPU Threads**: Số luồng xử lý (mặc định: 4)
-   - **SAT Threshold**: Ngưỡng tách câu (1-10, cao = tách nhiều câu)
    - **Phân tách người nói**: Bật/tắt speaker diarization (độ chính xác tạm nhưng chạy lâu)
 
 3. **Xử lý**:
@@ -262,7 +256,6 @@ sherpa-vietnamese-asr/
 ├── speaker_diarization.py      # Phân tách người nói
 ├── audio_analyzer.py           # Phân tích chất lượng âm thanh
 ├── punctuation_restorer_improved.py  # Thêm dấu câu
-├── sat_segmenter.py            # Tách đoạn văn bản
 ├── quality_result_dialog.py    # Dialog hiển thị kết quả
 ├── common.py                   # Utilities & shared components
 ├── build-portable/             # Scripts build & tải models
@@ -354,7 +347,6 @@ Dự án này sử dụng [MIT License](LICENSE).
 | transformers | Apache-2.0 |
 | torch | BSD-3-Clause |
 | sentence-transformers | Apache-2.0 |
-| wtpsplit | MIT |
 | soundfile | BSD-3-Clause |
 | librosa | ISC |
 | numpy | BSD-3-Clause |
@@ -381,7 +373,6 @@ Dự án này sử dụng [MIT License](LICENSE).
 
 ### NLP & Segmentation
 - [ViBERT-capu](https://huggingface.co/dragonSwing/vibert-capu) - Punctuation Restoration
-- [Wikipedia Segmentation](https://huggingface.co/segment-any-text/sat-12l-sm) - SAT Segmentation
 
 ### Speaker Diarization
 - [csukuangfj/speaker-embedding-models](https://huggingface.co/csukuangfj/speaker-embedding-models) - Speaker Embedding Models
@@ -390,7 +381,7 @@ Dự án này sử dụng [MIT License](LICENSE).
 - [DNSMOS](https://github.com/microsoft/DNS-Challenge) - Audio Quality Assessment
 
 
-### Vibe code
+### Audio Quality
 - [Antigravity] (https://antigravity.google)
 - [KimiCode] (https://www.kimi.com/code)
 

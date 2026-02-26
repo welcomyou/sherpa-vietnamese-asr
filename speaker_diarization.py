@@ -496,6 +496,7 @@ class SpeakerDiarizer:
         for trans_seg in transcribed_segments:
             trans_start = trans_seg.get("start", 0)
             trans_end = trans_seg.get("end", trans_start + 1)
+            raw_words = trans_seg.get("raw_words", [])
             
             # Find overlapping speaker segments
             speaker_votes = {}
@@ -510,23 +511,110 @@ class SpeakerDiarizer:
                         speaker_votes[speaker_id] = 0
                     speaker_votes[speaker_id] += overlap_duration
             
-            # Assign speaker with most overlap
-            if speaker_votes:
-                best_speaker_id = max(speaker_votes, key=speaker_votes.get)
-                best_speaker = f"Người nói {best_speaker_id + 1}"
-            else:
-                if results:
-                    best_speaker = results[-1].get("speaker", "Người nói 1")
-                    best_speaker_id = results[-1].get("speaker_id", 0)
+            # If there's no clear overlap, or no raw_words, or only one speaker vote, fallback to segment-level
+            if not raw_words or len(speaker_votes) <= 1:
+                if speaker_votes:
+                    best_speaker_id = max(speaker_votes, key=speaker_votes.get)
+                    best_speaker = f"Người nói {best_speaker_id + 1}"
                 else:
-                    best_speaker = "Người nói 1"
-                    best_speaker_id = 0
+                    if results:
+                        best_speaker = results[-1].get("speaker", "Người nói 1")
+                        best_speaker_id = results[-1].get("speaker_id", 0)
+                    else:
+                        best_speaker = "Người nói 1"
+                        best_speaker_id = 0
+                
+                seg_copy = dict(trans_seg)
+                if "raw_words" in seg_copy:
+                    del seg_copy["raw_words"]  # Clean up memory
+                seg_copy.update({
+                    "speaker": best_speaker,
+                    "speaker_id": best_speaker_id
+                })
+                results.append(seg_copy)
+                continue
+
+            # Word-level speaker assignment
+            word_groups = []
+            current_speaker_id = None
+            current_group = []
+
+            for w in raw_words:
+                w_start = w.get("start", 0)
+                w_end = w.get("end", 0)
+                
+                # Find best speaker for this word
+                w_votes = {}
+                for spk_seg in speaker_segments:
+                    o_start = max(w_start, spk_seg.start)
+                    o_end = min(w_end, spk_seg.end)
+                    o_dur = max(0, o_end - o_start)
+                    if o_dur > 0:
+                        w_votes[spk_seg.speaker] = w_votes.get(spk_seg.speaker, 0) + o_dur
+                
+                if w_votes:
+                    w_spk_id = max(w_votes, key=w_votes.get)
+                else:
+                    # Fallback to previous word's speaker or segment's best speaker
+                    w_spk_id = current_speaker_id if current_speaker_id is not None else max(speaker_votes, key=speaker_votes.get)
+
+                if w_spk_id != current_speaker_id:
+                    if current_group:
+                        word_groups.append((current_speaker_id, current_group))
+                    current_speaker_id = w_spk_id
+                    current_group = [w]
+                else:
+                    current_group.append(w)
             
-            results.append({
-                **trans_seg,
-                "speaker": best_speaker,
-                "speaker_id": best_speaker_id
-            })
+            if current_group:
+                word_groups.append((current_speaker_id, current_group))
+
+            # If ended up with only 1 group, no split needed
+            if len(word_groups) == 1:
+                spk_id = word_groups[0][0]
+                seg_copy = dict(trans_seg)
+                if "raw_words" in seg_copy:
+                    del seg_copy["raw_words"]
+                seg_copy.update({
+                    "speaker": f"Người nói {spk_id + 1}",
+                    "speaker_id": spk_id
+                })
+                results.append(seg_copy)
+                continue
+
+            # Split text proportionally
+            punct_words = trans_seg.get("text", "").split()
+            total_raw = len(raw_words)
+            punct_idx = 0
+
+            for i, (spk_id, group_words) in enumerate(word_groups):
+                g_start = group_words[0].get("start", trans_start)
+                g_end = group_words[-1].get("end", trans_end)
+                
+                # Assign punctuated words to this group
+                if i == len(word_groups) - 1:
+                    g_punct = punct_words[punct_idx:]
+                else:
+                    num_punct = int(round(len(group_words) / float(total_raw) * len(punct_words)))
+                    # Ensure at least 1 word if possible
+                    if num_punct == 0 and punct_idx < len(punct_words):
+                        num_punct = 1
+                    g_punct = punct_words[punct_idx:punct_idx + num_punct]
+                    punct_idx += num_punct
+                
+                g_text = " ".join(g_punct)
+                
+                seg_copy = dict(trans_seg)
+                if "raw_words" in seg_copy:
+                    del seg_copy["raw_words"]
+                seg_copy.update({
+                    "text": g_text,
+                    "start": g_start,
+                    "end": g_end,
+                    "speaker": f"Người nói {spk_id + 1}",
+                    "speaker_id": spk_id
+                })
+                results.append(seg_copy)
         
         return results
     

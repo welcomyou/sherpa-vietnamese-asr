@@ -154,7 +154,7 @@ class OnlineStreamingASRThread(QThread):
         
         # Speech duration tracking (Issue #3: max_speech_duration check)
         self.current_speech_duration = 0.0
-        self.max_speech_duration = 25.0  # Max 25 seconds per segment (tăng từ 15s để giảm mất chữ)
+        self.max_speech_duration = 12.0  # Max 12 seconds per segment
         
         # Pending actions
         self.pending_speaker = None
@@ -228,7 +228,8 @@ class OnlineStreamingASRThread(QThread):
                 rule1_min_trailing_silence=3.0,
                 rule2_min_trailing_silence=2.0,  # Giảm xuống 2.0 vì không có VAD delay
                 rule3_min_utterance_length=20.0,
-                decoding_method="greedy_search",
+                decoding_method="modified_beam_search",
+                max_active_paths=8,
                 hotwords_file="",
                 hotwords_score=1.5,
             )

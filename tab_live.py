@@ -1859,6 +1859,9 @@ class LiveProcessingTab(QWidget):
                             'text': p.get('text', ''),
                             'timestamp': p.get('timestamp', 0)
                         })
+                        
+                    # Fix partials formatting if the offline/online system in tab live stores chunks differently
+                    # For compatibility with tab_file, each partial should just be its word chunk and timestamp
             
             # Flush phần cuối
             flush_current_text()
@@ -2127,8 +2130,8 @@ class LiveProcessingTab(QWidget):
                                 num_threads=4,
                                 sample_rate=16000,
                                 feature_dim=80,
-                                decoding_method="greedy_search",
-                                max_active_paths=4,
+                                decoding_method="modified_beam_search",
+                                max_active_paths=8,
                             )
                             print(f"[LiveTab] Created streaming recognizer from {model_folder}")
                         else:
@@ -2141,7 +2144,8 @@ class LiveProcessingTab(QWidget):
                                 num_threads=4,
                                 sample_rate=16000,
                                 feature_dim=80,
-                                decoding_method="greedy_search",
+                                decoding_method="modified_beam_search",
+                                max_active_paths=8,
                             )
                             # Tạo analyzer với offline recognizer
                             self.mic_analyzer = AudioQualityAnalyzer(
@@ -2366,24 +2370,87 @@ class LiveProcessingTab(QWidget):
                 self._update_display()
                 print("[Live] Display updated")
     
-    def on_merge_speaker_requested(self, sentence_idx, direction):
+    def on_merge_speaker_requested(self, anchor_id, direction):
         """Xử lý khi yêu cầu gộp ngườii nói - GỘP CẢ TEXT SEGMENTS"""
         print(f"\n{'='*60}")
-        print(f'[TAB_LIVE][MERGE] === MERGE REQUESTED sentence_idx={sentence_idx} direction={direction}')
-        print(f"[TAB_LIVE][MERGE] Input sentence_idx={sentence_idx}, direction='{direction}'")
-        print(f"[Live] Merge speaker requested: anchor_id={sentence_idx}, direction={direction}")
+        print(f'[TAB_LIVE][MERGE] === MERGE REQUESTED anchor_id={anchor_id} direction={direction}')
+        print(f"[TAB_LIVE][MERGE] Input anchor_id={anchor_id}, direction='{direction}'")
+        print(f"[Live] Merge speaker requested: anchor_id={anchor_id}, direction={direction}")
         
         if not getattr(self, 'has_speaker_diarization', False):
             print("[Live] No speaker diarization, skip merge")
             return
+            
+        location = self._find_segment_and_chunk(anchor_id)
+        if location is None:
+            print(f"[Live] Cannot find location for anchor {anchor_id}")
+            return
+            
+        clickable_idx, chunk_idx, seg_type = location
+        print(f"[Live] Found at clickable_idx={clickable_idx}, chunk_idx={chunk_idx}, type={seg_type}")
         
-        # Chuyển đổi anchor_id thành index thực
-        real_idx = self._anchor_id_to_segment_index(sentence_idx)
+        # Split segment if we clicked on a partial
+        if seg_type == 'text' and chunk_idx >= 0:
+            if direction == 'prev':
+                split_point = chunk_idx + 1
+            else:
+                split_point = chunk_idx
+                
+            seg = self.clickable_segments[clickable_idx]
+            partials = seg.get('partials', [])
+            
+            if 0 < split_point < len(partials):
+                self._split_text_segment_at_chunk(clickable_idx, split_point)
+                
+                # After split, text segments are at clickable_idx and clickable_idx + 1
+                # Adjust clickable_idx to point to the correct segment based on direction
+                if direction == 'next':
+                    clickable_idx += 1
+                    
+        # Find current speaker
+        current_speaker = None
+        for i in range(clickable_idx, -1, -1):
+            if self.clickable_segments[i].get('type') == 'speaker':
+                current_speaker = self.clickable_segments[i].get('text', '').replace('__SPK_SEP__', '').strip()
+                break
+                
+        if current_speaker is None:
+            return
+            
+        # Insert speaker tag to split the block if needed
+        if direction == 'prev':
+            if clickable_idx + 1 < len(self.clickable_segments):
+                if self.clickable_segments[clickable_idx + 1].get('type') != 'speaker':
+                    self.clickable_segments.insert(clickable_idx + 1, {
+                        'type': 'speaker',
+                        'text': f"__SPK_SEP__{current_speaker}__SPK_SEP__",
+                        'segment_id': -1
+                    })
+        elif direction == 'next':
+            if clickable_idx - 1 >= 0:
+                if self.clickable_segments[clickable_idx - 1].get('type') != 'speaker':
+                    self.clickable_segments.insert(clickable_idx, {
+                        'type': 'speaker',
+                        'text': f"__SPK_SEP__{current_speaker}__SPK_SEP__",
+                        'segment_id': -1
+                    })
+                    clickable_idx += 1
+
+        # Find real text index to find current speaker block
+        text_count = 0
+        real_idx = None
+        for i, s in enumerate(self.clickable_segments):
+            if s.get('type') == 'text' or s.get('type') == 'partial':
+                if i == clickable_idx:
+                    real_idx = text_count
+                    break
+                text_count += 1
+                
         if real_idx is None:
-            print(f"[Live] Cannot find segment for anchor_id {sentence_idx}")
+            print(f"[Live] Cannot find text index for clickable_idx {clickable_idx}")
             return
         
-        print(f"[Live] Mapped anchor_id {sentence_idx} to real_idx {real_idx}")
+        print(f"[Live] Mapped anchor_id {anchor_id} to real_idx {real_idx}")
         
         # Tìm block của current speaker trong clickable_segments
         current_block = self._find_speaker_block_by_text_idx(real_idx)
@@ -2575,49 +2642,22 @@ class LiveProcessingTab(QWidget):
         print(f"[Live] First block: {first_block['speaker']} range {first_block['start']}-{first_block['end']}")
         print(f"[Live] Second block: {second_block['speaker']} range {second_block['start']}-{second_block['end']}")
         
-        # Gộp text và partials theo đúng thứ tự thờigian
-        merged_texts = []
-        merged_partials = []
+        target_speaker_name = target_block['speaker']
         
-        # Từ block đầu tiên
-        for idx in first_block['text_segments']:
-            seg = self.clickable_segments[idx]
-            merged_texts.append(seg.get('text', ''))
-            for p in seg.get('partials', []):
-                merged_partials.append(p.copy())
-        
-        # Từ block thứ hai
-        for idx in second_block['text_segments']:
-            seg = self.clickable_segments[idx]
-            merged_texts.append(seg.get('text', ''))
-            for p in seg.get('partials', []):
-                merged_partials.append(p.copy())
-        
-        # Tạo segment mới đã gộp
-        merged_seg = {
-            'type': 'text',
-            'text': ' '.join(merged_texts),
-            'start_time': self.clickable_segments[first_block['text_segments'][0]].get('start_time', 0) if first_block['text_segments'] else 0,
-            'segment_id': self._get_next_segment_id(),
-            'partials': merged_partials
-        }
-        
-        # Xóa tất cả text segments và speaker của cả 2 block
-        # Xóa từ cuối đến đầu để index không bị thay đổi
-        all_indices = (first_block['text_segments'] + [first_block['start']] + 
-                      second_block['text_segments'] + [second_block['start']])
-        
-        # Sắp xếp giảm dần để xóa an toàn
-        for idx in sorted(all_indices, reverse=True):
-            if 0 <= idx < len(self.clickable_segments):
-                del self.clickable_segments[idx]
-        
-        # Chèn segment mới và speaker (dùng tên của target_block)
-        insert_pos = min(first_block['start'], second_block['start'])
-        self.clickable_segments.insert(insert_pos, {'type': 'speaker', 'text': f"__SPK_SEP__{target_block['speaker']}__SPK_SEP__", 'segment_id': -1})
-        self.clickable_segments.insert(insert_pos + 1, merged_seg)
-        
-        print(f"[Live] Created merged segment with {len(merged_partials)} partials at position {insert_pos}")
+        # 1. Đổi tên thẻ speaker đầu tiên thành speaker đích
+        first_tag_idx = first_block['start']
+        if 0 <= first_tag_idx < len(self.clickable_segments):
+            if self.clickable_segments[first_tag_idx].get('type') == 'speaker':
+                self.clickable_segments[first_tag_idx]['text'] = f"__SPK_SEP__{target_speaker_name}__SPK_SEP__"
+                
+        # 2. Xóa thẻ speaker thứ 2 (để nối hai block văn bản lại với nhau dướii người nói đầu tiên)
+        second_tag_idx = second_block['start']
+        if 0 <= second_tag_idx < len(self.clickable_segments):
+            if self.clickable_segments[second_tag_idx].get('type') == 'speaker':
+                del self.clickable_segments[second_tag_idx]
+                print(f"[Live] Removed speaker tag at index {second_tag_idx}")
+                
+        print(f"[Live] Successfully merged blocks by updating tags.")
     
     def _convert_clickable_to_segments(self):
         """Chuyển đổi clickable_segments sang format segments tương thích với tab_file"""
