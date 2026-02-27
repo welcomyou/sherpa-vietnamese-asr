@@ -10,6 +10,131 @@ from difflib import SequenceMatcher
 
 import psutil
 
+# === Hotwords / BPE Vocab Helpers ===
+def ensure_bpe_vocab(model_path):
+    """
+    Tự động sinh file bpe.vocab từ bpe.model nếu chưa tồn tại.
+    Sherpa-ONNX cần file vocab dạng text để xử lý hotwords với BPE.
+    
+    Args:
+        model_path: Đường dẫn đến thư mục chứa model
+        
+    Returns:
+        Đường dẫn đến file bpe.vocab hoặc chuỗi rỗng nếu không thể tạo
+    """
+    bpe_model = os.path.join(model_path, "bpe.model")
+    bpe_vocab = os.path.join(model_path, "bpe.vocab")
+    
+    if os.path.exists(bpe_model) and not os.path.exists(bpe_vocab):
+        try:
+            print(f"[Hotwords] Generating bpe.vocab from {bpe_model}...")
+            try:
+                import sentencepiece as sp
+            except ImportError:
+                print("[Hotwords] ERROR: Module 'sentencepiece' not found!")
+                print("[Hotwords] Please install it: pip install sentencepiece")
+                print("[Hotwords] OR manually create bpe.vocab using:")
+                print(f"[Hotwords]   python -c \"import sentencepiece as sp; s = sp.SentencePieceProcessor(model_file='{bpe_model}'); open('{bpe_vocab}', 'w', encoding='utf-8').write('\\n'.join([f'{{s.IdToPiece(i)}}\\t{{s.GetScore(i)}}' for i in range(s.GetPieceSize())]))\"")
+                return ""
+            s = sp.SentencePieceProcessor(model_file=bpe_model)
+            with open(bpe_vocab, 'w', encoding='utf-8') as f:
+                for i in range(s.GetPieceSize()):
+                    f.write(f"{s.IdToPiece(i)}\t{s.GetScore(i)}\n")
+            print(f"[Hotwords] Generated bpe.vocab successfully")
+        except Exception as e:
+            print(f"[Hotwords] Error generating bpe.vocab: {e}")
+            return ""
+    
+    return bpe_vocab if os.path.exists(bpe_vocab) else ""
+
+
+def prepare_hotwords_file(hotwords_path, base_dir):
+    """
+    Chuẩn bị file hotwords cho Sherpa-ONNX.
+    - Đọc file hotword.txt từ ngườii dùng
+    - Chuyển tất cả thành CHỮ IN HOA (vì model được train với uppercase)
+    - Lưu ra file tạm để Sherpa-ONNX sử dụng
+    
+    Args:
+        hotwords_path: Đường dẫn đến file hotword.txt gốc
+        base_dir: Thư mục gốc để lưu file tạm
+        
+    Returns:
+        Đường dẫn đến file hotwords đã xử lý hoặc None nếu file gốc không tồn tại/rỗng
+    """
+    if not os.path.exists(hotwords_path) or os.path.getsize(hotwords_path) == 0:
+        return None
+    
+    try:
+        # File tạm đã xử lý (uppercase)
+        processed_path = os.path.join(base_dir, "hotword_processed.txt")
+        
+        with open(hotwords_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        processed_lines = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                processed_lines.append(line)
+                continue
+            
+            # Tách phần từ khóa và trọng số (nếu có)
+            # Format: "Từ khóa :2.5" hoặc "Từ khóa"
+            if ':' in line:
+                parts = line.rsplit(':', 1)
+                keyword = parts[0].strip()
+                score = parts[1].strip()
+                # Chuyển keyword thành uppercase, giữ nguyên score
+                processed_lines.append(f"{keyword.upper()} :{score}")
+            else:
+                # Không có score -> chỉ uppercase
+                processed_lines.append(line.upper())
+        
+        with open(processed_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(processed_lines))
+        
+        print(f"[Hotwords] Loaded {len([l for l in processed_lines if l and not l.startswith('#')])} hotwords from {hotwords_path}")
+        return processed_path
+        
+    except Exception as e:
+        print(f"[Hotwords] Error processing hotwords file: {e}")
+        return None
+
+
+def get_hotwords_config(model_path, base_dir):
+    """
+    Lấy cấu hình hotwords cho Sherpa-ONNX recognizer.
+    
+    Args:
+        model_path: Đường dẫn đến thư mục model
+        base_dir: Thư mục gốc của ứng dụng (để tìm hotword.txt)
+        
+    Returns:
+        Dict chứa các tham số hotwords hoặc dict rỗng nếu không có hotwords
+    """
+    hotwords_path = os.path.join(base_dir, "hotword.txt")
+    
+    # Kiểm tra xem có file hotword không
+    processed_hotwords = prepare_hotwords_file(hotwords_path, base_dir)
+    if not processed_hotwords:
+        return {}
+    
+    # Đảm bảo có file bpe.vocab
+    bpe_vocab_path = ensure_bpe_vocab(model_path)
+    if not bpe_vocab_path:
+        print("[Hotwords] Warning: bpe.vocab not available, hotwords disabled")
+        return {}
+    
+    # Trả về config hotwords
+    return {
+        "hotwords_file": processed_hotwords,
+        "hotwords_score": 1.5,  # Trọng số mặc định
+        "modeling_unit": "bpe",
+        "bpe_vocab": bpe_vocab_path,
+    }
+
+
 # === CPU Affinity / Thread Limiting Logic ===
 def get_allowed_cpu_count():
     """Detects the number of allowed CPUs (respecting affinity/container limits)."""

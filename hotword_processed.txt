@@ -1,0 +1,249 @@
+# File hotwords cho Sherpa-ONNX ASR
+# Định dạng: Mỗi dòng là một từ khóa, có thể kèm theo trọng số bằng cú pháp ":số"
+# Ví dụ:
+#   ỦY BAN NHÂN DÂN :2.5
+#   CHUYỂN ĐỔI SỐ :1.5
+#   CÔNG NGHỆ THÔNG TIN
+#
+# Lưu ý:
+# - Bạn có thể viết hoa hoặc thường tùy ý, chương trình sẽ tự động chuyển thành IN HOA
+# - Các từ không chỉ định trọng số sẽ được dùng trọng số mặc định là 1.5
+# - Hotwords giúp ASR nhận diện chính xác hơn các từ chuyên ngành, tên riêng, từ viết tắt...
+
+# Thêm hotwords của bạn bên dưới:
+BAN CHẤP HÀNH
+BỘ CHÍNH TRỊ
+BAN BÍ THƯ
+THÀNH ỦY
+ĐẢNG ỦY
+BAN THƯỜNG VỤ
+THƯỜNG TRỰC
+ĐẢNG BỘ THÀNH PHỐ
+BAN TỔ CHỨC
+BAN TUYÊN GIÁO VÀ DÂN VẬN
+ỦY BAN KIỂM TRA
+BAN NỘI CHÍNH
+CHUYÊN TRÁCH THAM MƯU
+ỦY VIÊN
+CẤP XÃ
+TRUNG TÂM CHÍNH TRỊ
+ĐƠN VỊ SỰ NGHIỆP
+BAN XÂY DỰNG ĐẢNG
+VĂN PHÒNG THÀNH ỦY
+HỘI ĐỒNG NHÂN DÂN
+ỦY BAN NHÂN DÂN
+ĐOÀN ĐẠI BIỂU QUỐC HỘI
+MẶT TRẬN TỔ QUỐC
+BAN CÁN SỰ ĐẢNG
+ĐẢNG ĐOÀN QUỐC HỘI
+BAN CHỈ ĐẠO
+TỔ GIÚP VIỆC
+CƠ QUAN THƯỜNG TRỰC
+NGHỊ QUYẾT ĐẠI HỘI
+ĐIỀU LỆ ĐẢNG
+CƯƠNG LĨNH CHÍNH TRỊ
+PHÒNG CHỐNG THAM NHŨNG
+PHONG TỎA TÀI KHOẢN
+LỢI ÍCH NHÓM
+CHUYỂN ĐỔI SỐ
+HẠ TẦNG SỐ
+DỮ LIỆU SỐ
+CƠ SỞ DỮ LIỆU QUỐC GIA
+CHÍNH PHỦ SỐ
+KINH TẾ SỐ
+XÃ HỘI SỐ
+NỀN TẢNG SỐ
+HỆ THỐNG THÔNG TIN
+AN NINH MẠNG
+CHUYÊN DÙNG
+CHỮ KÝ SỐ
+DỊCH VỤ CÔNG TRỰC TUYẾN
+THỦ TỤC HÀNH CHÍNH
+ĐỀ ÁN 06
+ĐỀ ÁN 204
+NGHỊ QUYẾT 57
+ĐÔ THỊ THÔNG MINH
+TRUNG TÂM DỮ LIỆU
+BẢO VỆ NỀN TẢNG TƯ TƯỞNG
+PHẢN BÁC QUAN ĐIỂM SAI TRÁI
+KHỐI ĐẠI ĐOÀN KẾT
+CẢI CÁCH TƯ PHÁP
+CÔNG AN THÀNH PHỐ
+VIỆN KIỂM SÁT NHÂN DÂN
+TÒA ÁN NHÂN DÂN
+CỤC THI HÀNH ÁN DÂN SỰ
+QUẢN LÝ ĐÔ THỊ
+TRẬT TỰ AN TOÀN GIAO THÔNG
+PHÒNG CHÁY CHỮA CHÁY
+CÔNG TÁC CÁN BỘ
+LUÂN CHUYỂN CÁN BỘ
+ĐÁNH GIÁ CÁN BỘ
+TỰ DIỄN BIẾN
+TỰ CHUYỂN HÓA
+NÊU GƯƠNG CÁN BỘ
+KHỐI ĐẠI ĐOÀN KẾT
+PHƯỜNG HIỆP BÌNH
+PHƯỜNG TAM BÌNH
+PHƯỜNG THỦ ĐỨC
+PHƯỜNG LINH XUÂN
+PHƯỜNG LONG BÌNH
+PHƯỜNG TĂNG NHƠN PHÚ
+PHƯỜNG PHƯỚC LONG
+PHƯỜNG LONG PHƯỚC
+PHƯỜNG LONG TRƯỜNG
+PHƯỜNG AN KHÁNH
+PHƯỜNG BÌNH TRUNG
+PHƯỜNG CÁT LÁI
+PHƯỜNG TÂN ĐỊNH
+PHƯỜNG BẾN THÀNH
+PHƯỜNG SÀI GÒN
+PHƯỜNG CẦU ÔNG LÃNH
+PHƯỜNG BÀN CỜ
+PHƯỜNG XUÂN HÒA
+PHƯỜNG NHIÊU LỘC
+PHƯỜNG VĨNH HỘI
+PHƯỜNG KHÁNH HỘI
+PHƯỜNG XÓM CHIẾU
+PHƯỜNG CHỢ QUÁN
+PHƯỜNG AN ĐÔNG
+PHƯỜNG CHỢ LỚN
+PHƯỜNG BÌNH TIÊN
+PHƯỜNG BÌNH TÂY
+PHƯỜNG BÌNH PHÚ
+PHƯỜNG PHÚ LÂM
+PHƯỜNG TÂN MỸ
+PHƯỜNG TÂN HƯNG
+PHƯỜNG TÂN THUẬN
+PHƯỜNG PHÚ THUẬN
+PHƯỜNG CHÁNH HƯNG
+PHƯỜNG BÌNH ĐÔNG
+PHƯỜNG PHÚ ĐỊNH
+PHƯỜNG VƯỜN LÀI
+PHƯỜNG DIÊN HỒNG
+PHƯỜNG HÒA HƯNG
+PHƯỜNG HÒA BÌNH
+PHƯỜNG PHÚ THỌ
+PHƯỜNG BÌNH THỚI
+PHƯỜNG MINH PHỤNG
+PHƯỜNG ĐÔNG HƯNG THUẬN
+PHƯỜNG TRUNG MỸ TÂY
+PHƯỜNG TÂN THỚI HIỆP
+PHƯỜNG THỚI AN
+PHƯỜNG AN PHÚ ĐÔNG
+PHƯỜNG GIA ĐỊNH
+PHƯỜNG BÌNH THẠNH
+PHƯỜNG BÌNH LỢI TRUNG
+PHƯỜNG THẠNH MỸ TÂY
+PHƯỜNG BÌNH QUỚI
+PHƯỜNG BÌNH TÂN
+PHƯỜNG BÌNH HƯNG HÒA
+PHƯỜNG BÌNH TRỊ ĐÔNG
+PHƯỜNG AN LẠC
+PHƯỜNG TÂN TẠO
+PHƯỜNG HẠNH THÔNG
+PHƯỜNG AN NHƠN
+PHƯỜNG GÒ VẤP
+PHƯỜNG THÔNG TÂY HỘI
+PHƯỜNG AN HỘI TÂY
+PHƯỜNG AN HỘI ĐÔNG
+PHƯỜNG ĐỨC NHUẬN
+PHƯỜNG CẦU KIỆU
+PHƯỜNG PHÚ NHUẬN
+PHƯỜNG TÂN SƠN HÒA
+PHƯỜNG TÂN SƠN NHẤT
+PHƯỜNG TÂN HÒA
+PHƯỜNG BẢY HIỀN
+PHƯỜNG TÂN BÌNH
+PHƯỜNG TÂN SƠN
+PHƯỜNG TÂY THẠNH
+PHƯỜNG TÂN SƠN NHÌ
+PHƯỜNG PHÚ THỌ HÒA
+PHƯỜNG PHÚ THẠNH
+PHƯỜNG TÂN PHÚ
+XÃ VĨNH LỘC
+XÃ TÂN VĨNH LỘC
+XÃ BÌNH LỢI
+XÃ TÂN NHỰT
+XÃ BÌNH CHÁNH
+XÃ HƯNG LONG
+XÃ BÌNH HƯNG
+XÃ AN NHƠN TÂY
+XÃ THÁI MỸ
+XÃ NHUẬN ĐỨC
+XÃ TÂN AN HỘI
+XÃ CỦ CHI
+XÃ PHÚ HÒA ĐÔNG
+XÃ BÌNH MỸ
+XÃ BÌNH KHÁNH
+XÃ CẦN GIỜ
+XÃ AN THỚI ĐÔNG
+XÃ THẠNH AN
+XÃ HÓC MÔN
+XÃ BÀ ĐIỂM
+XÃ XUÂN THỚI SƠN
+XÃ ĐÔNG THẠNH
+XÃ NHÀ BÈ
+XÃ HIỆP PHƯỚC
+PHƯỜNG VŨNG TÀU
+PHƯỜNG TAM THẮNG
+PHƯỜNG RẠCH DỪA
+PHƯỜNG PHƯỚC THẮNG
+PHƯỜNG BÀ RỊA
+PHƯỜNG LONG HƯƠNG
+PHƯỜNG TAM LONG
+PHƯỜNG PHÚ MỸ
+PHƯỜNG TÂN THÀNH
+PHƯỜNG TÂN PHƯỚC
+PHƯỜNG TÂN HẢI
+XÃ CHÂU PHA
+XÃ NGÃI GIAO
+XÃ BÌNH GIÃ
+XÃ KIM LONG
+XÃ CHÂU ĐỨC
+XÃ XUÂN SƠN
+XÃ NGHĨA THÀNH
+XÃ HỒ TRÀM
+XÃ XUYÊN MỘC
+XÃ HÒA HỘI
+XÃ BÀU LÂM
+XÃ ĐẤT ĐỎ
+XÃ LONG HẢI
+XÃ LONG ĐIỀN
+XÃ PHƯỚC HẢI
+ĐẶC KHU ĐẶC KHU CÔN ĐẢO
+PHƯỜNG ĐÔNG HÒA
+PHƯỜNG DĨ AN
+PHƯỜNG TÂN ĐÔNG HIỆP
+PHƯỜNG THUẬN AN
+PHƯỜNG THUẬN GIAO
+PHƯỜNG BÌNH HÒA
+PHƯỜNG LÁI THIÊU
+PHƯỜNG AN PHÚ
+PHƯỜNG BÌNH DƯƠNG
+PHƯỜNG CHÁNH HIỆP
+PHƯỜNG THỦ DẦU MỘT
+PHƯỜNG PHÚ LỢI
+PHƯỜNG VĨNH TÂN
+PHƯỜNG BÌNH MỸ
+PHƯỜNG TÂN UYÊN
+PHƯỜNG TÂN HIỆP
+PHƯỜNG TÂN KHÁNH
+PHƯỜNG PHÚ AN
+PHƯỜNG TÂY NAM
+PHƯỜNG LONG NGUYÊN
+PHƯỜNG BẾN CÁT
+PHƯỜNG CHÁNH PHÚ HÒA
+PHƯỜNG THỚI HÒA
+PHƯỜNG TÂN ĐỊNH
+XÃ BẮC TÂN UYÊN
+XÃ THƯỜNG TÂN
+XÃ PHÚ GIÁO
+XÃ PHƯỚC THÀNH
+XÃ PHƯỚC HÒA
+XÃ PHƯỚC VĨNH
+XÃ TRỪ VĂN THỐ
+XÃ BÀU BÀNG
+XÃ MINH THẠNH
+XÃ LONG HÒA
+XÃ DẦU TIẾNG
+XÃ THANH AN

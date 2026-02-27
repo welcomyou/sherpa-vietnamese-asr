@@ -259,7 +259,7 @@ def load_audio(filename, target_sample_rate) -> Tuple[np.ndarray, int]:
         # Fall back to librosa for other formats
         if LIBROSA_AVAILABLE:
             print(f"[SpeakerDiarizer] Soundfile failed, using librosa for {filename}")
-            audio, sample_rate = librosa.load(filename, sr=target_sample_rate, mono=True)
+            audio, sample_rate = librosa.load(filename, sr=target_sample_rate, mono=True, res_type="soxr_vhq")
             audio = audio.astype(np.float32)
             return audio, target_sample_rate
         else:

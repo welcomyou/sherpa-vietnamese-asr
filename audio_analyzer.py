@@ -453,7 +453,7 @@ class AudioQualityAnalyzer:
         """
         try:
             # Load audio
-            audio, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
+            audio, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True, res_type="soxr_vhq")
             
             # Stratified sampling
             samples = self.stratified_sample(audio)

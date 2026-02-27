@@ -14,8 +14,8 @@ from punctuation_restorer_improved import ImprovedPunctuationRestorer
 # =============================================================================
 # OVERLAP CHUNKING CONFIGURATION
 # =============================================================================
-OVERLAP_SEC = 2.0  # Overlap duration in seconds (2s = sweet spot)
-OVERLAP_SAMPLES = int(OVERLAP_SEC * 16000)  # 32000 samples @ 16kHz
+OVERLAP_SEC = 3.0  # Overlap duration in seconds (3s = sweet spot)
+OVERLAP_SAMPLES = int(OVERLAP_SEC * 16000)  # 48000 samples @ 16kHz
 MAX_OVERLAP_WORDS = 100  # Nới lỏng thành 100 từ, trành cắt xén rác vì tiếng Việt phát âm đơn âm tiết nhanh
 FUZZY_MATCH_THRESHOLD = 0.8  # Ngưỡng Levenshtein similarity
 MIN_MATCH_RATIO = 0.5  # Ngưỡng tối thiểu để chấp nhận overlap match
@@ -538,6 +538,14 @@ class TranscriberThread(QThread):
                 "decoding_method": "modified_beam_search",
                 "max_active_paths": 8,
             }
+            
+            # Thêm hotwords nếu có
+            from common import get_hotwords_config, BASE_DIR
+            hotwords_config = get_hotwords_config(self.model_path, BASE_DIR)
+            if hotwords_config:
+                kwargs.update(hotwords_config)
+                print(f"[Hotwords] Enabled with score {hotwords_config.get('hotwords_score', 1.5)}")
+            
             pass_bpe = False
             if os.path.exists(bpe_model):
                 # We need to verify if from_transducer accepts bpe_model
@@ -571,7 +579,7 @@ class TranscriberThread(QThread):
             if file_ext in needs_conversion:
                 try:
                     # Thử load trực tiếp với librosa trước
-                    audio, sample_rate = librosa.load(self.file_path, sr=16000, mono=True)
+                    audio, sample_rate = librosa.load(self.file_path, sr=16000, mono=True, res_type="soxr_vhq")
                 except Exception as e:
                     # Nếu không được, chuyển đổi sang wav tạm thờii
                     self.progress.emit(f"PHASE:LoadAudio|Đang chuyển đổi {file_ext} sang wav|35")
@@ -595,7 +603,7 @@ class TranscriberThread(QThread):
                         audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
                         audio_segment.export(temp_wav, format='wav')
                         file_to_load = temp_wav
-                        audio, sample_rate = librosa.load(file_to_load, sr=16000, mono=True)
+                        audio, sample_rate = librosa.load(file_to_load, sr=16000, mono=True, res_type="soxr_vhq")
                         # Xóa file tạm
                         if os.path.exists(temp_wav):
                             os.remove(temp_wav)
@@ -604,7 +612,15 @@ class TranscriberThread(QThread):
                     except Exception as e2:
                         raise Exception(f"Không thể đọc file {file_ext}. Đảm bảo đã cài ffmpeg: {e2}")
             else:
-                audio, sample_rate = librosa.load(file_to_load, sr=16000, mono=True)
+                audio, sample_rate = librosa.load(file_to_load, sr=16000, mono=True, res_type="soxr_vhq")
+            
+            # Peak normalization: đảm bảo audio ở mức tối ưu cho log-mel feature extraction.
+            # Chỉ thực sự ảnh hưởng khi volume rất thấp (ghi xa mic, gain nhỏ).
+            # Audio bình thường gần như không bị thay đổi.
+            peak = np.max(np.abs(audio))
+            if peak > 0 and peak < 0.5:
+                audio = audio / peak * 0.95
+                print(f"[Transcriber] Peak normalization: {peak:.4f} → 0.95 (audio volume quá thấp)")
             
             # Kết thúc đo thờigian load audio
             timing_details["upload_convert"] = time.time() - load_audio_start

@@ -233,17 +233,27 @@ class StreamingASRThread(QThread):
                 self.error.emit(f"Model files missing in {self.model_path}")
                 return
 
-            self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-                tokens=tokens,
-                encoder=encoder_files[0],
-                decoder=decoder_files[0],
-                joiner=joiner_files[0],
-                num_threads=1,
-                sample_rate=16000,
-                feature_dim=80,
-                decoding_method="modified_beam_search",
-                max_active_paths=8
-            )
+            # Prepare kwargs cho recognizer
+            kwargs = {
+                "tokens": tokens,
+                "encoder": encoder_files[0],
+                "decoder": decoder_files[0],
+                "joiner": joiner_files[0],
+                "num_threads": 1,
+                "sample_rate": 16000,
+                "feature_dim": 80,
+                "decoding_method": "modified_beam_search",
+                "max_active_paths": 8,
+            }
+            
+            # Thêm hotwords nếu có
+            from common import get_hotwords_config, BASE_DIR
+            hotwords_config = get_hotwords_config(self.model_path, BASE_DIR)
+            if hotwords_config:
+                kwargs.update(hotwords_config)
+                print(f"[StreamingASR][Hotwords] Enabled with score {hotwords_config.get('hotwords_score', 1.5)}")
+            
+            self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**kwargs)
             
             print("[StreamingASR] Model loaded.")
             self.asr_ready.emit()

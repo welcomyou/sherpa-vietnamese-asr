@@ -215,24 +215,36 @@ class OnlineStreamingASRThread(QThread):
             print(f"[OnlineStreamingASR] Using decoder: {os.path.basename(decoder_files[0])}")
             print(f"[OnlineStreamingASR] Using joiner: {os.path.basename(joiner_files[0])}")
             
+            # Chuẩn bị hotwords config
+            from common import get_hotwords_config, BASE_DIR
+            hotwords_config = get_hotwords_config(self.model_path, BASE_DIR)
+            
             # Create OnlineRecognizer - NO VAD, model handles everything
-            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
-                tokens=tokens,
-                encoder=encoder_files[0],
-                decoder=decoder_files[0],
-                joiner=joiner_files[0],
-                num_threads=self.config.get("cpu_threads", 4),
-                sample_rate=16000,
-                feature_dim=80,
-                enable_endpoint_detection=True,
-                rule1_min_trailing_silence=3.0,
-                rule2_min_trailing_silence=2.0,  # Giảm xuống 2.0 vì không có VAD delay
-                rule3_min_utterance_length=20.0,
-                decoding_method="modified_beam_search",
-                max_active_paths=8,
-                hotwords_file="",
-                hotwords_score=1.5,
-            )
+            kwargs = {
+                "tokens": tokens,
+                "encoder": encoder_files[0],
+                "decoder": decoder_files[0],
+                "joiner": joiner_files[0],
+                "num_threads": self.config.get("cpu_threads", 4),
+                "sample_rate": 16000,
+                "feature_dim": 80,
+                "enable_endpoint_detection": True,
+                "rule1_min_trailing_silence": 3.0,
+                "rule2_min_trailing_silence": 2.0,
+                "rule3_min_utterance_length": 20.0,
+                "decoding_method": "modified_beam_search",
+                "max_active_paths": 8,
+                "hotwords_file": hotwords_config.get("hotwords_file", ""),
+                "hotwords_score": hotwords_config.get("hotwords_score", 1.5),
+            }
+            
+            # Thêm modeling_unit và bpe_vocab nếu có hotwords
+            if hotwords_config:
+                kwargs["modeling_unit"] = hotwords_config.get("modeling_unit", "bpe")
+                kwargs["bpe_vocab"] = hotwords_config.get("bpe_vocab", "")
+                print(f"[OnlineStreamingASR][Hotwords] Enabled with score {kwargs['hotwords_score']}")
+            
+            self.recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(**kwargs)
             
             print("[OnlineStreamingASR] Online model loaded successfully (NO VAD).")
             self.asr_ready.emit()

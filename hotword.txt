@@ -1,0 +1,249 @@
+# File hotwords cho Sherpa-ONNX ASR
+# Định dạng: Mỗi dòng là một từ khóa, có thể kèm theo trọng số bằng cú pháp ":số"
+# Ví dụ:
+#   ỦY BAN NHÂN DÂN :2.5
+#   CHUYỂN ĐỔI SỐ :1.5
+#   CÔNG NGHỆ THÔNG TIN
+#
+# Lưu ý:
+# - Bạn có thể viết hoa hoặc thường tùy ý, chương trình sẽ tự động chuyển thành IN HOA
+# - Các từ không chỉ định trọng số sẽ được dùng trọng số mặc định là 1.5
+# - Hotwords giúp ASR nhận diện chính xác hơn các từ chuyên ngành, tên riêng, từ viết tắt...
+
+# Thêm hotwords của bạn bên dưới:
+BAN CHẤP HÀNH
+BỘ CHÍNH TRỊ
+BAN BÍ THƯ
+THÀNH ỦY
+ĐẢNG ỦY
+BAN THƯỜNG VỤ
+THƯỜNG TRỰC
+ĐẢNG BỘ THÀNH PHỐ
+BAN TỔ CHỨC
+BAN TUYÊN GIÁO VÀ DÂN VẬN
+ỦY BAN KIỂM TRA
+BAN NỘI CHÍNH
+CHUYÊN TRÁCH THAM MƯU
+ỦY VIÊN
+CẤP XÃ
+TRUNG TÂM CHÍNH TRỊ
+ĐƠN VỊ SỰ NGHIỆP
+BAN XÂY DỰNG ĐẢNG
+VĂN PHÒNG THÀNH ỦY
+HỘI ĐỒNG NHÂN DÂN
+ỦY BAN NHÂN DÂN
+ĐOÀN ĐẠI BIỂU QUỐC HỘI
+MẶT TRẬN TỔ QUỐC
+BAN CÁN SỰ ĐẢNG
+ĐẢNG ĐOÀN QUỐC HỘI
+BAN CHỈ ĐẠO
+TỔ GIÚP VIỆC
+CƠ QUAN THƯỜNG TRỰC
+NGHỊ QUYẾT ĐẠI HỘI
+ĐIỀU LỆ ĐẢNG
+CƯƠNG LĨNH CHÍNH TRỊ
+PHÒNG CHỐNG THAM NHŨNG
+PHONG TỎA TÀI KHOẢN
+LỢI ÍCH NHÓM
+CHUYỂN ĐỔI SỐ
+HẠ TẦNG SỐ
+DỮ LIỆU SỐ
+CƠ SỞ DỮ LIỆU QUỐC GIA
+CHÍNH PHỦ SỐ
+KINH TẾ SỐ
+XÃ HỘI SỐ
+NỀN TẢNG SỐ
+HỆ THỐNG THÔNG TIN
+AN NINH MẠNG
+CHUYÊN DÙNG
+CHỮ KÝ SỐ
+DỊCH VỤ CÔNG TRỰC TUYẾN
+THỦ TỤC HÀNH CHÍNH
+ĐỀ ÁN 06
+ĐỀ ÁN 204
+NGHỊ QUYẾT 57
+ĐÔ THỊ THÔNG MINH
+TRUNG TÂM DỮ LIỆU
+BẢO VỆ NỀN TẢNG TƯ TƯỞNG
+PHẢN BÁC QUAN ĐIỂM SAI TRÁI
+KHỐI ĐẠI ĐOÀN KẾT
+CẢI CÁCH TƯ PHÁP
+CÔNG AN THÀNH PHỐ
+VIỆN KIỂM SÁT NHÂN DÂN
+TÒA ÁN NHÂN DÂN
+CỤC THI HÀNH ÁN DÂN SỰ
+QUẢN LÝ ĐÔ THỊ
+TRẬT TỰ AN TOÀN GIAO THÔNG
+PHÒNG CHÁY CHỮA CHÁY
+CÔNG TÁC CÁN BỘ
+LUÂN CHUYỂN CÁN BỘ
+ĐÁNH GIÁ CÁN BỘ
+TỰ DIỄN BIẾN
+TỰ CHUYỂN HÓA
+NÊU GƯƠNG CÁN BỘ
+KHỐI ĐẠI ĐOÀN KẾT
+Phường Hiệp Bình
+Phường Tam Bình
+Phường Thủ Đức
+Phường Linh Xuân
+Phường Long Bình
+Phường Tăng Nhơn Phú
+Phường Phước Long
+Phường Long Phước
+Phường Long Trường
+Phường An Khánh
+Phường Bình Trung
+Phường Cát Lái
+Phường Tân Định
+Phường Bến Thành
+Phường Sài Gòn
+Phường Cầu Ông Lãnh
+Phường Bàn Cờ
+Phường Xuân Hòa
+Phường Nhiêu Lộc
+Phường Vĩnh Hội
+Phường Khánh Hội
+Phường Xóm Chiếu
+Phường Chợ Quán
+Phường An Đông
+Phường Chợ Lớn
+Phường Bình Tiên
+Phường Bình Tây
+Phường Bình Phú
+Phường Phú Lâm
+Phường Tân Mỹ
+Phường Tân Hưng
+Phường Tân Thuận
+Phường Phú Thuận
+Phường Chánh Hưng
+Phường Bình Đông
+Phường Phú Định
+Phường Vườn Lài
+Phường Diên Hồng
+Phường Hòa Hưng
+Phường Hòa Bình
+Phường Phú Thọ
+Phường Bình Thới
+Phường Minh Phụng
+Phường Đông Hưng Thuận
+Phường Trung Mỹ Tây
+Phường Tân Thới Hiệp
+Phường Thới An
+Phường An Phú Đông
+Phường Gia Định
+Phường Bình Thạnh
+Phường Bình Lợi Trung
+Phường Thạnh Mỹ Tây
+Phường Bình Quới
+Phường Bình Tân
+Phường Bình Hưng Hòa
+Phường Bình Trị Đông
+Phường An Lạc
+Phường Tân Tạo
+Phường Hạnh Thông
+Phường An Nhơn
+Phường Gò Vấp
+Phường Thông Tây Hội
+Phường An Hội Tây
+Phường An Hội Đông
+Phường Đức Nhuận
+Phường Cầu Kiệu
+Phường Phú Nhuận
+Phường Tân Sơn Hòa
+Phường Tân Sơn Nhất
+Phường Tân Hòa
+Phường Bảy Hiền
+Phường Tân Bình
+Phường Tân Sơn
+Phường Tây Thạnh
+Phường Tân Sơn Nhì
+Phường Phú Thọ Hòa
+Phường Phú Thạnh
+Phường Tân Phú
+Xã Vĩnh Lộc
+Xã Tân Vĩnh Lộc
+Xã Bình Lợi
+Xã Tân Nhựt
+Xã Bình Chánh
+Xã Hưng Long
+Xã Bình Hưng
+Xã An Nhơn Tây
+Xã Thái Mỹ
+Xã Nhuận Đức
+Xã Tân An Hội
+Xã Củ Chi
+Xã Phú Hòa Đông
+Xã Bình Mỹ
+Xã Bình Khánh
+Xã Cần Giờ
+Xã An Thới Đông
+Xã Thạnh An
+Xã Hóc Môn
+Xã Bà Điểm
+Xã Xuân Thới Sơn
+Xã Đông Thạnh
+Xã Nhà Bè
+Xã Hiệp Phước
+Phường Vũng Tàu
+Phường Tam Thắng
+Phường Rạch Dừa
+Phường Phước Thắng
+Phường Bà Rịa
+Phường Long Hương
+Phường Tam Long
+Phường Phú Mỹ
+Phường Tân Thành
+Phường Tân Phước
+Phường Tân Hải
+Xã Châu Pha
+Xã Ngãi Giao
+Xã Bình Giã
+Xã Kim Long
+Xã Châu Đức
+Xã Xuân Sơn
+Xã Nghĩa Thành
+Xã Hồ Tràm
+Xã Xuyên Mộc
+Xã Hòa Hội
+Xã Bàu Lâm
+Xã Đất Đỏ
+Xã Long Hải
+Xã Long Điền
+Xã Phước Hải
+Đặc khu đặc khu Côn Đảo
+Phường Đông Hòa
+Phường Dĩ An
+Phường Tân Đông Hiệp
+Phường Thuận An
+Phường Thuận Giao
+Phường Bình Hòa
+Phường Lái Thiêu
+Phường An Phú
+Phường Bình Dương
+Phường Chánh Hiệp
+Phường Thủ Dầu Một
+Phường Phú Lợi
+Phường Vĩnh Tân
+Phường Bình Mỹ
+Phường Tân Uyên
+Phường Tân Hiệp
+Phường Tân Khánh
+Phường Phú An
+Phường Tây Nam
+Phường Long Nguyên
+Phường Bến Cát
+Phường Chánh Phú Hòa
+Phường Thới Hòa
+Phường Tân Định
+Xã Bắc Tân Uyên
+Xã Thường Tân
+Xã Phú Giáo
+Xã Phước Thành
+Xã Phước Hòa
+Xã Phước Vĩnh
+Xã Trừ Văn Thố
+Xã Bàu Bàng
+Xã Minh Thạnh
+Xã Long Hòa
+Xã Dầu Tiếng
+Xã Thanh An

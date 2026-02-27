@@ -79,6 +79,7 @@ Thuvien/
 # Project specific
 1hour_qh_10min.asr.json
 output.txt
+hotword_processed.txt  # Auto-generated from hotword.txt
 
 test*
 debug*
@@ -87,3 +88,4 @@ amthanhhoitruong.asr.json
 amthanhhoitruong.txt
 *.bak
 *.dll
+generate_bpe_vocab.py
