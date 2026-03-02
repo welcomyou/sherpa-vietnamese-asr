@@ -1168,7 +1168,7 @@ class LiveProcessingTab(QWidget):
         """Bắt đầu ghi âm"""
         device_index = self.combo_microphone.currentData()
         if device_index is None or device_index < 0:
-            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn microphone trước khi ghi âm!")
+            QMessageBox.warning(self.window(), "Lỗi", "Vui lòng chọn microphone trước khi ghi âm!")
             return
         
         self.stop_preview()
@@ -1245,7 +1245,7 @@ class LiveProcessingTab(QWidget):
             self.asr_thread.start()
             print("[start_recording] Streaming ASR started")
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi", f"Không thể khởi động ASR: {str(e)}")
+            QMessageBox.critical(self.window(), "Lỗi", f"Không thể khởi động ASR: {str(e)}")
             self.is_recording = False
             return
         
@@ -1373,7 +1373,7 @@ class LiveProcessingTab(QWidget):
         duration_sec = total_bytes / (16000 * 2) if self.recorded_audio else 0
         text_len = len(self.transcribed_text) if hasattr(self, 'transcribed_text') else 0
         
-        QMessageBox.information(self, "Hoàn thành", 
+        QMessageBox.information(self.window(), "Hoàn thành", 
             f"Đã ghi âm xong!\n\n"
             f"Thờigian ghi âm: {duration_sec:.1f} giây\n"
             f"Độ dài văn bản: {text_len} ký tự\n\n"
@@ -1690,7 +1690,7 @@ class LiveProcessingTab(QWidget):
     def on_asr_error(self, msg):
         """Xử lý lỗi ASR"""
         print(f"[ASR Error] {msg}")
-        QMessageBox.critical(self, "Lỗi ASR", f"Có lỗi xảy ra:\n{msg[:200]}")
+        QMessageBox.critical(self.window(), "Lỗi ASR", f"Có lỗi xảy ra:\n{msg[:200]}")
     
     def on_processing_done(self):
         """Called when ASR has finished processing"""
@@ -1711,7 +1711,7 @@ class LiveProcessingTab(QWidget):
     
     def on_record_error(self, error_msg):
         """Xử lý lỗi recording"""
-        QMessageBox.critical(self, "Lỗi ghi âm", f"Có lỗi xảy ra khi ghi âm:\n{error_msg}")
+        QMessageBox.critical(self.window(), "Lỗi ghi âm", f"Có lỗi xảy ra khi ghi âm:\n{error_msg}")
         self.pause_recording()
         
     def load_hotkey_config(self):
@@ -1732,7 +1732,7 @@ class LiveProcessingTab(QWidget):
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.hotkey_config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            QMessageBox.warning(self, "Lỗi", f"Không thể lưu cấu hình hotkey: {e}")
+            QMessageBox.warning(self.window(), "Lỗi", f"Không thể lưu cấu hình hotkey: {e}")
 
     def open_hotkey_dialog(self):
         dialog = SpeakerHotkeyDialog(self.hotkey_config, self)
@@ -1892,7 +1892,7 @@ class LiveProcessingTab(QWidget):
     def export_audio(self):
         """Xuất file audio đã ghi âm"""
         if not self.recorded_audio:
-            QMessageBox.warning(self, "Không có dữ liệu", "Chưa có dữ liệu ghi âm nào!")
+            QMessageBox.warning(self.window(), "Không có dữ liệu", "Chưa có dữ liệu ghi âm nào!")
             return
         
         default_name = f"recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
@@ -1947,16 +1947,16 @@ class LiveProcessingTab(QWidget):
             json_exported = self._export_json(json_path)
             
             if json_exported:
-                QMessageBox.information(self, "Thành công", 
+                QMessageBox.information(self.window(), "Thành công", 
                     f"Đã xuất file thành công!\n\n"
                     f"🎵 Audio: {file_path}\n"
                     f"📄 JSON: {json_path}")
             else:
-                QMessageBox.information(self, "Thành công", 
+                QMessageBox.information(self.window(), "Thành công", 
                     f"Đã xuất file thành công!\n\nĐường dẫn: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi xuất file", f"Không thể xuất file:\n{str(e)}")
+            QMessageBox.critical(self.window(), "Lỗi xuất file", f"Không thể xuất file:\n{str(e)}")
 
     def keyPressEvent(self, event):
         """Xử lý phím tắt số 1-9 để chèn ngưởi nói nhanh"""
@@ -2005,13 +2005,12 @@ class LiveProcessingTab(QWidget):
         """Test chất lượng microphone với dialog mới"""
         device_index = self.combo_microphone.currentData()
         if device_index is None or device_index < 0:
-            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn microphone trước!")
+            QMessageBox.warning(self.window(), "Lỗi", "Vui lòng chọn microphone trước!")
             return
         
         # Kiểm tra DNSMOS model
         if not check_dnsmos_model_exists():
-            reply = QMessageBox.question(
-                self,
+            reply = QMessageBox.question(self.window(),
                 "Tải model DNSMOS",
                 "Cần tải model DNSMOS (~5MB) để phân tích.\n\nTải ngay?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -2022,7 +2021,7 @@ class LiveProcessingTab(QWidget):
         
         # Đảm bảo analyzer đã sẵn sàng
         if not self._ensure_mic_analyzer():
-            QMessageBox.warning(self, "Lỗi", "Không thể khởi tạo analyzer!")
+            QMessageBox.warning(self.window(), "Lỗi", "Không thể khởi tạo analyzer!")
             return
         
         # Mở dialog ghi âm - truyền device_name thay vì index
@@ -2047,7 +2046,7 @@ class LiveProcessingTab(QWidget):
     def _on_mic_analysis_done(self, result):
         """Callback khi phân tích mic xong"""
         if result.error_message:
-            QMessageBox.warning(self, "Lỗi phân tích", result.error_message)
+            QMessageBox.warning(self.window(), "Lỗi phân tích", result.error_message)
         else:
             result_dialog = QualityResultDialog(result, self)
             result_dialog.exec()
@@ -2061,9 +2060,9 @@ class LiveProcessingTab(QWidget):
     def _on_dnsmos_downloaded_for_mic(self, success, msg):
         """Callback khi download xong"""
         if success:
-            QMessageBox.information(self, "Thành công", "Đã tải model DNSMOS!\n\nVui lòng thử lại.")
+            QMessageBox.information(self.window(), "Thành công", "Đã tải model DNSMOS!\n\nVui lòng thử lại.")
         else:
-            QMessageBox.warning(self, "Lỗi", f"Không thể tải DNSMOS:\n{msg}")
+            QMessageBox.warning(self.window(), "Lỗi", f"Không thể tải DNSMOS:\n{msg}")
     
     
     def _reset_mic_analyzer(self):
@@ -2272,7 +2271,7 @@ class LiveProcessingTab(QWidget):
         
         if not hasattr(self, 'clickable_segments') or not self.clickable_segments:
             print("[Live] No clickable_segments available")
-            QMessageBox.warning(self, "Lỗi", "Chưa có nội dung nào để tách!")
+            QMessageBox.warning(self.window(), "Lỗi", "Chưa có nội dung nào để tách!")
             return
         
         # Chuyển đổi anchor_id thành index thực trong danh sách text segments
@@ -2314,7 +2313,7 @@ class LiveProcessingTab(QWidget):
                 
                 if location is None:
                     print(f"[Live] ERROR: Cannot find location for anchor {original_anchor_id}")
-                    QMessageBox.warning(self, "Lỗi", "Không tìm thấy vị trí để tách ngườii nói!")
+                    QMessageBox.warning(self.window(), "Lỗi", "Không tìm thấy vị trí để tách ngườii nói!")
                     return
                 
                 clickable_idx, chunk_idx, seg_type = location

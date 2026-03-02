@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("sherpa-vietnamese-asr")
         self.resize(950, 750)
+        self.center_on_screen()
         
         # Flag to prevent saving config during initialization
         self._applying_config = False
@@ -70,6 +71,22 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.apply_config()
+
+    def center_on_screen(self):
+        """Đặt cửa sổ ra giữa màn hình và đảm bảo không bị mất title bar"""
+        try:
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen:
+                screen_geom = screen.availableGeometry()
+                window_geom = self.frameGeometry()
+                window_geom.moveCenter(screen_geom.center())
+                
+                # Đảm bảo title bar không bị che khuất
+                new_top_left = window_geom.topLeft()
+                new_top_left.setY(max(screen_geom.top(), new_top_left.y()))
+                self.move(new_top_left)
+        except Exception as e:
+            print(f"[Init] Could not center window: {e}")
 
     def keyPressEvent(self, event):
         """Handle global hotkeys"""
@@ -378,6 +395,11 @@ class MainWindow(QMainWindow):
         self.save_file_config()
         self.save_live_config()
         print(f"[Config] Config saved to {CONFIG_FILE}")
+        
+        # Clean up temporary playback files from file tab
+        if hasattr(file_tab, 'cleanup_temp_files'):
+            file_tab.cleanup_temp_files()
+            
         event.accept()
 
     def init_ui(self):

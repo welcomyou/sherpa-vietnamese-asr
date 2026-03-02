@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                              QFileDialog, QProgressBar, QTextEdit, QComboBox, QSlider, 
                              QCheckBox, QFrame, QFormLayout, QMessageBox, QToolButton, 
                              QTabWidget, QStyle, QDialog)
-from PyQt6.QtCore import Qt, QUrl, QTimer
+from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from common import (BASE_DIR, COLORS, DIARIZATION_AVAILABLE, SPEAKER_EMBEDDING_MODELS,
@@ -20,6 +21,124 @@ from audio_analyzer import (
     AnalysisThread, check_dnsmos_model_exists, DNSMOSDownloader
 )
 from quality_result_dialog import QualityResultDialog
+
+class JSONLoadThread(QThread):
+    progress_updated = pyqtSignal(int, str)
+    finished_loading = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, json_path, audio_path=None, parent=None):
+        super().__init__(parent)
+        self.json_path = json_path
+        self.audio_path = audio_path
+        self.result_playback_path = audio_path # Default to original
+
+    def run(self):
+        try:
+            import json
+            import time
+            import os
+            
+            # --- Xử lý tải và convert Audio nếu cần ---
+            if self.audio_path:
+                file_ext = os.path.splitext(self.audio_path)[1].lower()
+                if file_ext != '.wav':
+                    self.progress_updated.emit(5, f"Đang chuyển đổi {file_ext} sang file WAV tạm...")
+                    try:
+                        from pydub import AudioSegment
+                        import tempfile
+                        audio = AudioSegment.from_file(self.audio_path)
+                        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
+                        temp_path = temp_file.name
+                        temp_file.close()
+                        audio.export(temp_path, format='wav')
+                        self.result_playback_path = temp_path
+                    except Exception as e:
+                        print(f"[JSONLoadThread] Failed to convert audio: {e}")
+                        self.result_playback_path = self.audio_path
+            
+            # --- Đọc tệp JSON ---
+            self.progress_updated.emit(10, "Đang đọc file JSON...")
+            
+            with open(self.json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if 'segments' not in data:
+                self.error_occurred.emit("Invalid JSON: no 'segments' key")
+                return
+            
+            json_segments = data['segments']
+            speaker_mapping = data.get('speaker_names', {})
+            
+            self.progress_updated.emit(40, "Đang xử lý dữ liệu...")
+            
+            segments = []
+            current_speaker = ''
+            current_speaker_id = 0
+            has_speakers = False
+            seg_counter = 0
+            
+            total = len(json_segments)
+            for i, seg in enumerate(json_segments):
+                if total > 0 and i % max(1, total // 10) == 0:
+                    prog = 40 + int(35 * (i / total))
+                    self.progress_updated.emit(prog, f"Đang chuyển đổi đoạn {i}/{total}...")
+                    
+                seg_type = seg.get('type', 'text')
+                
+                if seg_type == 'speaker':
+                    current_speaker = seg.get('speaker', '')
+                    raw_id = seg.get('speaker_id', 0)
+                    try:
+                        current_speaker_id = int(raw_id)
+                    except (ValueError, TypeError):
+                        current_speaker_id = raw_id
+                    has_speakers = True
+                    continue
+                
+                if seg_type == 'text':
+                    original_text = seg.get('text', '')
+                    partials = seg.get('partials', [])
+                    partials = [p for p in partials if p.get('text', '').strip()]
+                    
+                    if not partials and original_text:
+                        partials = [{'text': original_text}]
+                    
+                    internal_seg = {
+                        'text': original_text,
+                        'start': seg.get('start_time', 0),
+                        'start_time': seg.get('start_time', 0),
+                        'index': seg_counter,
+                        'speaker': current_speaker,
+                        'speaker_id': current_speaker_id,
+                    }
+                    
+                    if partials:
+                        internal_seg['partials'] = partials
+                        internal_seg['end'] = partials[-1].get('timestamp', internal_seg['start'] + 1.0)
+                    else:
+                        internal_seg['end'] = internal_seg['start'] + 1.0
+                        internal_seg['partials'] = [{
+                            'text': internal_seg['text'],
+                            'timestamp': internal_seg['end']
+                        }]
+                    
+                    segments.append(internal_seg)
+                    seg_counter += 1
+            
+            self.progress_updated.emit(75, "Đang chuẩn bị hiển thị...")
+            
+            # Lưu trữ vào self, KO truyền qua signal để tránh PyQt pickling lớn gây lag UI
+            self.result_segments = segments
+            self.result_speaker_mapping = speaker_mapping
+            self.result_has_speakers = has_speakers
+            
+            self.finished_loading.emit()
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error_occurred.emit(str(e))
 
 
 class FileProcessingTab(QWidget):
@@ -33,6 +152,7 @@ class FileProcessingTab(QWidget):
         self.default_model_path = os.path.join(BASE_DIR, "models", "sherpa-onnx-zipformer-vi-2025-04-20")
         self.segments = []
         self.current_highlight_index = -1
+        self._playback_cache = {}  # {original_file_path: temp_wav_path}
         
         # Search state
         self.search_matches = []
@@ -716,18 +836,16 @@ class FileProcessingTab(QWidget):
         file_ext = os.path.splitext(file_path)[1].lower()
         if file_ext == '.wav':
             return file_path  # WAV: use directly
+            
+        if file_path in self._playback_cache:
+            cached_path = self._playback_cache[file_path]
+            if os.path.exists(cached_path):
+                print(f"[_get_playback_path] Using cached WAV for {file_ext}: {cached_path}")
+                return cached_path
         
         try:
             from pydub import AudioSegment
             import tempfile
-            
-            # Clean up previous temp file
-            if hasattr(self, '_temp_playback_wav') and self._temp_playback_wav:
-                try:
-                    if os.path.exists(self._temp_playback_wav):
-                        os.unlink(self._temp_playback_wav)
-                except:
-                    pass
             
             audio = AudioSegment.from_file(file_path)
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
@@ -735,20 +853,38 @@ class FileProcessingTab(QWidget):
             temp_file.close()
             
             audio.export(temp_path, format='wav')
-            self._temp_playback_wav = temp_path
+            self._playback_cache[file_path] = temp_path
             print(f"[_get_playback_path] Converted {file_ext} -> WAV for accurate seeking: {temp_path}")
             return temp_path
         except Exception as e:
             print(f"[_get_playback_path] Failed to convert, using original: {e}")
             return file_path
 
+    def cleanup_temp_files(self):
+        """Dừng nhạc, nhả file lock và xoá toàn bộ file temp cũ"""
+        self.player.stop()
+        self.player.setSource(QUrl())
+        
+        retained_cache = {}
+        for orig_path, tmp_path in self._playback_cache.items():
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                    print(f"[Cleanup] Deleted temporary file: {tmp_path}")
+                except Exception as e:
+                    print(f"[Cleanup] Failed to delete (keeping in queue): {tmp_path} -> {e}")
+                    retained_cache[orig_path] = tmp_path
+        self._playback_cache = retained_cache
+
     def set_file(self, file_path):
+        self.cleanup_temp_files()
+        
         valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.wma', '.ogg', '.opus', 
                             '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
         file_ext = os.path.splitext(file_path)[1].lower()
         
         if file_ext not in valid_extensions:
-            QMessageBox.warning(self, "Định dạng không hỗ trợ", 
+            QMessageBox.warning(self.window(), "Định dạng không hỗ trợ", 
                 f"File '{os.path.basename(file_path)}' không được hỗ trợ.")
             return
         
@@ -765,27 +901,20 @@ class FileProcessingTab(QWidget):
         json_path = os.path.splitext(file_path)[0] + '.asr.json'
         if os.path.exists(json_path):
             # Hiển thị animation loading
-            self.current_progress_text = "Vui lòng đợi load thông tin từ JSON"
+            self.current_progress_text = "Vui lòng đợi load thông tin từ JSON..."
+            self.progress_bar.setFormat("Vui lòng đợi load thông tin từ JSON...")
             self.start_spinner()
             self.progress_bar.setValue(0)
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents() # Ép UI render progress bar text thay đổi
             
-            loaded = self._load_asr_json(json_path)
-            
-            self.stop_spinner()
-            
-            if loaded:
-                self.loaded_from_json = True
-                # Setup player with audio file (convert to WAV for accurate seeking)
-                playback_path = self._get_playback_path(file_path)
-                url = QUrl.fromLocalFile(os.path.abspath(playback_path))
-                self.player.setSource(url)
-                self.player_container.setVisible(True)
-                self.btn_play.setEnabled(True)
-                self.btn_save_json.setEnabled(True)
-                self.btn_copy_text.setEnabled(True)
-                self.progress_bar.setFormat("✓ Đã tải từ JSON")
-                self.progress_bar.setValue(100)
-                return
+            thread = JSONLoadThread(json_path, audio_path=file_path)
+            self._json_load_thread = thread
+            thread.progress_updated.connect(lambda p, m, t=thread: self._on_json_load_progress(p, m, t))
+            thread.finished_loading.connect(lambda t=thread: self._on_json_load_finished(file_path, t))
+            thread.error_occurred.connect(lambda err, t=thread: self._on_json_load_error(err, t))
+            thread.start()
+            return
         
         if self.segments:
              self.btn_rerun_diarization.setEnabled(self.check_speaker_diarization.isChecked())
@@ -793,6 +922,255 @@ class FileProcessingTab(QWidget):
         # Auto analyze audio quality
         if self.chk_auto_analyze.isChecked():
             self.analyze_file_quality()
+
+    def _on_json_load_progress(self, percentage, msg, thread=None):
+        if thread and thread != getattr(self, '_json_load_thread', None):
+            return
+        self.current_progress_text = msg
+        # Ép format ngay trên progress bar thay vì chỉ chờ spinner
+        self.progress_bar.setFormat(f"⠋ {msg}") 
+        self.progress_bar.setValue(percentage)
+
+    def _on_json_load_error(self, err_msg, thread=None):
+        if thread and thread != getattr(self, '_json_load_thread', None):
+            thread.deleteLater()
+            return
+        self.stop_spinner()
+        p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+        QMessageBox.critical(p_win, "Lỗi load JSON", f"Không thể đọc file JSON:\n{err_msg}")
+        self.progress_bar.setFormat("Lỗi load JSON")
+        
+    def _on_json_load_finished(self, file_path, thread=None):
+        if thread is None:
+            thread = getattr(self, '_json_load_thread', None)
+            
+        if not thread:
+            return
+            
+        if thread != getattr(self, '_json_load_thread', None):
+            thread.deleteLater()
+            return
+
+        self.segments = thread.result_segments
+        if thread.result_speaker_mapping:
+            self.speaker_name_mapping = thread.result_speaker_mapping
+        self.has_speaker_diarization = thread.result_has_speakers
+        self.current_highlight_index = -1
+        self._last_rendered_highlight = -1
+        
+        playback_path = thread.result_playback_path
+        
+        # Dọn dẹp an toàn Thread bằng deleteLater()
+        thread.deleteLater()
+        if getattr(self, '_json_load_thread', None) == thread:
+            self._json_load_thread = None
+        
+        self.loaded_from_json = True
+        self.json_saved = True
+            
+        if playback_path != file_path:
+            self._playback_cache[file_path] = playback_path
+            
+        url = QUrl.fromLocalFile(os.path.abspath(playback_path))
+        self.player.setSource(url)
+        self.player_container.setVisible(True)
+        self.btn_play.setEnabled(True)
+        self.btn_save_json.setEnabled(True)
+        self.btn_copy_text.setEnabled(True)
+        
+        # Bắt đầu incremental render HTML
+        self._start_incremental_render()
+
+    def _start_incremental_render(self):
+        self.text_output.clear()
+        
+        chunks = []
+        if getattr(self, 'has_speaker_diarization', False):
+            chunks = self._build_speaker_view_chunks()
+            if chunks:
+                chunks[0] = f"<p style='font-size:14px; line-height:1.6; color:{COLORS['text_dark']}; margin:0;'>" + chunks[0]
+                chunks[-1] += "</p>"
+        else:
+            chunks = self._build_normal_view_chunks()
+            if chunks:
+                chunks[0] = f"<p style='font-size:14px; line-height:1.3; color:{COLORS['text_dark']};'>" + chunks[0]
+                chunks[-1] += "</p>"
+            
+        self._render_chunks = chunks
+        self._render_chunk_idx = 0
+        if not hasattr(self, '_incremental_timer'):
+            self._incremental_timer = QTimer(self)
+            self._incremental_timer.timeout.connect(self._render_next_chunk)
+        self._incremental_timer.start(10) # 10ms mỗi batch
+    
+    def _render_next_chunk(self):
+        if not hasattr(self, '_render_chunks') or self._render_chunk_idx >= len(self._render_chunks):
+            self._incremental_timer.stop()
+            self.stop_spinner()
+            self.progress_bar.setFormat("✓ Đã tải từ JSON")
+            self.progress_bar.setValue(100)
+            return
+            
+        cursor = self.text_output.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        
+        # Batch size để không quá chậm cũng không quá lag
+        batch_size = max(5, len(self._render_chunks) // 20)
+        
+        html_block = ""
+        for _ in range(batch_size):
+            if self._render_chunk_idx >= len(self._render_chunks):
+                break
+            html_block += self._render_chunks[self._render_chunk_idx]
+            self._render_chunk_idx += 1
+            
+        cursor.insertHtml(html_block)
+        
+        # Cập nhật tiến trình (từ 75% -> 100%)
+        prog = 75 + int(25 * (self._render_chunk_idx / len(self._render_chunks)))
+        self.progress_bar.setValue(prog)
+
+    def _build_normal_view_chunks(self):
+        chunks = []
+        para_boundaries = set()
+        if self.paragraphs:
+            sent_idx = 0
+            total_para_sentences = 0
+            for para in self.paragraphs:
+                if sent_idx > 0:
+                    para_boundaries.add(sent_idx)
+                num_sentences = len(para.get('sentences', []))
+                sent_idx += num_sentences
+                total_para_sentences += num_sentences
+            
+            if total_para_sentences != len(self.segments):
+                para_boundaries = set()
+
+        for i, seg in enumerate(self.segments):
+            chunk_html = f"<a name='seg_{i}'></a>"
+            if i in para_boundaries:
+                chunk_html += "<br>"
+            
+            partials = seg.get('partials', [])
+            if partials:
+                full_text = seg.get('text', '')
+                search_pos = 0
+                for chunk_idx, partial in enumerate(partials):
+                    chunk_text = partial.get('text', '')
+                    if not chunk_text:
+                        continue
+                    chunk_start_pos = full_text.find(chunk_text, search_pos)
+                    if chunk_start_pos == -1:
+                        chunk_start_pos = search_pos
+                    anchor_id = 1000000 + i * 1000 + chunk_idx
+                    chunk_html += self._render_text_with_search_highlight(
+                        chunk_text, anchor_id, i, chunk_start_pos
+                    ) + " "
+                    search_pos = chunk_start_pos + len(chunk_text)
+            else:
+                text = seg.get('text', '')
+                anchor_id = 1000000 + i * 1000
+                chunk_html += self._render_text_with_search_highlight(
+                    text, anchor_id, i, 0
+                ) + " "
+                
+            chunks.append(chunk_html)
+            
+        return chunks
+
+    def _build_speaker_view_chunks(self):
+        chunks = []
+        self._block_render_count = 0
+        self.merged_speaker_blocks = []
+        
+        segments_with_idx = [{**seg, 'index': i} for i, seg in enumerate(self.segments)]
+        merged_segments = self._merge_speaker_segments(segments_with_idx, max_gap_sec=2.0)
+        
+        current_speaker = None
+        current_blocks = []
+        speaker_block_count = 0
+        
+        def process_blocks():
+            nonlocal current_speaker, current_blocks, speaker_block_count
+            if not current_speaker or not current_blocks:
+                return
+            block_render_count = getattr(self, '_block_render_count', 0) + 1
+            self._block_render_count = block_render_count
+            
+            block_info = {
+                'speaker': current_speaker,
+                'sentences': [],
+                'start': current_blocks[0].get('start', 0),
+                'end': current_blocks[-1].get('end', 0)
+            }
+            for block in current_blocks:
+                block_info['sentences'].extend(block.get('sentences', []))
+            self.merged_speaker_blocks.append(block_info)
+            block_idx = len(self.merged_speaker_blocks) - 1
+            
+            speaker_id = current_blocks[0].get('speaker_id', 0) if current_blocks else 0
+            speaker_id_str = str(speaker_id)
+            
+            if speaker_id_str in self.speaker_name_mapping:
+                display_name = self.speaker_name_mapping[speaker_id_str]
+            else:
+                display_name = current_speaker
+            
+            html_content = f"<div style='margin: 16px 0; padding: 10px; background-color: #f8f9fa; border-left: 3px solid {COLORS['accent']}; border-radius: 0 4px 4px 0;'>"
+            
+            if self.check_show_speaker_labels.isChecked():
+                anchor_style = f"text-decoration:none; color:{COLORS['accent']}; cursor:pointer;"
+                html_content += f"<a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'><div style='font-weight:bold; margin-bottom:8px; font-size:13px;'>{display_name}:</div></a>"
+            
+            html_content += f"<div style='margin-left:4px; text-align: justify; line-height:1.6; color:{COLORS['text_dark']};'>"
+            
+            for block in current_blocks:
+                for sent in block.get('sentences', []):
+                    sent_idx = sent.get('index', 0)
+                    text = sent.get('text', '').strip()
+                    if not text:
+                        continue
+                    
+                    html_content += f"<a name='seg_{sent_idx}'></a>"
+                    
+                    seg_data = self.segments[sent_idx] if sent_idx < len(self.segments) else None
+                    partials = seg_data.get('partials', []) if seg_data else []
+                    
+                    if partials:
+                        full_text = seg_data.get('text', '') if seg_data else ''
+                        search_pos = 0
+                        for chunk_idx, partial in enumerate(partials):
+                            chunk_text = partial.get('text', '')
+                            if not chunk_text:
+                                continue
+                            chunk_start_pos = full_text.find(chunk_text, search_pos)
+                            if chunk_start_pos == -1:
+                                chunk_start_pos = search_pos
+                            anchor_id = 1000000 + sent_idx * 1000 + chunk_idx
+                            html_content += self._render_text_with_search_highlight(
+                                chunk_text, anchor_id, sent_idx, chunk_start_pos
+                            ) + " "
+                            search_pos = chunk_start_pos + len(chunk_text)
+                    else:
+                        anchor_id = 1000000 + sent_idx * 1000
+                        html_content += self._render_text_with_search_highlight(
+                            text, anchor_id, sent_idx, 0
+                        ) + " "
+            
+            html_content += "</div></div>"
+            chunks.append(html_content)
+
+        for seg in merged_segments:
+            speaker = seg.get('speaker', 'Người nói 1')
+            if speaker != current_speaker:
+                speaker_block_count += 1
+                process_blocks()
+                current_speaker = speaker
+                current_blocks = []
+            current_blocks.append(seg)
+        
+        process_blocks()
+        return chunks
 
     def open_file_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -839,7 +1217,7 @@ class FileProcessingTab(QWidget):
         # Nếu file có JSON, hỏi user muốn làm gì
         self._pending_json_segments = None  # Reset
         if has_json_file:
-            msg_box = QMessageBox(self)
+            msg_box = QMessageBox(self.window())
             msg_box.setWindowTitle("Xử lý lại")
             msg_box.setText("File này đã có dữ liệu ASR.\n\nBạn muốn xử lý như thế nào?")
             
@@ -897,7 +1275,7 @@ class FileProcessingTab(QWidget):
         self.btn_save_json.setEnabled(False)
         self.btn_copy_text.setEnabled(False)
         self.drop_label.setEnabled(False)
-        self.config_container.setEnabled(False)
+        self.config_content.setEnabled(False)
         self.segments = []
         self.paragraphs = []
         self.search_matches = []
@@ -1154,26 +1532,26 @@ class FileProcessingTab(QWidget):
             if self.segments and self.selected_file:
                 self.btn_rerun_diarization.setEnabled(True)
             
-            QMessageBox.information(self, "Thành công", f"Đã chuyển đổi xong!\n\n{details}\n\nBạn có thể nghe lại và bấm vào câu để tua.")
+            p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+            QMessageBox.information(p_win, "Thành công", f"Đã chuyển đổi xong!\n\n{details}\n\nBạn có thể nghe lại và bấm vào câu để tua.")
         except Exception as e:
             import traceback
-            QMessageBox.critical(self, "Lỗi hiển thị", f"Lỗi UI: {e}")
+            QMessageBox.critical(self.window(), "Lỗi hiển thị", f"Lỗi UI: {e}")
 
     def save_asr_json(self):
         """Lưu kết quả ASR hiện tại vào file JSON"""
         if not self.selected_file:
-            QMessageBox.warning(self, "Lỗi", "Chưa chọn file âm thanh!")
+            QMessageBox.warning(self.window(), "Lỗi", "Chưa chọn file âm thanh!")
             return
         if not self.segments:
-            QMessageBox.warning(self, "Lỗi", "Chưa có dữ liệu để lưu!")
+            QMessageBox.warning(self.window(), "Lỗi", "Chưa có dữ liệu để lưu!")
             return
         
         json_path = os.path.splitext(self.selected_file)[0] + '.asr.json'
         
         # Hỏi overwrite nếu file đã tồn tại
         if os.path.exists(json_path):
-            reply = QMessageBox.question(
-                self, "Ghi đè",
+            reply = QMessageBox.question(self.window(), "Ghi đè",
                 f"File JSON đã tồn tại:\n{os.path.basename(json_path)}\n\nBạn muốn ghi đè?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes
@@ -1250,18 +1628,18 @@ class FileProcessingTab(QWidget):
             # Mark as saved
             self.json_saved = True
             
-            QMessageBox.information(self, "Thành công", 
+            QMessageBox.information(self.window(), "Thành công", 
                 f"Đã lưu kết quả ASR!\n\n📄 {os.path.basename(json_path)}")
             
         except Exception as e:
             import traceback
             traceback.print_exc()
-            QMessageBox.critical(self, "Lỗi", f"Không thể lưu JSON:\n{str(e)}")
+            QMessageBox.critical(self.window(), "Lỗi", f"Không thể lưu JSON:\n{str(e)}")
     
     def copy_text_to_clipboard(self):
         """Sao chép toàn bộ nội dung văn bản vào clipboard"""
         if not self.segments:
-            QMessageBox.warning(self, "Lỗi", "Chưa có dữ liệu để sao chép!")
+            QMessageBox.warning(self.window(), "Lỗi", "Chưa có dữ liệu để sao chép!")
             return
         
         try:
@@ -1300,11 +1678,11 @@ class FileProcessingTab(QWidget):
             clipboard.setText(full_text)
             
             # Hiển thị thông báo
-            QMessageBox.information(self, "Thành công", 
+            QMessageBox.information(self.window(), "Thành công", 
                 f"Đã sao chép {len(full_text)} ký tự vào clipboard!")
             
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi", f"Không thể sao chép:\n{str(e)}")
+            QMessageBox.critical(self.window(), "Lỗi", f"Không thể sao chép:\n{str(e)}")
     
     def _load_asr_json(self, json_path):
         """Load dữ liệu ASR từ file JSON"""
@@ -2037,15 +2415,15 @@ class FileProcessingTab(QWidget):
 
     def rerun_speaker_diarization(self):
         if not self.selected_file or not self.segments:
-            QMessageBox.warning(self, "Thiếu dữ liệu", 
+            QMessageBox.warning(self.window(), "Thiếu dữ liệu", 
                 "Vui lòng xử lý file âm thanh trước khi chạy speaker diarization.")
             return
         
         if not DIARIZATION_AVAILABLE:
-            QMessageBox.critical(self, "Lỗi", "Speaker diarization không khả dụng.")
+            QMessageBox.critical(self.window(), "Lỗi", "Speaker diarization không khả dụng.")
             return
         
-        reply = QMessageBox.question(self, "Xác nhận", 
+        reply = QMessageBox.question(self.window(), "Xác nhận", 
                                    "Bạn có chắc chắn muốn chạy lại phân đoạn Người nói?\n"
                                    "Quá trình này có thể mất vài phút.",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
@@ -2115,7 +2493,8 @@ class FileProcessingTab(QWidget):
         model_name = model_info.get("name", model_id)
         model_size = model_info.get("size", "Unknown")
         
-        QMessageBox.information(self, "Hoàn thành Speaker Diarization", 
+        p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+        QMessageBox.information(p_win, "Hoàn thành Speaker Diarization", 
             f"Đã chạy xong!\n\n"
             f"Model: {model_name}\n"
             f"Kích thước: {model_size}\n"
@@ -2132,19 +2511,21 @@ class FileProcessingTab(QWidget):
         self.btn_rerun_diarization.setEnabled(True)
         self.btn_process.setEnabled(True)
         
-        QMessageBox.critical(self, "Lỗi Speaker Diarization", 
+        p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+        QMessageBox.critical(p_win, "Lỗi Speaker Diarization", 
             f"Có lỗi xảy ra:\n{error_msg[:500]}")
 
     def on_error(self, err_msg):
         self.stop_spinner()
         self.progress_bar.setFormat("✗ Lỗi!")
         self.toggle_inputs(True)
-        QMessageBox.critical(self, "Lỗi xử lý", f"Đã có lỗi xảy ra:\n{err_msg}")
+        p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+        QMessageBox.critical(p_win, "Lỗi xử lý", f"Đã có lỗi xảy ra:\n{err_msg}")
 
     def toggle_inputs(self, enable):
         self.btn_process.setEnabled(enable and self.selected_file is not None)
         self.drop_label.setEnabled(enable)
-        self.config_container.setEnabled(enable)
+        self.config_content.setEnabled(enable)
         if not enable:
             self.drop_label.setStyleSheet(self.drop_label.styleSheet().replace("#e8f4ff", "#d0d0d0"))
         else:
@@ -2817,8 +3198,7 @@ class FileProcessingTab(QWidget):
         
         # Kiểm tra DNSMOS model
         if not check_dnsmos_model_exists():
-            reply = QMessageBox.question(
-                self,
+            reply = QMessageBox.question(self.window(),
                 "Tải model DNSMOS",
                 "Cần tải model DNSMOS (~5MB) để phân tích chất lượng.\n\nTải ngay?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -2849,10 +3229,10 @@ class FileProcessingTab(QWidget):
     def on_dnsmos_download_finished(self, success, msg):
         """Callback khi download xong"""
         if success:
-            QMessageBox.information(self, "Thành công", "Đã tải model DNSMOS!")
+            QMessageBox.information(self.window(), "Thành công", "Đã tải model DNSMOS!")
             self.analyze_file_quality()  # Phân tích sau khi tải xong
         else:
-            QMessageBox.warning(self, "Lỗi", f"Không thể tải DNSMOS:\n{msg}")
+            QMessageBox.warning(self.window(), "Lỗi", f"Không thể tải DNSMOS:\n{msg}")
     
     def on_analysis_progress(self, message, percent):
         """Cập nhật progress phân tích"""
@@ -2870,7 +3250,7 @@ class FileProcessingTab(QWidget):
             self.btn_process.setEnabled(True)
         
         if result.error_message:
-            QMessageBox.warning(self, "Lỗi phân tích", result.error_message)
+            QMessageBox.warning(self.window(), "Lỗi phân tích", result.error_message)
             return
         
         # Hiện dialog kết quả

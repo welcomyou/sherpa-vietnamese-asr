@@ -600,7 +600,9 @@ class TranscriberThread(QThread):
                             # Để pydub (ffmpeg) tự phát hiện codec/format đối với file video
                             audio_segment = AudioSegment.from_file(self.file_path)
                             
-                        audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+                        # Chỉ giới hạn channel về Mono, GIỮ NGUYÊN Sample Rate gốc
+                        # để cho librosa xử lý downsample bằng thuật toán soxr_vhq siêu cao ở dưới!
+                        audio_segment = audio_segment.set_channels(1)
                         audio_segment.export(temp_wav, format='wav')
                         file_to_load = temp_wav
                         audio, sample_rate = librosa.load(file_to_load, sr=16000, mono=True, res_type="soxr_vhq")
