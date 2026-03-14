@@ -24,7 +24,7 @@ class ImprovedPunctuationRestorer:
         self.confidence = confidence
         
         # Load model giống như cũ
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         vocab_path = os.path.join(base_dir, "vocabulary")
         
         img_model_path = os.path.join(base_dir, "models", "vibert-capu")
@@ -35,14 +35,15 @@ class ImprovedPunctuationRestorer:
         
         print(f"Loading GecBERTModel (confidence={confidence}): {model_to_load}...")
         
-        from gec_model import GecBERTModel
+        from core.gec_model import GecBERTModel
         self.gec_model = GecBERTModel(
             vocab_path=vocab_path,
             model_paths=[model_to_load],
             split_chunk=True,
-            chunk_size=48,
-            overlap_size=12,
-            max_len=64,
+            chunk_size=56,
+            overlap_size=16,
+            max_len=80,
+            iterations=3,
             device=device,
             confidence=confidence,
             case_confidence=case_confidence
@@ -59,28 +60,36 @@ class ImprovedPunctuationRestorer:
                 del model
                 gc.collect()
     
-    def restore(self, text, progress_callback=None):
-        """Thêm dấu với post-processing để tăng độ chính xác."""
+    def restore(self, text, progress_callback=None, pause_hints=None):
+        """Thêm dấu với post-processing để tăng độ chính xác.
+
+        Args:
+            text: Văn bản cần thêm dấu câu.
+            progress_callback: Callback báo tiến trình.
+            pause_hints: List[float] - gap (giây) sau mỗi từ, tính từ word timestamps.
+                         Dùng để gợi ý model thêm dấu chấm/phẩy tại vị trí có pause.
+        """
         if not text or not text.strip():
             return ""
-        
+
         try:
             torch = get_torch()
             with torch.no_grad():
-                results = self.gec_model(text, progress_callback=progress_callback)
-            
+                results = self.gec_model(text, progress_callback=progress_callback, pause_hints=pause_hints)
+
             if isinstance(results, list):
                 result = results[0]
             else:
                 result = results
-            
+
             # Post-processing để làm sạch dấu câu
             result = self._post_process(result)
-            
+
             return result
-            
+
         except Exception as e:
-            print(f"Error during restoration: {e}")
+            import logging
+            logging.getLogger("core.punctuation").error(f"Error during restoration: {e}", exc_info=True)
             return text
     
     def _post_process(self, text):

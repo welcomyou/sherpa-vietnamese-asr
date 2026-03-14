@@ -41,7 +41,15 @@ class Seq2LabelsModel(BertPreTrainedModel):
             self.bert = AutoModel.from_pretrained(config.pretrained_name_or_path)
             bert_config = self.bert.config
         else:
-            bert_config = AutoConfig.from_pretrained(config.pretrained_name_or_path)
+            # Uu tien dung config hien tai (da co cac truong BERT architecture)
+            # thay vi goi AutoConfig.from_pretrained() online
+            if hasattr(config, 'hidden_size') and config.hidden_size:
+                from copy import deepcopy
+                bert_config = deepcopy(config)
+                # vocab_size trong config la so labels (15), khong phai BERT tokenizer vocab
+                bert_config.vocab_size = getattr(config, 'bert_vocab_size', 38168)
+            else:
+                bert_config = AutoConfig.from_pretrained(config.pretrained_name_or_path)
             self.bert = AutoModel.from_config(bert_config)
             
             # PATCH: Fix "Tensor.item() cannot be called on meta tensors"

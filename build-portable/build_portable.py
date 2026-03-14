@@ -27,13 +27,16 @@ PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed
 
 # Source files to copy (relative to project root)
 SOURCE_FILES = [
-    "app.py", "transcriber.py", "speaker_diarization.py",
-    "punctuation_restorer_improved.py", "gec_model.py", "modeling_seq2labels.py",
-    "configuration_seq2labels.py", "vocabulary.py", "utils.py",
-    "common.py", "tab_file.py", "tab_live.py", "audio_analyzer.py",
-    "quality_result_dialog.py", "streaming_asr.py", "streaming_asr_online.py",
-    "config.ini", "verb-form-vocab.txt", "speaker_hotkeys.json", "ffmpeg.exe", "ffprobe.exe"
+    "app.py", "transcriber.py", "common.py",
+    "tab_file.py", "tab_live.py",
+    "quality_result_dialog.py",
+    "streaming_asr.py", "streaming_asr_online.py",
+    "config.ini", "hotword.txt", "verb-form-vocab.txt",
+    "speaker_hotkeys.json", "ffmpeg.exe", "ffprobe.exe",
 ]
+
+# Module directories to copy
+MODULE_DIRS = ["core"]
 
 # Data directories to copy
 DATA_DIRS = ["models", "vocabulary"]
@@ -146,15 +149,42 @@ def copy_venv_packages():
         print(f"[ERROR] Venv site-packages not found: {venv_site}")
         return False
     
-    # Packages to exclude
-    EXCLUDE_PACKAGES = {'moonshine_voice'}
-    
+    # Packages to exclude (desktop doesn't need web service packages or unused deps)
+    EXCLUDE_PACKAGES = {
+        'moonshine_voice',
+        # Web framework (not needed for desktop)
+        'fastapi', 'uvicorn', 'starlette', 'httptools', 'websockets',
+        'python_multipart', 'python_jose', 'passlib', 'bcrypt',
+        'h11', 'httpcore', 'httpx', 'anyio', 'sniffio',
+        'watchfiles', 'uvloop',
+        # Database / ORM (desktop uses no DB)
+        'sqlalchemy', 'alembic', 'aiosqlite', 'greenlet',
+        # Not used by desktop app
+        'ctranslate2', 'pandas', 'grpc', 'grpcio', 'grpcio_tools',
+        'llvmlite', 'numba', 'av', 'networkx', 'sympy', 'mpmath',
+        'aiohttp', 'aiofiles', 'aiohappyeyeballs', 'aiosignal', 'frozenlist', 'multidict', 'yarl',
+        'adapters', 'torio', 'torchcodec', 'rapidfuzz',
+        # Build / packaging tools (not needed at runtime)
+        'pip', 'setuptools', 'wheel', 'pkg_resources', '_distutils_hack',
+        'distutils_precedence',
+        # Not used
+        'pyinstaller', 'pyinstaller_hooks_contrib', 'altgraph', 'pefile',
+    }
+
+    def should_exclude(name):
+        """Check if package or its dist-info should be excluded"""
+        lower = name.lower()
+        for pkg in EXCLUDE_PACKAGES:
+            if lower == pkg or lower.startswith(pkg + '-') or lower.startswith(pkg.replace('-', '_') + '-'):
+                return True
+        return False
+
     # Copy all packages
     copied = 0
     for item in venv_site.iterdir():
         if item.name.startswith('~'):
             continue
-        if item.name in EXCLUDE_PACKAGES:
+        if should_exclude(item.name):
             print(f"  [SKIP] {item.name}")
             continue
         dst = dst_site / item.name
@@ -242,14 +272,26 @@ def copy_dlls():
 def copy_source_files():
     """Copy application source code"""
     print("[SRC] Copying source files...")
-    
+
     for f in SOURCE_FILES:
         src = PROJECT_ROOT / f
         if src.exists():
             shutil.copy2(src, DIST_DIR)
         else:
             print(f"  [WARN] Not found: {f}")
-    
+
+    # Copy module directories (core/)
+    for mod in MODULE_DIRS:
+        src = PROJECT_ROOT / mod
+        dst = DIST_DIR / mod
+        if src.exists():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            print(f"  [OK] {mod}/ copied")
+        else:
+            print(f"  [WARN] Module not found: {mod}/")
+
     print("[OK] Source files copied")
 
 

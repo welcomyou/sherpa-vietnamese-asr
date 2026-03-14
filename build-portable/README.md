@@ -31,7 +31,7 @@ Script sẽ:
 - Cài đặt sherpa-onnx
 - Test imports
 
-> ⏱️ Thờigian: 10-15 phút tùy kết nối mạng
+> ⏱️ Thời gian: 10-15 phút tùy kết nối mạng
 
 ### Bước 2: Tải Models
 
@@ -50,11 +50,10 @@ Danh sách models:
 3. `zipformer-30m-rnnt-streaming-6000h` - ASR streaming
 4. `vibert-capu` - Thêm dấu câu
 5. `nemo_en_titanet_small` - Speaker embedding
-6. `eres2netv2_zh` - Speaker embedding (ZH+EN)
-7. `sherpa-onnx-pyannote-segmentation-3-0` - Voice segmentation
+6. `sherpa-onnx-pyannote-segmentation-3-0` - Voice segmentation
 8. `dnsmos` - Audio quality assessment
 
-> ⏱️ Thờigian: 10-30 phút tùy tốc độ mạng (tổng ~2GB)
+> ⏱️ Thời gian: 10-30 phút tùy tốc độ mạng (tổng ~2GB)
 
 ### Bước 3: Build Portable
 
@@ -75,7 +74,7 @@ Script sẽ:
 - Copy models
 - Tạo launcher script
 
-> ⏱️ Thờigian: 5-10 phút
+> ⏱️ Thời gian: 5-10 phút
 
 Kết quả sẽ nằm tại: `dist/sherpa-vietnamese-asr/`
 

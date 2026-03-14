@@ -28,7 +28,7 @@ import librosa
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # Constants
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DNSMOS_DIR = os.path.join(BASE_DIR, "models", "dnsmos")
 DNSMOS_URL = "https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
 DNSMOS_MODEL_NAME = "sig_bak_ovr.onnx"
@@ -47,7 +47,7 @@ class QualityMetrics:
     dnsmos_ovrl: float = 0.0  # Overall quality (1-5)
     asr_confidence: float = 0.0  # ASR confidence (0-1)
     sample_text: str = ""  # Text sample từ ASR
-    duration_analyzed: float = 0.0  # Thờigian thực tế phân tích
+    duration_analyzed: float = 0.0  # Thời gian thực tế phân tích
     num_segments: int = 0  # Số đoạn speech tìm thấy
 
 
@@ -110,30 +110,14 @@ class AudioQualityAnalyzer:
         self.offline_recognizer = offline_recognizer
         self.online_recognizer = online_recognizer
         self.use_gpu = use_gpu
-        
-        # VAD model (lazy load)
-        self._vad_model = None
-        self._vad_utils = None
-        
+
         # DNSMOS session (lazy load)
         self._dnsmos_session = None
         
     def _load_vad(self):
-        """Load Silero VAD model"""
-        if self._vad_model is None:
-            try:
-                import torch
-                self._vad_model, self._vad_utils = torch.hub.load(
-                    'snakers4/silero-vad',
-                    'silero_vad',
-                    force_reload=False,
-                    onnx=False
-                )
-                print("[AudioAnalyzer] Loaded Silero VAD")
-            except Exception as e:
-                print(f"[AudioAnalyzer] Failed to load VAD: {e}")
-                raise
-        return self._vad_model, self._vad_utils
+        """Ensure Silero VAD ONNX model is loaded (delegated to vad_utils)"""
+        from core.vad_utils import _get_vad_session
+        return _get_vad_session()
     
     def _load_dnsmos(self):
         """Load DNSMOS ONNX model"""
@@ -191,76 +175,32 @@ class AudioQualityAnalyzer:
     def vad_segment(self, audio: np.ndarray, sr: int = 16000,
                     padding_sec: float = VAD_PAD_SEC) -> List[np.ndarray]:
         """
-        Dùng Silero VAD để cắt các đoạn speech
-        Thêm padding trước/sau để không mất âm đầu/cuối
-        
-        Nếu VAD default không phát hiện speech (audio quá nhỏ),
-        sẽ retry với threshold thấp hơn và boost amplitude.
+        Dùng Silero VAD (shared từ vad_utils) để cắt các đoạn speech.
+        Bao gồm retry logic, auto-boost amplitude, và merge gap.
         """
         try:
-            vad_model, vad_utils = self._load_vad()
-            (get_speech_timestamps, _, _, _, _) = vad_utils
-            
-            # Chuyển về tensor
-            import torch
-            audio_tensor = torch.from_numpy(audio).float()
-            
-            # Lấy timestamps với settings mặc định
-            speech_timestamps = get_speech_timestamps(
-                audio_tensor,
-                vad_model,
-                sampling_rate=sr,
-                min_silence_duration_ms=VAD_MIN_SILENCE_MS,
-                min_speech_duration_ms=VAD_MIN_SPEECH_MS
+            from core.vad_utils import get_vad_segments
+
+            padding_ms = int(padding_sec * 1000)
+            vad_segments = get_vad_segments(
+                audio, sample_rate=sr,
+                padding_ms=padding_ms,
+                merge_gap_ms=500,
+                auto_boost=True,
+                fallback_full=False,
             )
-            
-            # Retry với threshold thấp hơn nếu không tìm thấy speech
-            if not speech_timestamps:
-                print("[AudioAnalyzer] VAD default found no speech, retrying with lower threshold...")
-                speech_timestamps = get_speech_timestamps(
-                    audio_tensor,
-                    vad_model,
-                    sampling_rate=sr,
-                    min_silence_duration_ms=200,
-                    min_speech_duration_ms=150,
-                    threshold=0.3  # Giảm threshold từ default 0.5 xuống 0.3
-                )
-            
-            # Retry lần 2: boost amplitude nếu audio quá nhỏ
-            if not speech_timestamps:
-                max_amp = np.max(np.abs(audio))
-                if max_amp > 1e-6 and max_amp < 0.5:
-                    print(f"[AudioAnalyzer] Audio amplitude low (max={max_amp:.4f}), boosting and retrying VAD...")
-                    boosted = audio / max_amp  # Normalize to [-1, 1]
-                    boosted_tensor = torch.from_numpy(boosted.astype(np.float32))
-                    speech_timestamps = get_speech_timestamps(
-                        boosted_tensor,
-                        vad_model,
-                        sampling_rate=sr,
-                        min_silence_duration_ms=200,
-                        min_speech_duration_ms=150,
-                        threshold=0.3
-                    )
-                    if speech_timestamps:
-                        print(f"[AudioAnalyzer] VAD found {len(speech_timestamps)} segments after boosting")
-            
-            if not speech_timestamps:
+
+            if not vad_segments:
                 return []
-            
-            # Apply padding và merge gần nhau
+
             segments = []
-            pad_samples = int(padding_sec * sr)
-            
-            for ts in speech_timestamps:
-                start = max(0, ts['start'] - pad_samples)
-                end = min(len(audio), ts['end'] + pad_samples)
+            for start, end in vad_segments:
                 segments.append(audio[start:end])
-            
+
             return segments
-            
+
         except Exception as e:
             print(f"[AudioAnalyzer] VAD error: {e}")
-            # Fallback: trả về cả audio nếu VAD lỗi
             return [audio]
     
     def compute_dnsmos(self, audio: np.ndarray, sr: int = 16000) -> Optional[Dict[str, float]]:
@@ -786,6 +726,7 @@ def download_dnsmos_model_sync() -> bool:
 
 if __name__ == "__main__":
     # Test script
+    import sys
     print("Audio Quality Analyzer Test")
     print("="*60)
     
@@ -797,21 +738,30 @@ if __name__ == "__main__":
     # Tạo analyzer (không cần ASR model để test DNSMOS và VAD)
     analyzer = AudioQualityAnalyzer()
     
-    # Test VAD
-    test_file = r"D:\App\asr-vn\test_2min_wpe_3.wav"
-    if os.path.exists(test_file):
-        print(f"\nTesting with: {test_file}")
-        result = analyzer.analyze_file(test_file, use_offline_asr=False)
-        
-        if result.error_message:
-            print(f"Error: {result.error_message}")
-        else:
-            print(f"\nResults:")
-            print(f"  DNSMOS SIG: {result.metrics.dnsmos_sig:.2f}")
-            print(f"  DNSMOS BAK: {result.metrics.dnsmos_bak:.2f}")
-            print(f"  DNSMOS OVRL: {result.metrics.dnsmos_ovrl:.2f}")
-            print(f"  ASR Confidence: {result.metrics.asr_confidence:.2%}")
-            print(f"  Sample text: {result.metrics.sample_text[:50]}...")
-            print(f"\nSuggestions:")
-            for s in result.suggestions:
-                print(f"  {s}")
+    # Get test file from command line argument
+    test_file = sys.argv[1] if len(sys.argv) > 1 else None
+    
+    if not test_file:
+        print("\nUsage: python audio_analyzer.py <audio_file>")
+        print("Example: python audio_analyzer.py test_audio.wav")
+        sys.exit(1)
+    
+    if not os.path.exists(test_file):
+        print(f"\nError: File not found: {test_file}")
+        sys.exit(1)
+    
+    print(f"\nTesting with: {test_file}")
+    result = analyzer.analyze_file(test_file, use_offline_asr=False)
+    
+    if result.error_message:
+        print(f"Error: {result.error_message}")
+    else:
+        print(f"\nResults:")
+        print(f"  DNSMOS SIG: {result.metrics.dnsmos_sig:.2f}")
+        print(f"  DNSMOS BAK: {result.metrics.dnsmos_bak:.2f}")
+        print(f"  DNSMOS OVRL: {result.metrics.dnsmos_ovrl:.2f}")
+        print(f"  ASR Confidence: {result.metrics.asr_confidence:.2%}")
+        print(f"  Sample text: {result.metrics.sample_text[:50]}...")
+        print(f"\nSuggestions:")
+        for s in result.suggestions:
+            print(f"  {s}")

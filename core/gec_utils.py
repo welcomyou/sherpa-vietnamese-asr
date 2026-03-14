@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 
 
-VOCAB_DIR = Path(__file__).resolve().parent
+VOCAB_DIR = Path(__file__).resolve().parent.parent
 PAD = "@@PADDING@@"
 UNK = "@@UNKNOWN@@"
 START_TOKEN = "$START"

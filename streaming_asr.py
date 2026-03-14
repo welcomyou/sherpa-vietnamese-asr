@@ -5,16 +5,6 @@ import numpy as np
 import collections
 from PyQt6.QtCore import QThread, pyqtSignal
 
-# Import torch at module level for VAD (Issue B6 fix)
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
-# BASE_DIR should be defined to locate resources if needed
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 class VADTrigger:
     """
     VAD Trigger using Ring Buffer.
@@ -35,7 +25,10 @@ class VADTrigger:
         # Ring buffer for context - giảm xuống 0.3s để tránh hallucination (Issue A1)
         # Context quá dài (>0.5s) có thể đưa nhiễu/im lặng vào đầu stream
         self.context_duration = 0.3
-        self.maxlen = int(self.context_duration * sample_rate / self.window_size)
+        # maxlen tính theo chunk size thực tế (~50ms = 800 samples),
+        # không phải window_size (512), vì mỗi append là 1 audio chunk
+        self.chunk_samples_approx = int(0.05 * sample_rate)  # ~800 samples per 50ms chunk
+        self.maxlen = max(1, int(self.context_duration * sample_rate / self.chunk_samples_approx))
         self.ring_buffer = collections.deque(maxlen=self.maxlen)
         
         # Buffer for VAD processing (to ensure 512 sample chunks)
@@ -46,21 +39,19 @@ class VADTrigger:
         self.voiceless_count = 0 
         self.speech_chunks = 0
         
-        # Load VAD
-        self.vad_model = None
+        # ONNX VAD state
+        self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._vad_context = np.zeros(64, dtype=np.float32)
+        self._vad_sr = np.array(sample_rate, dtype=np.int64)
+
+        # Load VAD ONNX - dùng shared session từ vad_utils để tránh load model nhiều lần
+        self.vad_session = None
         self.vad_available = False
         try:
-            import torch
-            # Use snakers4/silero-vad
-            self.vad_model, _ = torch.hub.load(
-                'snakers4/silero-vad', 
-                'silero_vad',
-                force_reload=False, 
-                onnx=False, 
-                verbose=False
-            )
+            from core.vad_utils import _get_vad_session
+            self.vad_session = _get_vad_session()
             self.vad_available = True
-            print(f"[VADTrigger] Loaded Silero VAD, threshold={self.threshold}")
+            print(f"[VADTrigger] Using shared Silero VAD ONNX, threshold={self.threshold}")
         except Exception as e:
             print(f"[VADTrigger] Failed to load VAD: {e}")
     
@@ -88,19 +79,24 @@ class VADTrigger:
         if len(self.vad_buffer) < 512:
             return None, None
             
-        # torch imported at module level for performance (Issue #7)
         max_prob = 0.0
         processed_any = False
-        
-        # Process in 512-sample chunks
+
         while len(self.vad_buffer) >= 512:
             chunk = self.vad_buffer[:512]
             self.vad_buffer = self.vad_buffer[512:]
-            
-            # torch đã import ở module level (B6 fix)
-            with torch.no_grad():
-                 prob = self.vad_model(torch.from_numpy(chunk), self.sample_rate).item()
-                 max_prob = max(max_prob, prob)
+
+            # ONNX inference: context(64) + chunk(512) = 576
+            input_data = np.concatenate([self._vad_context, chunk]).reshape(1, -1).astype(np.float32)
+            ort_inputs = {
+                'input': input_data,
+                'state': self._vad_state,
+                'sr': self._vad_sr,
+            }
+            out, self._vad_state = self.vad_session.run(None, ort_inputs)
+            prob = float(out[0][0])
+            max_prob = max(max_prob, prob)
+            self._vad_context = chunk[-64:]
             processed_any = True
         
         if processed_any:
@@ -119,14 +115,16 @@ class VADTrigger:
         self.ring_buffer.clear()
         self.vad_buffer = np.array([], dtype=np.float32)
 
+    def soft_reset(self):
+        """Reset buffer nhưng giữ LSTM state (dùng khi người nói chưa dừng)"""
+        self.ring_buffer.clear()
+        self.vad_buffer = np.array([], dtype=np.float32)
+
     def reset(self):
         """Reset VAD state completely"""
         self.clear_buffer()
-        if hasattr(self.vad_model, 'reset_states'):
-            try:
-                self.vad_model.reset_states()
-            except:
-                pass
+        self._vad_state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._vad_context = np.zeros(64, dtype=np.float32)
 
 
 class StreamingASRThread(QThread):
@@ -204,19 +202,8 @@ class StreamingASRThread(QThread):
             import sherpa_onnx
             import glob
             import time
-            import torch
-            
+
             self.is_running = True
-            
-            # Limit PyTorch threads for VAD
-            cpu_threads = self.config.get("cpu_threads", 4)
-            try:
-                torch.set_num_threads(cpu_threads)
-                torch.set_num_interop_threads(1)
-                print(f"[StreamingASR] Set PyTorch threads: {cpu_threads}")
-            except RuntimeError as e:
-                # Already set in previous session, ignore
-                print(f"[StreamingASR] PyTorch threads already set: {e}")
             
             # 0. Initialize VAD (in thread)
             print("[StreamingASR] Initializing VAD...")
@@ -247,7 +234,7 @@ class StreamingASRThread(QThread):
             }
             
             # Thêm hotwords nếu có
-            from common import get_hotwords_config, BASE_DIR
+            from core.config import get_hotwords_config, BASE_DIR
             hotwords_config = get_hotwords_config(self.model_path, BASE_DIR)
             if hotwords_config:
                 kwargs.update(hotwords_config)
@@ -403,7 +390,12 @@ class StreamingASRThread(QThread):
                             
                             self.stream = None
                             self.state = 'IDLE'
-                            self.vad.reset() # Reset VAD state to avoid noise trigger
+                            # Full reset khi silence (thật sự hết nói)
+                            # Soft reset khi max_duration/speaker_change (giữ LSTM warm-up)
+                            if end_reason == 'silence':
+                                self.vad.reset()
+                            else:
+                                self.vad.soft_reset()
                             
                         else:
                             # === CONTINUOUS DECODE (Partial) ===

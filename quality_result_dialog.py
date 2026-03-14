@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from audio_analyzer import (
+from core.audio_analyzer import (
     AudioQualityAnalyzer, AnalysisResult, QualityMetrics,
     check_dnsmos_model_exists, download_dnsmos_model_sync,
     DNSMOSDownloader

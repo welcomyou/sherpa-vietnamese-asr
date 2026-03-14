@@ -9,9 +9,9 @@ import warnings
 
 import torch
 from transformers import AutoTokenizer
-from modeling_seq2labels import Seq2LabelsModel
-from vocabulary import Vocabulary
-from utils import PAD, UNK, START_TOKEN, get_target_sent_by_edits
+from core.modeling_seq2labels import Seq2LabelsModel
+from core.vocabulary import Vocabulary
+from core.gec_utils import PAD, UNK, START_TOKEN, get_target_sent_by_edits
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logger = logging.getLogger(__file__)
@@ -119,100 +119,72 @@ class GecBERTModel(torch.nn.Module):
             token = self.vocab.get_token_from_index(i, namespace="labels")
             if token.startswith("$TRANSFORM_CASE_"):
                 self.case_indices.append(i)
-                
+
+        # Indices cho pause-based boost
+        self.append_period_index = self.vocab.get_token_index("$APPEND_.", "labels")
+        self.append_comma_index = self.vocab.get_token_index("$APPEND_,", "labels")
+
         # set training parameters and operations
 
         self.indexers = []
         self.models = []
         for model_path in model_paths:
-            # DEBUG: Manual Load
+            import os
+            logger.info(f"[GecBERT] Loading model from: {model_path}")
             try:
                 # 1. Load Config
                 from transformers import AutoConfig
                 config = AutoConfig.from_pretrained(model_path)
-                
+                logger.info(f"[GecBERT] Config loaded: hidden_size={getattr(config, 'hidden_size', 'N/A')}, "
+                           f"load_pretrained={getattr(config, 'load_pretrained', 'N/A')}")
+
                 # 2. Init Model
                 model = Seq2LabelsModel(config)
-                
+                logger.info(f"[GecBERT] Model initialized")
+
                 # 3. Load Weights
-                import os
                 bin_path = os.path.join(model_path, "pytorch_model.bin")
                 if not os.path.exists(bin_path):
-                     # If file doesn't exist (e.g. model_path is a repo ID), raise to trigger fallback
                      raise FileNotFoundError(f"Binary not found at {bin_path}")
-                     
-                print(f"Loading weights from {bin_path}")
+
+                logger.info(f"[GecBERT] Loading weights from {bin_path}")
                 state_dict = torch.load(bin_path, map_location="cpu")
-                
-                # Load weights đúng cách bằng load_state_dict
+
                 try:
                     model.load_state_dict(state_dict, strict=False)
-                    print(f"Loaded weights successfully from {bin_path}")
+                    logger.info(f"[GecBERT] Weights loaded OK")
                 except Exception as e:
-                    print(f"ERROR loading state_dict: {e}")
-                    # Fallback: manual copy từng param nhưng vào model gốc
+                    logger.warning(f"[GecBERT] load_state_dict error: {e}, trying manual copy")
                     model_dict = model.state_dict()
                     for k, v in state_dict.items():
                         if k in model_dict:
                             try:
                                 model_dict[k].copy_(v)
                             except Exception as copy_e:
-                                print(f"ERROR copying {k}: {copy_e}")
-                
+                                logger.error(f"[GecBERT] ERROR copying {k}: {copy_e}")
+
                 del state_dict
                 import gc
                 gc.collect()
-                
+
             except Exception as e:
-                if "Binary not found" in str(e):
-                     print(f"Model binary not found locally at {model_path}. Downloading from Hub...")
-                     # Fallback: Download snapshot and use the local path
-                     try:
-                         from huggingface_hub import snapshot_download
-                         # If model_path is a path, this might fail, but if it's a repo_id it works.
-                         # Assuming model_path is repo_id if we are here.
-                         local_path = snapshot_download(repo_id=model_path)
-                         print(f"Downloaded to {local_path}. Retrying manual load...")
-                         
-                         # Retry logic by recursive call or just copy-paste manual load? 
-                         # Copy-paste is safer to avoid infinite recursion if something is wrong.
-                         # 1. Load Config
-                         from transformers import AutoConfig
-                         config = AutoConfig.from_pretrained(local_path)
-                         # 2. Init Model
-                         model = Seq2LabelsModel(config)
-                         # 3. Load Weights
-                         bin_path = os.path.join(local_path, "pytorch_model.bin")
-                         state_dict = torch.load(bin_path, map_location="cpu")
-                         try:
-                             model.load_state_dict(state_dict, strict=False)
-                         except Exception as load_e:
-                             print(f"ERROR in fallback load: {load_e}")
-                             # Manual copy với dict tham chiếu đúng
-                             model_dict = model.state_dict()
-                             for k, v in state_dict.items():
-                                 if k in model_dict:
-                                     model_dict[k].copy_(v)
-                         del state_dict
-                         import gc
-                         gc.collect()
-                         
-                     except Exception as download_e:
-                         print(f"Download/Retry failed: {download_e}")
-                         # Last resort: from_pretrained (which might crash, but we tried)
-                         model = Seq2LabelsModel.from_pretrained(model_path, low_cpu_mem_usage=False)
-                         config = model.config
-                else:
-                     print(f"Manual load failed: {e}")
-                     # Fallback
-                     model = Seq2LabelsModel.from_pretrained(model_path, low_cpu_mem_usage=False)
-                     config = model.config
-            
-            model_name = config.pretrained_name_or_path
+                raise RuntimeError(
+                    f"Cannot load model from {model_path}. "
+                    f"Ensure pytorch_model.bin and config.json exist in the model directory. "
+                    f"Original error: {e}"
+                )
+
             special_tokens_fix = config.special_tokens_fix
-            self.indexers.append(self._get_indexer(model_name, special_tokens_fix))
+            import os as _os
+            if _os.path.isdir(model_path) and _os.path.exists(_os.path.join(model_path, "vocab.txt")):
+                tokenizer_path = model_path
+            else:
+                tokenizer_path = config.pretrained_name_or_path
+            logger.info(f"[GecBERT] Loading tokenizer from {tokenizer_path}")
+            self.indexers.append(self._get_indexer(tokenizer_path, special_tokens_fix))
             model.eval().to(self.device)
             self.models.append(model)
+            logger.info(f"[GecBERT] Model loaded OK from {model_path}")
 
     def _get_indexer(self, weights_name, special_tokens_fix):
         tokenizer = AutoTokenizer.from_pretrained(
@@ -231,22 +203,17 @@ class GecBERTModel(torch.nn.Module):
             tokenizer.vocab[START_TOKEN] = len(tokenizer) - 1
         return tokenizer
     
-    def forward(self, text: Union[str, List[str], List[List[str]]], is_split_into_words=False, progress_callback=None):
+    def forward(self, text: Union[str, List[str], List[List[str]]], is_split_into_words=False, progress_callback=None, pause_hints=None):
         # Input type checking for clearer error
         def _is_valid_text_input(t):
             if isinstance(t, str):
-                # Strings are fine
                 return True
             elif isinstance(t, (list, tuple)):
-                # List are fine as long as they are...
                 if len(t) == 0:
-                    # ... empty
                     return True
                 elif isinstance(t[0], str):
-                    # ... list of strings
                     return True
                 elif isinstance(t[0], (list, tuple)):
-                    # ... list with an empty list or with a list of strings
                     return len(t[0]) == 0 or isinstance(t[0][0], str)
                 else:
                     return False
@@ -258,7 +225,7 @@ class GecBERTModel(torch.nn.Module):
                 "text input must of type `str` (single example), `List[str]` (batch or single pretokenized example) "
                 "or `List[List[str]]` (batch of pretokenized examples)."
             )
-        
+
         if is_split_into_words:
             is_batched = isinstance(text, (list, tuple)) and text and isinstance(text[0], (list, tuple))
         else:
@@ -267,32 +234,44 @@ class GecBERTModel(torch.nn.Module):
                 text = [x.split() for x in text]
             else:
                 text = text.split()
-        
+
         if not is_batched:
             text = [text]
-        
-        return self.handle_batch(text, progress_callback=progress_callback)
+            # Wrap pause_hints in batch dimension
+            if pause_hints is not None:
+                pause_hints = [pause_hints]
 
-    def split_chunks(self, batch):
-        # return batch pairs of indices
+        return self.handle_batch(text, progress_callback=progress_callback, pause_hints=pause_hints)
+
+    def split_chunks(self, batch, pause_hints=None):
+        # return batch pairs of indices, and split pause_hints accordingly
         result = []
         indices = []
-        for tokens in batch:
+        hints_result = [] if pause_hints is not None else None
+        for batch_idx, tokens in enumerate(batch):
             start = len(result)
             num_token = len(tokens)
+            hints = pause_hints[batch_idx] if pause_hints is not None else None
             if num_token <= self.chunk_size:
                 result.append(tokens)
+                if hints is not None:
+                    hints_result.append(hints[:num_token])
             elif num_token > self.chunk_size and num_token < (self.chunk_size * 2 - self.overlap_size):
                 split_idx = (num_token + self.overlap_size + 1) // 2
                 result.append(tokens[:split_idx])
                 result.append(tokens[split_idx - self.overlap_size :])
+                if hints is not None:
+                    hints_result.append(hints[:split_idx])
+                    hints_result.append(hints[split_idx - self.overlap_size :])
             else:
                 for i in range(0, num_token - self.overlap_size, self.stride):
                     result.append(tokens[i : i + self.chunk_size])
+                    if hints is not None:
+                        hints_result.append(hints[i : i + self.chunk_size])
 
             indices.append((start, len(result)))
 
-        return result, indices
+        return result, indices, hints_result
 
     def check_alnum(self, s):
         if len(s) < 2:
@@ -358,31 +337,31 @@ class GecBERTModel(torch.nn.Module):
         result = " ".join(result)
         return result
 
-    def predict(self, batches, progress_callback=None):
+    def predict(self, batches, progress_callback=None, pause_hints_batch=None, orig_tokens_batch=None):
         t11 = time()
         predictions = []
         for batch, model in zip(batches, self.models):
             batch_size = len(batch['input_ids']) if 'input_ids' in batch else 0
             mini_batch_size = 32
-            
+
             if batch_size > mini_batch_size:
                 all_logits = []
                 all_detect_logits = []
                 all_max_error_probability = []
-                
+
                 for i in range(0, batch_size, mini_batch_size):
                     end_idx = min(i + mini_batch_size, batch_size)
                     mini_batch = {k: v[i:end_idx].to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-                    
+
                     with torch.no_grad():
                         pred = model.forward(**mini_batch)
                         all_logits.append(pred['logits'].cpu())
                         all_detect_logits.append(pred['detect_logits'].cpu())
                         all_max_error_probability.append(pred['max_error_probability'].cpu())
-                    
+
                     if progress_callback is not None:
                         progress_callback(end_idx, batch_size)
-                
+
                 prediction = {
                     'logits': torch.cat(all_logits, dim=0).to(self.device),
                     'detect_logits': torch.cat(all_detect_logits, dim=0).to(self.device),
@@ -394,10 +373,13 @@ class GecBERTModel(torch.nn.Module):
                     prediction = model.forward(**batch)
                 if progress_callback is not None:
                     progress_callback(batch_size, batch_size)
-                    
+
             predictions.append(prediction)
 
-        preds, idx, error_probs = self._convert(predictions)
+        preds, idx, error_probs = self._convert(
+            predictions, pause_hints_batch=pause_hints_batch,
+            orig_tokens_batch=orig_tokens_batch
+        )
         t55 = time()
         if self.log:
             print(f"Inference time {t55 - t11}")
@@ -470,7 +452,7 @@ class GecBERTModel(torch.nn.Module):
 
         return batches
 
-    def _convert(self, data):
+    def _convert(self, data, pause_hints_batch=None, orig_tokens_batch=None):
         all_class_probs = torch.zeros_like(data[0]['logits'])
         error_probs = torch.zeros_like(data[0]['max_error_probability'])
         for output, weight in zip(data, self.model_weights):
@@ -483,10 +465,59 @@ class GecBERTModel(torch.nn.Module):
 
         if self.confidence != 0.0:
             all_class_probs[:, :, self.noop_index] += self.confidence
-            
+
         if self.case_confidence != 0.0 and hasattr(self, 'case_indices'):
             for idx in self.case_indices:
                 all_class_probs[:, :, idx] += self.case_confidence
+
+        # Pause-based nudge: chỉ can thiệp nhẹ khi model predict $KEEP tại vị trí có pause
+        if pause_hints_batch is not None:
+            # Snapshot label TRƯỚC khi nudge
+            before_idx = torch.max(all_class_probs, dim=-1)[1]
+
+            for b_idx, hints in enumerate(pause_hints_batch):
+                if hints is None:
+                    continue
+                for w_idx, gap in enumerate(hints):
+                    t_idx = w_idx + 1  # +1 vì START_TOKEN ở vị trí 0
+                    if t_idx >= all_class_probs.size(1):
+                        break
+
+                    current_label_idx = torch.argmax(all_class_probs[b_idx, t_idx]).item()
+                    current_label = self.vocab.get_token_from_index(current_label_idx, "labels")
+
+                    if gap >= 1.0:
+                        # Pause dài (>=1s): nếu model đã cho dấu chấm → giữ nguyên
+                        # Nếu model cho $KEEP → nudge nhẹ về dấu chấm
+                        if current_label == "$KEEP":
+                            all_class_probs[b_idx, t_idx, self.noop_index] -= 0.2
+                            all_class_probs[b_idx, t_idx, self.append_period_index] += 0.2
+                    elif gap >= 0.2:
+                        # Pause ngắn (0.2-1s): nếu model đã cho dấu chấm/phẩy → giữ nguyên
+                        # Nếu model cho $KEEP → chỉ boost nhẹ dấu phẩy, không giảm $KEEP
+                        if current_label == "$KEEP":
+                            all_class_probs[b_idx, t_idx, self.append_comma_index] += 0.2
+
+            # So sánh label SAU nudge → log chỗ nào thay đổi
+            after_idx = torch.max(all_class_probs, dim=-1)[1]
+            for b_idx, hints in enumerate(pause_hints_batch):
+                if hints is None:
+                    continue
+                for w_idx, gap in enumerate(hints):
+                    if gap < 0.2:
+                        continue
+                    t_idx = w_idx + 1
+                    if t_idx >= all_class_probs.size(1):
+                        break
+                    old_label = self.vocab.get_token_from_index(before_idx[b_idx, t_idx].item(), "labels")
+                    new_label = self.vocab.get_token_from_index(after_idx[b_idx, t_idx].item(), "labels")
+                    word = ""
+                    if orig_tokens_batch and b_idx < len(orig_tokens_batch) and w_idx < len(orig_tokens_batch[b_idx]):
+                        word = orig_tokens_batch[b_idx][w_idx]
+                    if old_label != new_label:
+                        print(f"  [Pause CHANGED] \"{word}\" gap={gap:.2f}s: {old_label} -> {new_label}")
+                    else:
+                        print(f"  [Pause kept]    \"{word}\" gap={gap:.2f}s: {new_label} (unchanged)")
 
         max_vals = torch.max(all_class_probs, dim=-1)
         probs = max_vals[0].tolist()
@@ -549,20 +580,23 @@ class GecBERTModel(torch.nn.Module):
             all_results.append(get_target_sent_by_edits(tokens, edits))
         return all_results
 
-    def handle_batch(self, full_batch, merge_punc=True, progress_callback=None):
+    def handle_batch(self, full_batch, merge_punc=True, progress_callback=None, pause_hints=None):
         """
         Handle batch of requests.
+        pause_hints: list of list of floats, mỗi phần tử là gap (giây) sau word tương ứng.
+                     Dùng để boost logits thêm dấu chấm/phẩy tại vị trí có pause trong speech.
         """
         try:
             from debug_utils import log_memory
             log_memory("GecBERTModel.handle_batch start")
         except ImportError:
             log_memory = lambda x: None
-        
+
         if self.split_chunk:
-            full_batch, indices = self.split_chunks(full_batch)
+            full_batch, indices, pause_hints_chunks = self.split_chunks(full_batch, pause_hints=pause_hints)
         else:
             indices = None
+            pause_hints_chunks = pause_hints
         final_batch = full_batch[:]
         batch_size = len(full_batch)
         prev_preds_dict = {i: [final_batch[i]] for i in range(len(final_batch))}
@@ -577,11 +611,21 @@ class GecBERTModel(torch.nn.Module):
                 pass
             orig_batch = [final_batch[i] for i in pred_ids]
 
+            # Lấy pause_hints tương ứng với pred_ids (chỉ iteration đầu tiên mới dùng pause)
+            if n_iter == 0 and pause_hints_chunks is not None:
+                cur_pause_hints = [pause_hints_chunks[i] for i in pred_ids]
+            else:
+                cur_pause_hints = None
+
             sequences = self.preprocess(orig_batch)
 
             if not sequences:
                 break
-            probabilities, idxs, error_probs = self.predict(sequences, progress_callback=progress_callback)
+            probabilities, idxs, error_probs = self.predict(
+                sequences, progress_callback=progress_callback,
+                pause_hints_batch=cur_pause_hints,
+                orig_tokens_batch=orig_batch if cur_pause_hints else None
+            )
 
             pred_batch = self.postprocess_batch(orig_batch, probabilities, idxs, error_probs)
             if self.log:
@@ -589,7 +633,7 @@ class GecBERTModel(torch.nn.Module):
 
             final_batch, pred_ids, cnt = self.update_final_batch(final_batch, pred_ids, pred_batch, prev_preds_dict)
             total_updates += cnt
-            
+
             try:
                 log_memory(f"GecBERTModel loop iteration {n_iter} end")
             except:
@@ -597,14 +641,14 @@ class GecBERTModel(torch.nn.Module):
 
             if not pred_ids:
                 break
-        
+
         if self.split_chunk:
             final_batch = [self.merge_chunks(final_batch[start:end]) for (start, end) in indices]
         else:
             final_batch = [" ".join(x) for x in final_batch]
         if merge_punc:
             final_batch = [re.sub(r'\s+(%s)' % self.punc_str, r'\1', x) for x in final_batch]
-        
+
         try:
             log_memory("GecBERTModel.handle_batch end")
         except:

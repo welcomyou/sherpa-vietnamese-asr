@@ -14,31 +14,25 @@ except ImportError as e:
 
 # Now import other modules
 import configparser
-import multiprocessing
-import psutil
 
-# === CPU Affinity / Thread Limiting Logic ===
-def get_allowed_cpu_count():
-    """
-    Detects the number of allowed CPUs (respecting affinity/container limits).
-    Returns value of os.cpu_count() if affinity cannot be determined.
-    """
-    try:
-        p = psutil.Process(os.getpid())
-        affinity = p.cpu_affinity()
-        if affinity:
-            return len(affinity)
-    except Exception as e:
-        print(f"[Init] Could not get CPU affinity: {e}")
+# === Cleanup temporary files from previous crashed sessions ===
+def cleanup_temp_files():
+    """Xóa các file tạm asr_* trong thư mục temp của hệ thống."""
+    import tempfile
     
-    try:
-        return os.cpu_count() or multiprocessing.cpu_count()
-    except:
-        return 4
+    temp_dir = tempfile.gettempdir()
+    for filename in os.listdir(temp_dir):
+        if filename.startswith('asr_'):
+            try:
+                filepath = os.path.join(temp_dir, filename)
+                os.unlink(filepath)
+                print(f"[Cleanup] Deleted: {filepath}")
+            except:
+                pass
 
-# Detect and set limits early
-ALLOWED_THREADS = get_allowed_cpu_count()
-print(f"[Init] Detected allowed CPU cores: {ALLOWED_THREADS}")
+# Use centralized CPU detection from core
+from core.config import get_allowed_cpu_count, ALLOWED_THREADS
+print(f"[Init] Detected physical CPU cores: {ALLOWED_THREADS}")
 
 # Set OpenMP/MKL threads to match allowed cores to prevent over-subscription
 os.environ["OMP_NUM_THREADS"] = str(ALLOWED_THREADS)
@@ -51,7 +45,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
 
-from common import BASE_DIR, CONFIG_FILE, COLORS, ALLOWED_THREADS
+from core.config import BASE_DIR, CONFIG_FILE, COLORS, ALLOWED_THREADS
 from tab_file import FileProcessingTab
 from tab_live import LiveProcessingTab
 
@@ -113,8 +107,8 @@ class MainWindow(QMainWindow):
             config['FileSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
                 'cpu_threads': '4',
-                'punctuation_confidence_slider': '7',
-                'case_confidence_slider': '3',
+                'punctuation_confidence_slider': '6',
+                'case_confidence_slider': '6',
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
@@ -159,8 +153,8 @@ class MainWindow(QMainWindow):
             config['FileSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
                 'cpu_threads': '4',
-                'punctuation_confidence_slider': '7',
-                'case_confidence_slider': '3',
+                'punctuation_confidence_slider': '6',
+                'case_confidence_slider': '6',
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
@@ -217,11 +211,11 @@ class MainWindow(QMainWindow):
                 file_tab.slider_threads.setValue(threads)
                 file_tab.label_threads.setText(str(threads))
                 
-                punct_conf = file_settings.getint('punctuation_confidence_slider', 7)
+                punct_conf = file_settings.getint('punctuation_confidence_slider', 6)
                 file_tab.slider_punct_conf.setValue(punct_conf)
                 file_tab.on_punct_conf_changed(punct_conf)
                 
-                case_conf = file_settings.getint('case_confidence_slider', 3)
+                case_conf = file_settings.getint('case_confidence_slider', 6)
                 file_tab.slider_case_conf.setValue(case_conf)
                 file_tab.on_case_conf_changed(case_conf)
                 
@@ -229,7 +223,7 @@ class MainWindow(QMainWindow):
                 file_tab.check_speaker_diarization.setChecked(speaker_diarization)
                 file_tab.on_speaker_diarization_changed(file_tab.check_speaker_diarization.checkState().value)
                 
-                diarization_threshold = file_settings.getint('diarization_threshold', 6)
+                diarization_threshold = file_settings.getint('diarization_threshold', 70)  # Default 0.70
                 file_tab.slider_diarization_threshold.setValue(diarization_threshold)
                 file_tab.on_diarization_threshold_changed(diarization_threshold)
                 
@@ -288,70 +282,82 @@ class MainWindow(QMainWindow):
             print("[Config] Skipping save_file_config - applying config")
             return
         
-        file_tab = self.tab_file
-        print(f"[Config] Saving file config: model={file_tab.combo_model.currentData()}, threads={file_tab.slider_threads.value()}")
+        # Disconnect signals temporarily to prevent recursive saves
+        self._disconnect_file_signals()
         
-        # Get number of speakers (0 = auto)
-        num_speakers = 0
-        if file_tab.spin_num_speakers.currentIndex() > 0:
-            try:
-                num_speakers = int(file_tab.spin_num_speakers.currentText())
-            except:
-                num_speakers = 0
-        
-        # Get current data with fallback
-        model = file_tab.combo_model.currentData()
-        if model is None:
-            model = file_tab.combo_model.currentText() or 'zipformer-30m-rnnt-6000h'
-        
-        speaker_model = file_tab.combo_speaker_model.currentData()
-        if speaker_model is None:
-            speaker_model = 'titanet_small'
-        
-        self.config['FileSettings'] = {
-            'model': model,
-            'cpu_threads': str(file_tab.slider_threads.value()),
-            'punctuation_confidence_slider': str(file_tab.slider_punct_conf.value()),
-            'case_confidence_slider': str(file_tab.slider_case_conf.value()),
-            'speaker_diarization': str(file_tab.check_speaker_diarization.isChecked()),
-            'show_speaker_labels': str(file_tab.check_show_speaker_labels.isChecked()),
-            'num_speakers': str(num_speakers),
-            'speaker_model': speaker_model,
-            'save_ram': str(file_tab.check_save_ram.isChecked()),
-            'diarization_threshold': str(file_tab.slider_diarization_threshold.value()),
-            'auto_analyze_quality': str(file_tab.chk_auto_analyze.isChecked()),
-        }
-        self.save_config()
+        try:
+            file_tab = self.tab_file
+            print(f"[Config] Saving file config: model={file_tab.combo_model.currentData()}, threads={file_tab.slider_threads.value()}")
+            
+            # Get number of speakers (0 = auto)
+            num_speakers = 0
+            if file_tab.spin_num_speakers.currentIndex() > 0:
+                try:
+                    num_speakers = int(file_tab.spin_num_speakers.currentText())
+                except:
+                    num_speakers = 0
+            
+            # Get current data with fallback
+            model = file_tab.combo_model.currentData()
+            if model is None:
+                model = file_tab.combo_model.currentText() or 'zipformer-30m-rnnt-6000h'
+            
+            speaker_model = file_tab.combo_speaker_model.currentData()
+            if speaker_model is None:
+                speaker_model = 'titanet_small'
+            
+            # Update config while preserving keys not in UI (e.g., hf_token)
+            self.config['FileSettings']['model'] = model
+            self.config['FileSettings']['cpu_threads'] = str(file_tab.slider_threads.value())
+            self.config['FileSettings']['punctuation_confidence_slider'] = str(file_tab.slider_punct_conf.value())
+            self.config['FileSettings']['case_confidence_slider'] = str(file_tab.slider_case_conf.value())
+            self.config['FileSettings']['speaker_diarization'] = str(file_tab.check_speaker_diarization.isChecked())
+            self.config['FileSettings']['show_speaker_labels'] = str(file_tab.check_show_speaker_labels.isChecked())
+            self.config['FileSettings']['num_speakers'] = str(num_speakers)
+            self.config['FileSettings']['speaker_model'] = speaker_model
+            self.config['FileSettings']['save_ram'] = str(file_tab.check_save_ram.isChecked())
+            self.config['FileSettings']['diarization_threshold'] = str(file_tab.slider_diarization_threshold.value())
+            self.config['FileSettings']['auto_analyze_quality'] = str(file_tab.chk_auto_analyze.isChecked())
+            self.save_config()
+        finally:
+            # Reconnect signals
+            self._connect_file_signals()
     
     def save_live_config(self):
         """Save Live tab UI state to config"""
         if self._applying_config:
             return
         
-        live_tab = self.tab_live
+        # Disconnect signals temporarily
+        self._disconnect_live_signals()
         
-        # Get current data with fallback
-        model = live_tab.combo_model.currentData()
-        if model is None:
-            model = live_tab.combo_model.currentText() or 'zipformer-30m-rnnt-6000h'
-        
-        # Get current microphone list and selected microphone
-        current_mic_list = []
-        selected_mic = ""
-        for i in range(live_tab.combo_microphone.count()):
-            mic_name = live_tab.combo_microphone.itemText(i)
-            if mic_name and not mic_name.startswith("Không tìm thấy"):
-                current_mic_list.append(mic_name)
-        if live_tab.combo_microphone.currentIndex() >= 0:
-            selected_mic = live_tab.combo_microphone.currentText()
-        
-        self.config['LiveSettings'] = {
-            'model': model,
-            'cpu_threads': str(live_tab.slider_threads.value()),
-            'microphone_list': '|||'.join(current_mic_list),
-            'selected_microphone': selected_mic,
-        }
-        self.save_config()
+        try:
+            live_tab = self.tab_live
+            
+            # Get current data with fallback
+            model = live_tab.combo_model.currentData()
+            if model is None:
+                model = live_tab.combo_model.currentText() or 'zipformer-30m-rnnt-6000h'
+            
+            # Get current microphone list and selected microphone
+            current_mic_list = []
+            selected_mic = ""
+            for i in range(live_tab.combo_microphone.count()):
+                mic_name = live_tab.combo_microphone.itemText(i)
+                if mic_name and not mic_name.startswith("Không tìm thấy"):
+                    current_mic_list.append(mic_name)
+            if live_tab.combo_microphone.currentIndex() >= 0:
+                selected_mic = live_tab.combo_microphone.currentText()
+            
+            # Update config while preserving keys not in UI
+            self.config['LiveSettings']['model'] = model
+            self.config['LiveSettings']['cpu_threads'] = str(live_tab.slider_threads.value())
+            self.config['LiveSettings']['microphone_list'] = '|||'.join(current_mic_list)
+            self.config['LiveSettings']['selected_microphone'] = selected_mic
+            self.save_config()
+        finally:
+            # Reconnect signals
+            self._connect_live_signals()
     
     def closeEvent(self, event):
         """Save config when closing the application with confirmation"""
@@ -452,9 +458,12 @@ class MainWindow(QMainWindow):
     
     def connect_config_signals(self):
         """Connect UI signals to auto-save config when settings change"""
+        self._connect_file_signals()
+        self._connect_live_signals()
+    
+    def _connect_file_signals(self):
+        """Connect File tab signals"""
         file_tab = self.tab_file
-        
-        # Connect File tab signals
         file_tab.combo_model.currentIndexChanged.connect(self.save_file_config)
         file_tab.slider_threads.valueChanged.connect(self.save_file_config)
         file_tab.slider_punct_conf.valueChanged.connect(self.save_file_config)
@@ -465,12 +474,73 @@ class MainWindow(QMainWindow):
         file_tab.combo_speaker_model.currentIndexChanged.connect(self.save_file_config)
         file_tab.check_save_ram.stateChanged.connect(self.save_file_config)
         file_tab.slider_diarization_threshold.valueChanged.connect(self.save_file_config)
-        
-        # Connect Live tab signals
+    
+    def _disconnect_file_signals(self):
+        """Disconnect File tab signals temporarily"""
+        file_tab = self.tab_file
+        try:
+            file_tab.combo_model.currentIndexChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.slider_threads.valueChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.slider_punct_conf.valueChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.slider_case_conf.valueChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_speaker_diarization.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_show_speaker_labels.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.spin_num_speakers.currentIndexChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.combo_speaker_model.currentIndexChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_save_ram.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.slider_diarization_threshold.valueChanged.disconnect(self.save_file_config)
+        except:
+            pass
+    
+    def _connect_live_signals(self):
+        """Connect Live tab signals"""
         live_tab = self.tab_live
         live_tab.combo_model.currentIndexChanged.connect(self.save_live_config)
         live_tab.slider_threads.valueChanged.connect(self.save_live_config)
         live_tab.combo_microphone.currentIndexChanged.connect(self.save_live_config)
+    
+    def _disconnect_live_signals(self):
+        """Disconnect Live tab signals temporarily"""
+        live_tab = self.tab_live
+        try:
+            live_tab.combo_model.currentIndexChanged.disconnect(self.save_live_config)
+        except:
+            pass
+        try:
+            live_tab.slider_threads.valueChanged.disconnect(self.save_live_config)
+        except:
+            pass
+        try:
+            live_tab.combo_microphone.currentIndexChanged.disconnect(self.save_live_config)
+        except:
+            pass
 
     def show_about_dialog(self):
         """Hiển thị dialog thông tin phần mềm"""
@@ -520,7 +590,7 @@ Văn phòng Thành ủy Thành phố Hồ Chí Minh.</p>
 <p style='color: #cccccc; margin: 8px 0;'><b>Lập trình:</b> Antigravity</p>
 
 <p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 1.0<br>
-Ngày 31 tháng 01 năm 2026</p>
+Ngày 10 tháng 03 năm 2026</p>
 
 <p style='color: #ffd700; margin: 15px 0; font-weight: bold; text-align: center;'>
 PHẦN MỀM SỬ DỤNG TRONG MÔI TRƯỜNG GIÁO DỤC, HÀNH CHÍNH CÔNG, TỔ CHỨC ĐẢNG, ĐOÀN THỂ.<br>
@@ -528,14 +598,23 @@ KHÔNG SỬ DỤNG CHO MỤC ĐÍCH THƯƠNG MẠI.
 </p>
 
 <p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CHỨC NĂNG:</p>
-<p style='color: #cccccc; margin: 5px 0;'>Chuyển tập tin ghi âm thành văn bản, hỗ trợ tìm kiếm và phân đoạn Người nói.</p>
+<p style='color: #cccccc; margin: 5px 0;'>
+• Chuyển tập tin ghi âm thành văn bản tiếng Việt<br>
+• Phân tách ngưới nói (Speaker Diarization)<br>
+• Thêm dấu câu tự động<br>
+• Phân tích chất lượng âm thanh (DNSMOS)<br>
+• Nhận dạng real-time qua microphone<br>
+• Hỗ trợ hotwords (từ khóa tùy chỉnh)
+</p>
 
 <p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CÔNG NGHỆ SỬ DỤNG:</p>
 <ul style='color: #cccccc; margin: 5px 0; padding-left: 20px;'>
-<li><b>Giao diện đơn giản, chạy hoàn toàn Offline:</b> Python 3, PyQt6</li>
-<li><b>Nhận dạng tiếng nói và phân tách Ngườn nói (ASR, Diarization):</b> Sherpa-ONNX</li>
+<li><b>Giao diện:</b> Python 3, PyQt6</li>
+<li><b>ASR Engine:</b> Sherpa-ONNX (Zipformer)</li>
+<li><b>Speaker Diarization:</b> TitaNet, Pyannote, ONNX Altunenes</li>
 <li><b>Xử lý âm thanh:</b> FFmpeg, Pydub</li>
-<li><b>Xử lý văn bản:</b> wtpsplit, BERT Punctuation Restoration</li>
+<li><b>NLP:</b> ViBERT-capu (Thêm dấu câu)</li>
+<li><b>Audio Quality:</b> DNSMOS</li>
 </ul>
 """
         content = QLabel(content_text)
@@ -554,7 +633,11 @@ KHÔNG SỬ DỤNG CHO MỤC ĐÍCH THƯƠNG MẠI.
 
 
 if __name__ == "__main__":
+    # Dọn dẹp file tạm từ lần chạy trước (nếu bị crash)
+    cleanup_temp_files()
+    
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    ret = app.exec()
+    os._exit(ret)

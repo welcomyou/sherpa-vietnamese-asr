@@ -17,11 +17,13 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
 from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 
-from common import (BASE_DIR, COLORS, MicrophoneRecordThread, ClickableTextEdit, 
+from core.config import BASE_DIR, COLORS, MODEL_DOWNLOAD_INFO
+from core.utils import normalize_vietnamese
+from common import (MicrophoneRecordThread, ClickableTextEdit,
                     SpeakerHotkeyDialog, StreamingASRManager, OnlineStreamingASRManager,
-                    SpeakerRenameDialog, SplitSpeakerDialog, SearchWidget, normalize_vietnamese,
-                    show_missing_model_dialog, MODEL_DOWNLOAD_INFO)
-from audio_analyzer import (
+                    SpeakerRenameDialog, SplitSpeakerDialog, SearchWidget,
+                    show_missing_model_dialog)
+from core.audio_analyzer import (
     AudioQualityAnalyzer, AnalysisResult, QualityMetrics,
     check_dnsmos_model_exists, DNSMOSDownloader
 )
@@ -754,7 +756,7 @@ class LiveProcessingTab(QWidget):
         chunk_end_pos = chunk_start_pos + len(text)
         matches_in_chunk = []
         
-        for match in self.search_matches:
+        for match_idx, match in enumerate(self.search_matches):
             if match['seg_idx'] == seg_idx:
                 match_start = match['start']
                 match_end = match['end']
@@ -764,7 +766,23 @@ class LiveProcessingTab(QWidget):
                     # Điều chỉnh vị trí relative với chunk
                     rel_start = max(0, match_start - chunk_start_pos)
                     rel_end = min(len(text), match_end - chunk_start_pos)
-                    is_current = (self.search_matches.index(match) == self.current_search_index)
+                    is_current = (match_idx == self.current_search_index)
+                    
+                    # Check if this match is part of a multi-segment match
+                    if not is_current:
+                        if match.get('continued_from_prev') and self.current_search_index >= 0:
+                            prev_match_idx = match_idx - 1
+                            if prev_match_idx == self.current_search_index:
+                                prev_match = self.search_matches[prev_match_idx]
+                                if prev_match.get('spans_to_next'):
+                                    is_current = True
+                        elif match.get('spans_to_next') and self.current_search_index >= 0:
+                            next_match_idx = match_idx + 1
+                            if next_match_idx == self.current_search_index:
+                                next_match = self.search_matches[next_match_idx]
+                                if next_match.get('continued_from_prev'):
+                                    is_current = True
+                    
                     matches_in_chunk.append({
                         'start': rel_start,
                         'end': rel_end,
@@ -940,13 +958,32 @@ class LiveProcessingTab(QWidget):
         scrollbar = self.text_output.verticalScrollBar()
         current_scroll = scrollbar.value()
         
+        self.text_output.setUpdatesEnabled(False)
         self.text_output.setHtml(f"<span>{full_html}</span>")
         
-        if self.is_recording:
-            scrollbar.setValue(scrollbar.maximum())
+        from PyQt6.QtCore import QTimer
+        self._scroll_attempts_live = getattr(self, '_scroll_attempts_live', 0)
+        self._scroll_attempts_live = 0
+        
+        def restore_scroll_live():
+            self._scroll_attempts_live += 1
+            if self.is_recording:
+                scrollbar.setValue(scrollbar.maximum())
+                if self._scroll_attempts_live < 5:
+                    QTimer.singleShot(10, restore_scroll_live)
+                else:
+                    self.text_output.setUpdatesEnabled(True)
+            else:
+                scrollbar.setValue(current_scroll)
+                if scrollbar.maximum() < current_scroll and self._scroll_attempts_live < 50:
+                    QTimer.singleShot(10, restore_scroll_live)
+                else:
+                    self.text_output.setUpdatesEnabled(True)
+                    
+        if self.is_recording or current_scroll > 0:
+            restore_scroll_live()
         else:
-            # Giữ nguyên scroll position khi đang phát lại và highlight
-            scrollbar.setValue(current_scroll)
+            self.text_output.setUpdatesEnabled(True)
     
     def on_live_sentence_clicked(self, idx):
         """Handle click on a sentence/word group in live streaming view"""
@@ -1375,7 +1412,7 @@ class LiveProcessingTab(QWidget):
         
         QMessageBox.information(self.window(), "Hoàn thành", 
             f"Đã ghi âm xong!\n\n"
-            f"Thờigian ghi âm: {duration_sec:.1f} giây\n"
+            f"Thời gian ghi âm: {duration_sec:.1f} giây\n"
             f"Độ dài văn bản: {text_len} ký tự\n\n"
             f"Bạn có thể xuất file WAV để lưu lại.")
     
@@ -2036,7 +2073,7 @@ class LiveProcessingTab(QWidget):
                 audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
                 
                 # Phân tích async để không block UI
-                from audio_analyzer import AnalysisThread
+                from core.audio_analyzer import AnalysisThread
                 self.mic_analysis_thread = AnalysisThread(
                     self.mic_analyzer, audio=audio
                 )
@@ -2930,7 +2967,7 @@ class LiveProcessingTab(QWidget):
         return len(original)
     
     def perform_search(self, query):
-        """Thực hiện tìm kiếm trong clickable_segments - tìm trong toàn bộ text"""
+        """Thực hiện tìm kiếm trong clickable_segments - tìm xuyên segment"""
         if not hasattr(self, 'clickable_segments') or not self.clickable_segments:
             return
         
@@ -2945,74 +2982,227 @@ class LiveProcessingTab(QWidget):
         query_norm = normalize_vietnamese(query)
         query_lower = query.lower()
         
-        # Tìm kiếm trong tất cả các text segments
-        text_seg_idx = 0  # Index chỉ tính text segments (không tính speaker)
-        for seg in self.clickable_segments:
+        # Build list of text segments (excluding speaker segments)
+        text_segments = []
+        text_seg_boundaries = []  # (global_start, global_end, text_seg_idx, clickable_idx, text)
+        global_pos = 0
+        text_seg_idx = 0
+        
+        for clickable_idx, seg in enumerate(self.clickable_segments):
             if seg.get('type') != 'text':
                 continue
             
-            # Lấy text tổng hợp của segment
             full_text = seg.get('text', '')
             if not full_text:
                 text_seg_idx += 1
                 continue
             
-            # Tìm kiếm chính xác trong toàn bộ text
-            text_lower = full_text.lower()
-            start = 0
-            while True:
-                idx = text_lower.find(query_lower, start)
-                if idx == -1:
-                    break
-                self.search_matches.append({
-                    'seg_idx': text_seg_idx,
-                    'clickable_idx': self.clickable_segments.index(seg),
-                    'start': idx,
-                    'end': idx + len(query),
-                    'text': full_text[idx:idx + len(query)],
-                    'score': 1.0
-                })
-                start = idx + 1
+            seg_start_global = global_pos
+            seg_end_global = global_pos + len(full_text)
             
-            # Tìm kiếm không dấu (fuzzy search) trong toàn bộ text
-            text_norm = normalize_vietnamese(full_text)
-            start = 0
-            while True:
-                idx = text_norm.find(query_norm, start)
-                if idx == -1:
-                    break
-                
-                # Ánh xạ vị trí từ normalized sang original
-                orig_start = self._map_norm_to_orig(full_text, idx)
-                orig_end = self._map_norm_to_orig(full_text, idx + len(query_norm))
-                
-                # Kiểm tra trùng lặp
-                is_duplicate = False
-                for existing in self.search_matches:
-                    if existing['seg_idx'] == text_seg_idx and \
-                       abs(existing['start'] - orig_start) < 2:
-                        is_duplicate = True
-                        break
-                
-                if not is_duplicate and orig_start < len(full_text):
-                    end_pos = min(orig_end, len(full_text))
-                    self.search_matches.append({
-                        'seg_idx': text_seg_idx,
-                        'clickable_idx': self.clickable_segments.index(seg),
-                        'start': orig_start,
-                        'end': end_pos,
-                        'text': full_text[orig_start:end_pos],
-                        'score': 0.9
-                    })
-                start = idx + 1
+            text_segments.append({
+                'text_seg_idx': text_seg_idx,
+                'clickable_idx': clickable_idx,
+                'text': full_text,
+                'text_lower': full_text.lower(),
+                'text_norm': normalize_vietnamese(full_text)
+            })
+            text_seg_boundaries.append({
+                'global_start': seg_start_global,
+                'global_end': seg_end_global,
+                'text_seg_idx': text_seg_idx,
+                'clickable_idx': clickable_idx,
+                'text': full_text
+            })
             
+            global_pos = seg_end_global + 1  # +1 for space separator
             text_seg_idx += 1
         
-        # Sắp xếp kết quả theo thứ tự xuất hiện
+        # Build concatenated text for cross-segment search
+        concatenated_parts = []
+        for seg_info in text_segments:
+            concatenated_parts.append(seg_info['text'])
+            concatenated_parts.append(' ')
+        
+        concatenated_text = ''.join(concatenated_parts)
+        concatenated_lower = concatenated_text.lower()
+        concatenated_norm = normalize_vietnamese(concatenated_text)
+        
+        # Helper to map global position to segment
+        def map_global_to_seg(global_pos):
+            for boundary in text_seg_boundaries:
+                if boundary['global_start'] <= global_pos < boundary['global_end']:
+                    return boundary['text_seg_idx'], boundary['clickable_idx'], global_pos - boundary['global_start']
+            # Check boundary
+            for boundary in text_seg_boundaries:
+                if global_pos == boundary['global_end']:
+                    return boundary['text_seg_idx'], boundary['clickable_idx'], global_pos - boundary['global_start']
+            return None, None, None
+        
+        # Search case-insensitive in concatenated text
+        start = 0
+        while True:
+            idx = concatenated_lower.find(query_lower, start)
+            if idx == -1:
+                break
+            
+            match_end = idx + len(query)
+            
+            start_text_seg, start_clickable, start_local = map_global_to_seg(idx)
+            end_text_seg, end_clickable, end_local = map_global_to_seg(match_end - 1)
+            
+            if start_text_seg is None:
+                start = idx + 1
+                continue
+            
+            if end_text_seg is None:
+                end_text_seg = text_segments[-1]['text_seg_idx'] if text_segments else start_text_seg
+                end_clickable = text_segments[-1]['clickable_idx'] if text_segments else start_clickable
+                end_seg_text = text_segments[-1]['text'] if text_segments else ""
+                end_local = len(end_seg_text)
+            
+            if start_text_seg == end_text_seg:
+                # Match within single segment
+                seg_info = text_segments[start_text_seg]
+                seg_text = seg_info['text']
+                end_pos = min(start_local + len(query), len(seg_text))
+                self.search_matches.append({
+                    'seg_idx': start_text_seg,
+                    'clickable_idx': seg_info['clickable_idx'],
+                    'start': start_local,
+                    'end': end_pos,
+                    'text': seg_text[start_local:end_pos],
+                    'score': 1.0
+                })
+            else:
+                # Match spans multiple segments
+                first_seg_info = text_segments[start_text_seg]
+                first_text = first_seg_info['text']
+                self.search_matches.append({
+                    'seg_idx': start_text_seg,
+                    'clickable_idx': first_seg_info['clickable_idx'],
+                    'start': start_local,
+                    'end': len(first_text),
+                    'text': first_text[start_local:],
+                    'score': 1.0,
+                    'spans_to_next': True
+                })
+                
+                # Add match for second segment
+                second_seg_info = text_segments[end_text_seg]
+                second_text = second_seg_info['text']
+                first_seg_match_len = len(first_text) - start_local
+                query_remaining = len(query) - first_seg_match_len - 1
+                second_end = min(int(query_remaining), len(second_text))
+                if second_end > 0:
+                    self.search_matches.append({
+                        'seg_idx': end_text_seg,
+                        'clickable_idx': second_seg_info['clickable_idx'],
+                        'start': 0,
+                        'end': second_end,
+                        'text': second_text[:second_end],
+                        'score': 1.0,
+                        'continued_from_prev': True
+                    })
+            
+            start = idx + 1
+        
+        # Search normalized (fuzzy) in concatenated text
+        start = 0
+        while True:
+            idx = concatenated_norm.find(query_norm, start)
+            if idx == -1:
+                break
+            
+            match_end = idx + len(query_norm)
+            
+            start_text_seg, start_clickable, start_local = map_global_to_seg(idx)
+            end_text_seg, end_clickable, end_local = map_global_to_seg(match_end - 1)
+            
+            if start_text_seg is None:
+                start = idx + 1
+                continue
+            
+            if end_text_seg is None:
+                end_text_seg = text_segments[-1]['text_seg_idx'] if text_segments else start_text_seg
+                end_clickable = text_segments[-1]['clickable_idx'] if text_segments else start_clickable
+            
+            # Map normalized position to original
+            first_seg_info = text_segments[start_text_seg]
+            seg_text = first_seg_info['text']
+            orig_start = self._map_norm_to_orig(seg_text, start_local)
+            
+            # Check for duplicate
+            is_duplicate = False
+            for existing in self.search_matches:
+                if existing['seg_idx'] == start_text_seg and abs(existing['start'] - orig_start) < 2:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate and orig_start < len(seg_text):
+                if start_text_seg == end_text_seg:
+                    # Within single segment
+                    start_boundary = text_seg_boundaries[start_text_seg]
+                    match_len_in_seg = start_boundary['global_end'] - (start_boundary['global_start'] + start_local)
+                    if match_len_in_seg > len(query_norm):
+                        match_len_in_seg = len(query_norm)
+                    
+                    orig_end = self._map_norm_to_orig(seg_text, start_local + match_len_in_seg)
+                    orig_end = min(orig_end, len(seg_text))
+                    
+                    self.search_matches.append({
+                        'seg_idx': start_text_seg,
+                        'clickable_idx': first_seg_info['clickable_idx'],
+                        'start': orig_start,
+                        'end': orig_end,
+                        'text': seg_text[orig_start:orig_end],
+                        'score': 0.9
+                    })
+                else:
+                    # Spans multiple segments
+                    orig_end = len(seg_text)
+                    self.search_matches.append({
+                        'seg_idx': start_text_seg,
+                        'clickable_idx': first_seg_info['clickable_idx'],
+                        'start': orig_start,
+                        'end': orig_end,
+                        'text': seg_text[orig_start:],
+                        'score': 0.9,
+                        'spans_to_next': True
+                    })
+                    
+                    # Second segment
+                    second_seg_info = text_segments[end_text_seg]
+                    second_text = second_seg_info['text']
+                    if second_text:
+                        start_boundary = text_seg_boundaries[start_text_seg]
+                        first_seg_norm_len = start_boundary['global_end'] - (start_boundary['global_start'] + start_local)
+                        remaining_norm_len = len(query_norm) - first_seg_norm_len - 1
+                        
+                        second_norm_text = normalize_vietnamese(second_text)
+                        actual_remaining = min(int(remaining_norm_len), len(second_norm_text))
+                        orig_end_second = self._map_norm_to_orig(second_text, actual_remaining)
+                        orig_end_second = min(orig_end_second, len(second_text))
+                        
+                        if orig_end_second > 0:
+                            self.search_matches.append({
+                                'seg_idx': end_text_seg,
+                                'clickable_idx': second_seg_info['clickable_idx'],
+                                'start': 0,
+                                'end': orig_end_second,
+                                'text': second_text[:orig_end_second],
+                                'score': 0.9,
+                                'continued_from_prev': True
+                            })
+            
+            start = idx + 1
+        
+        # Sort results
         self.search_matches.sort(key=lambda x: (x['seg_idx'], x['start']))
         
         count = len(self.search_matches)
         self.search_widget.label_count.setText(f"0/{count}")
+        self.search_widget.set_has_results(count > 0)
         
         if count > 0:
             self.current_search_index = 0
@@ -3041,6 +3231,7 @@ class LiveProcessingTab(QWidget):
         if hasattr(self, 'search_widget'):
             self.search_widget.input.clear()
             self.search_widget.label_count.setText("0/0")
+            self.search_widget.set_has_results(False)
         self.search_matches = []
         self.current_search_index = -1
         self._update_display_with_timestamps()

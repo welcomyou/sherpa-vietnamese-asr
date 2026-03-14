@@ -89,3 +89,5 @@ amthanhhoitruong.txt
 *.bak
 *.dll
 generate_bpe_vocab.py
+*.db
+.claude/settings.json

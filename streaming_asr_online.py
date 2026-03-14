@@ -2,120 +2,9 @@
 import os
 import queue
 import numpy as np
-import collections
 from PyQt6.QtCore import QThread, pyqtSignal
 
-# Import torch at module level for VAD (Issue B6 fix)
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
-# BASE_DIR should be defined to locate resources if needed
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-class VADTrigger:
-    """
-    VAD Trigger using Ring Buffer.
-    - buffers audio continuously.
-    - detects 'Speech Start' to trigger stream.
-    - detects 'Silence' to end stream.
-    """
-    def __init__(self, sample_rate=16000, trigger_level=0.3):
-        self.sample_rate = sample_rate
-        self.threshold = trigger_level
-        
-        # VAD Parameters
-        self.window_size = 512
-        self.min_silence_duration = 0.5
-        self.min_speech_duration = 0.3
-        self.speech_pad_ms = 300
-        
-        # Ring buffer for context - tăng lên 1.2s để giữ âm đầu sau endpoint (fix mất chữ)
-        self.context_duration = 1.2
-        self.maxlen = int(self.context_duration * sample_rate / self.window_size)
-        self.ring_buffer = collections.deque(maxlen=self.maxlen)
-        
-        # Buffer for VAD processing
-        self.vad_buffer = np.array([], dtype=np.float32)
-        
-        # State
-        self.triggered = False
-        self.voiceless_count = 0 
-        self.speech_chunks = 0
-        
-        # Load VAD
-        self.vad_model = None
-        self.vad_available = False
-        try:
-            import torch
-            self.vad_model, _ = torch.hub.load(
-                'snakers4/silero-vad', 
-                'silero_vad',
-                force_reload=False, 
-                onnx=False, 
-                verbose=False
-            )
-            self.vad_available = True
-            print(f"[VADTrigger] Loaded Silero VAD, threshold={self.threshold}")
-        except Exception as e:
-            print(f"[VADTrigger] Failed to load VAD: {e}")
-    
-    def process(self, audio_chunk):
-        """
-        Process a chunk (bytes or float32 array).
-        Returns: (is_speech, prob) or (None, None) if insufficient data
-        """
-        if not self.vad_available:
-            return True, 1.0
-            
-        if isinstance(audio_chunk, bytes):
-            audio_float = np.frombuffer(audio_chunk, dtype=np.int16).astype(np.float32) / 32768.0
-        else:
-            audio_float = audio_chunk
-
-        self.ring_buffer.append(audio_float)
-        self.vad_buffer = np.concatenate([self.vad_buffer, audio_float])
-        
-        if len(self.vad_buffer) < 512:
-            return None, None
-        
-        # torch đã import ở module level (B6 fix)
-        max_prob = 0.0
-        processed_any = False
-        
-        while len(self.vad_buffer) >= 512:
-            chunk = self.vad_buffer[:512]
-            self.vad_buffer = self.vad_buffer[512:]
-            
-            with torch.no_grad():
-                 prob = self.vad_model(torch.from_numpy(chunk), self.sample_rate).item()
-                 max_prob = max(max_prob, prob)
-            processed_any = True
-        
-        if processed_any:
-            is_speech = max_prob > self.threshold
-            return is_speech, max_prob
-        else:
-            return None, None
-
-    def get_context(self):
-        """Get concatenated audio from ring buffer"""
-        if not self.ring_buffer:
-            return np.array([], dtype=np.float32)
-        return np.concatenate(list(self.ring_buffer))
-    
-    def clear_buffer(self):
-        self.ring_buffer.clear()
-        self.vad_buffer = np.array([], dtype=np.float32)
-
-    def reset(self):
-        """Reset VAD state completely - only clear buffer, keep model states"""
-        self.clear_buffer()
-        # Không reset states của VAD model để tránh mất thởi gian warm-up
-        # self.vad_model.reset_states() - Đã bỏ để giữ nguyên internal states
 
 
 class OnlineStreamingASRThread(QThread):
@@ -179,18 +68,8 @@ class OnlineStreamingASRThread(QThread):
             import sherpa_onnx
             import glob
             import time
-            import torch
-            
+
             self.is_running = True
-            
-            # Limit PyTorch threads
-            cpu_threads = self.config.get("cpu_threads", 4)
-            try:
-                torch.set_num_threads(cpu_threads)
-                torch.set_num_interop_threads(1)
-                print(f"[OnlineStreamingASR] Set PyTorch threads: {cpu_threads}")
-            except RuntimeError as e:
-                print(f"[OnlineStreamingASR] PyTorch threads already set: {e}")
             
             # Load Model - Look for chunk-64 files
             print(f"[OnlineStreamingASR] Loading ONLINE model (NO VAD) from {self.model_path}")
@@ -216,7 +95,7 @@ class OnlineStreamingASRThread(QThread):
             print(f"[OnlineStreamingASR] Using joiner: {os.path.basename(joiner_files[0])}")
             
             # Chuẩn bị hotwords config
-            from common import get_hotwords_config, BASE_DIR
+            from core.config import get_hotwords_config, BASE_DIR
             hotwords_config = get_hotwords_config(self.model_path, BASE_DIR)
             
             # Create OnlineRecognizer - NO VAD, model handles everything
@@ -291,7 +170,7 @@ class OnlineStreamingASRThread(QThread):
                         
                         # Emit partial if changed and not empty
                         if current_text and current_text != self.last_text:
-                            # Timestamp chính xác: thờigian audio đã xử lý
+                            # Timestamp chính xác: thời gian audio đã xử lý
                             timestamp_sec = self.total_samples / 16000.0
                             segment_start_sec = self.segment_start_samples / 16000.0
                             if timestamp_sec < segment_start_sec:

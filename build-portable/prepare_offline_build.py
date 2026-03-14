@@ -59,14 +59,6 @@ MODELS_CONFIG = {
         "description": "Nemo TitaNet Small (speaker embedding)",
         "check_file": "nemo_en_titanet_small.onnx"
     },
-    "eres2netv2_zh": {
-        "type": "huggingface_file",
-        "repo_id": "csukuangfj/speaker-embedding-models",
-        "filename": "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
-        "local_dir": "speaker_embedding",
-        "description": "3D Speaker ERes2NetV2 (ZH+EN)",
-        "check_file": "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
-    },
     "sherpa-onnx-pyannote-segmentation-3-0": {
         "type": "github_tar",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
@@ -74,6 +66,47 @@ MODELS_CONFIG = {
         "description": "Pyannote Segmentation",
         "check_file": "model.onnx",
         "tar_inner_path": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
+    },
+    
+    # Pyannote Community-1 Pipeline (Offline - no HF Token needed at runtime)
+    "pyannote_community1_pipeline": {
+        "type": "huggingface",
+        "repo_id": "pyannote/speaker-diarization-community-1",
+        "local_dir": "pyannote/speaker-diarization-community-1",
+        "description": "Pyannote Community-1 Pipeline (Full Offline)",
+        "check_file": "config.yaml"
+    },
+    "pyannote_segmentation_3.0": {
+        "type": "huggingface",
+        "repo_id": "pyannote/segmentation-3.0",
+        "local_dir": "pyannote/segmentation-3.0",
+        "description": "Pyannote Segmentation 3.0 (dependency)",
+        "check_file": "pytorch_model.bin"
+    },
+    "pyannote_wespeaker": {
+        "type": "huggingface",
+        "repo_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "local_dir": "pyannote/wespeaker-voxceleb-resnet34-LM",
+        "description": "WeSpeaker embedding (dependency)",
+        "check_file": "pytorch_model.bin"
+    },
+    
+    # Altunenes ONNX Models (Pure ONNX - no pyannote.audio needed)
+    "altunenes_segmentation": {
+        "type": "huggingface_file",
+        "repo_id": "altunenes/speaker-diarization-community-1-onnx",
+        "filename": "segmentation-community-1.onnx",
+        "local_dir": "pyannote-onnx",
+        "description": "Altunenes Segmentation ONNX",
+        "check_file": "segmentation-community-1.onnx"
+    },
+    "altunenes_embedding": {
+        "type": "huggingface_file",
+        "repo_id": "altunenes/speaker-diarization-community-1-onnx",
+        "filename": "embedding_model.onnx",
+        "local_dir": "pyannote-onnx",
+        "description": "Altunenes Embedding ONNX",
+        "check_file": "embedding_model.onnx"
     },
     
     # Audio Quality Model

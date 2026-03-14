@@ -4,7 +4,7 @@ Based on: https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/models.html
 
 Available speaker embedding models:
 - nemo_en_titanet_small.onnx (38.4MB) - Fast, good accuracy, English
-- 3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx (68.1MB) - Chinese + English
+
 
 Segmentation model:
 - sherpa-onnx-pyannote-segmentation-3-0
@@ -69,7 +69,7 @@ def _setup_ffmpeg_path():
         return
     
     # Các vị trí phổ biến trên Windows
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     possible_paths = [
         os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe"),
         os.path.join(base_dir, "ffmpeg.exe"),
@@ -101,15 +101,25 @@ SPEAKER_EMBEDDING_MODELS = {
         "sample_rate": 16000,
         "description": "Fast English model, good balance"
     },
-    "eres2netv2_zh": {
-        "name": "3D Speaker ERes2NetV2 (ZH+EN)",
-        "file": "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
-        "size": "68.1 MB",
-        "language": "Chinese + English",
+    "community1": {
+        "name": "Pyannote Community-1 (SOTA Accuracy)",
+        "file": "community1_pipeline",  # Special marker - not a file
+        "size": "~40 MB",
+        "language": "Multilingual",
         "speed": "Medium",
-        "accuracy": "High",
+        "accuracy": "Excellent",
         "sample_rate": 16000,
-        "description": "Chinese and English multilingual"
+        "description": "State-of-the-art diarization, better than 3.1, requires HF token"
+    },
+    "community1_onnx": {
+        "name": "Community-1 ONNX (Altunenes)",
+        "file": "community1_onnx",  # Special marker - ONNX models
+        "size": "~32 MB",
+        "language": "Multilingual",
+        "speed": "Fast",
+        "accuracy": "Very Good",
+        "sample_rate": 16000,
+        "description": "Pure ONNX - No pyannote.audio needed, faster inference"
     }
 }
 
@@ -122,17 +132,40 @@ def get_available_models(base_dir: str = None) -> Dict[str, str]:
         Dict mapping model_id to full path
     """
     if base_dir is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     models_dir = os.path.join(base_dir, "models", "speaker_embedding")
     available = {}
     
     for model_id, info in SPEAKER_EMBEDDING_MODELS.items():
         model_path = os.path.join(models_dir, info["file"])
-        if os.path.exists(model_path):
+        # Special handling for pyannote - check if pyannote.audio is installed
+        if model_id == "community1":
+            try:
+                import pyannote.audio
+                available[model_id] = "pyannote_pipeline"
+            except ImportError:
+                pass
+        # Special handling for Altunenes ONNX - check if ONNX models exist
+        elif model_id == "community1_onnx":
+            onnx_model_dir = os.path.join(base_dir, "models", "pyannote-onnx")
+            seg_path = os.path.join(onnx_model_dir, "segmentation-community-1.onnx")
+            emb_path = os.path.join(onnx_model_dir, "embedding_model.onnx")
+            if os.path.exists(seg_path) and os.path.exists(emb_path):
+                available[model_id] = "altunenes_onnx"
+        elif os.path.exists(model_path):
             available[model_id] = model_path
     
     return available
+
+
+def check_pyannote_available() -> bool:
+    """Check if Pyannote 3.1 is available"""
+    try:
+        import pyannote.audio
+        return True
+    except ImportError:
+        return False
 
 
 def get_model_info(model_id: str) -> Optional[Dict]:
@@ -143,7 +176,7 @@ def get_model_info(model_id: str) -> Optional[Dict]:
 def get_model_path(model_id: str, base_dir: str = None) -> Optional[str]:
     """Get full path to a model file"""
     if base_dir is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     info = SPEAKER_EMBEDDING_MODELS.get(model_id)
     if info is None:
@@ -197,7 +230,7 @@ def resample_audio(audio, sample_rate, target_sample_rate):
 
 
 def load_audio(filename, target_sample_rate) -> Tuple[np.ndarray, int]:
-    """Load audio file and resample if needed
+    """Load audio file and resample if needed using torchaudio (best for Speaker Diarization)
     
     Supports: wav, mp3, m4a, flac, ogg, wma, aac, opus
     
@@ -208,62 +241,62 @@ def load_audio(filename, target_sample_rate) -> Tuple[np.ndarray, int]:
     Returns:
         Tuple of (audio_array, sample_rate)
     """
-    import os
-    file_ext = os.path.splitext(filename)[1].lower()
-    
-    # For compressed formats (m4a, mp3, wma, etc.), use pydub to convert to wav first
-    compressed_formats = ['.m4a', '.mp3', '.wma', '.aac', '.opus']
-    
-    # Setup ffmpeg path for pydub
-    _setup_ffmpeg_path()
-    
-    if file_ext in compressed_formats and PYDUB_AVAILABLE:
+    # For WAV files, use soundfile directly to avoid torchaudio/ffmpeg init hang
+    if filename.lower().endswith('.wav') and SOUNDFILE_AVAILABLE:
         try:
-            print(f"[SpeakerDiarizer] Converting {file_ext} to wav using pydub...")
-            
-            # Map extension to format
-            format_map = {'.m4a': 'm4a', '.mp3': 'mp3', '.wma': 'wma', '.aac': 'aac', '.opus': 'opus'}
-            audio_format = format_map.get(file_ext, file_ext[1:])
-            
-            # Load and convert
-            audio_segment = AudioSegment.from_file(filename, format=audio_format)
-            audio_segment = audio_segment.set_frame_rate(target_sample_rate).set_channels(1)
-            
-            # Get audio data as numpy array
-            audio = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
-            
-            # Normalize to [-1, 1] range (pydub uses int16)
-            audio = audio / 32768.0
-            
-            print(f"[SpeakerDiarizer] Converted successfully: {len(audio)} samples at {target_sample_rate}Hz")
-            return audio, target_sample_rate
-            
+            audio, sample_rate = sf.read(filename, dtype="float32", always_2d=True)
+            audio = audio[:, 0]  # mono
+            if sample_rate != target_sample_rate:
+                import librosa
+                audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=target_sample_rate)
+                sample_rate = target_sample_rate
+            print(f"[SpeakerDiarizer] Loaded with soundfile: {len(audio)} samples at {sample_rate}Hz")
+            return audio, sample_rate
         except Exception as e:
-            print(f"[SpeakerDiarizer] Pydub conversion failed: {e}, falling back to librosa...")
-    
-    # Try soundfile first (faster for wav/flac/ogg)
+            print(f"[SpeakerDiarizer] soundfile failed: {e}, falling back to torchaudio...")
+
+    import torch
+    import torchaudio
+
     try:
-        audio, sample_rate = sf.read(filename, dtype="float32", always_2d=True)
-        audio = audio[:, 0]  # only use the first channel
+        # Load audio with torchaudio (supports many formats via ffmpeg backend)
+        waveform, sample_rate = torchaudio.load(filename, normalize=True)
         
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        # Resample if needed using torchaudio (high quality Kaiser-Sinc)
         if sample_rate != target_sample_rate:
-            audio = librosa.resample(
-                audio,
-                orig_sr=sample_rate,
-                target_sr=target_sample_rate,
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, 
+                new_freq=target_sample_rate,
+                lowpass_filter_width=6  # High quality
             )
-            audio = audio.astype(np.float32)
+            waveform = resampler(waveform)
             sample_rate = target_sample_rate
+        
+        # Convert to numpy (squeeze to 1D)
+        audio = waveform.squeeze().numpy().astype(np.float32)
+        
+        print(f"[SpeakerDiarizer] Loaded with torchaudio: {len(audio)} samples at {sample_rate}Hz")
         return audio, sample_rate
-    except Exception as sf_error:
-        # Fall back to librosa for other formats
-        if LIBROSA_AVAILABLE:
-            print(f"[SpeakerDiarizer] Soundfile failed, using librosa for {filename}")
-            audio, sample_rate = librosa.load(filename, sr=target_sample_rate, mono=True, res_type="soxr_vhq")
-            audio = audio.astype(np.float32)
-            return audio, target_sample_rate
-        else:
-            raise sf_error
+        
+    except Exception as e:
+        print(f"[SpeakerDiarizer] torchaudio failed: {e}, falling back to soundfile...")
+        # Fallback to soundfile
+        try:
+            audio, sample_rate = sf.read(filename, dtype="float32", always_2d=True)
+            audio = audio[:, 0]  # mono
+            if sample_rate != target_sample_rate:
+                import librosa
+                audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=target_sample_rate)
+                sample_rate = target_sample_rate
+            return audio, sample_rate
+        except Exception:
+            raise RuntimeError(f"Failed to load audio: {filename}")
+
+
 
 
 class SpeakerDiarizer:
@@ -277,10 +310,13 @@ class SpeakerDiarizer:
                  embedding_model: str = None,
                  embedding_model_id: str = None,
                  num_clusters: int = -1,
+                 min_speakers: int = None,
+                 max_speakers: int = None,
                  num_threads: int = 6,
-                 threshold: float = 0.7,
-                 min_duration_on: float = 0.8,
-                 min_duration_off: float = 1.0):
+                 threshold: float = 0.6,
+                 min_duration_on: float = 0.3, # updated to realistic defaults
+                 min_duration_off: float = 0.0,
+                 auth_token: str = None):
         """
         Initialize speaker diarizer
         
@@ -289,6 +325,8 @@ class SpeakerDiarizer:
             embedding_model: Path to speaker embedding model (.onnx) - can use embedding_model_id instead
             embedding_model_id: Model ID from SPEAKER_EMBEDDING_MODELS registry
             num_clusters: Number of speakers (-1 for auto-detect using threshold)
+            min_speakers: Minimum number of speakers (for Community-1, overrides num_clusters if set)
+            max_speakers: Maximum number of speakers (for Community-1, overrides num_clusters if set)
             num_threads: Number of threads for inference
             threshold: Threshold for clustering when num_clusters=-1 (default: 0.8)
                       Smaller threshold = more speakers, Larger threshold = fewer speakers
@@ -299,15 +337,123 @@ class SpeakerDiarizer:
         self.embedding_model = embedding_model
         self.embedding_model_id = embedding_model_id
         self.num_clusters = num_clusters
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
         self.num_threads = num_threads
         self.threshold = threshold if threshold is not None else 0.8
         self.min_duration_on = min_duration_on
         self.min_duration_off = min_duration_off
         self.sd = None  # sherpa_onnx OfflineSpeakerDiarization instance
         self.model_info = None  # Store model info for reference
+        self._pyannote_backend = None  # Community1Diarizer instance
+        self.auth_token = auth_token or os.environ.get('HF_TOKEN', None)
+        
+    # Default thresholds for each model
+    MODEL_DEFAULT_THRESHOLDS = {
+        "titanet_small": 0.85,      # Nemo Titanet - 0.85 for better accuracy
+        "community1": 0.7,          # Pyannote PyTorch - 0.7 for better accuracy
+        "community1_onnx": 0.7,     # Pyannote ONNX - default
+    }
+    
+    @classmethod
+    def get_default_threshold(cls, model_id: str) -> float:
+        """Get default threshold for a specific model"""
+        return cls.MODEL_DEFAULT_THRESHOLDS.get(model_id, 0.6)
+    
+    def _is_pyannote_model(self) -> bool:
+        """Check if using Pyannote 3.1 ONNX model"""
+        return self.embedding_model_id == "community1"
+    
+    def _is_altunenes_onnx_model(self) -> bool:
+        """Check if using Altunenes ONNX model"""
+        return self.embedding_model_id == "community1_onnx"
         
     def initialize(self):
-        """Initialize models using sherpa-onnx OfflineSpeakerDiarizationConfig"""
+        """Initialize models using sherpa-onnx or Pyannote ONNX"""
+        # Check if using Pyannote 3.1
+        if self._is_pyannote_model():
+            self._init_pyannote()
+            return
+        
+        # Check if using Altunenes ONNX
+        if self._is_altunenes_onnx_model():
+            self._init_altunenes_onnx()
+            return
+            
+        # Standard sherpa-onnx initialization
+        self._init_sherpa_onnx()
+    
+    def _init_pyannote(self):
+        """Initialize Pyannote 3.1 ONNX backend"""
+        try:
+            from core.speaker_diarization_pyannote import Community1Diarizer
+        except ImportError as e:
+            raise RuntimeError(
+                f"Pyannote ONNX diarizer not available: {e}\n"
+                "Install with: pip install pyannote.audio"
+            )
+        
+        # Nếu user chọn số speaker cụ thể, tạo range linh hoạt xung quanh số đó
+        # min = max(2, num-1), max = num+1
+        min_spk, max_spk = self.min_speakers, self.max_speakers
+        num_spk = self.num_clusters
+        if self.num_clusters > 0:
+            min_spk = max(2, self.num_clusters - 1)
+            max_spk = self.num_clusters + 1
+            num_spk = -1  # Để model dùng min/max thay vì ép cứng
+            print(f"[SpeakerDiarizer] User selected {self.num_clusters} speakers -> Range: min={min_spk}, max={max_spk}")
+        else:
+            print(f"[SpeakerDiarizer] Auto-detect speakers")
+
+        self._pyannote_backend = Community1Diarizer(
+            num_speakers=num_spk,
+            min_speakers=min_spk,
+            max_speakers=max_spk,
+            num_threads=self.num_threads,
+            min_duration_on=self.min_duration_on,
+            min_duration_off=self.min_duration_off,
+            auth_token=self.auth_token,
+            threshold=self.threshold
+        )
+        self._pyannote_backend.initialize()
+        self.model_info = get_model_info("community1")
+    
+    def _init_altunenes_onnx(self):
+        """Initialize Altunenes ONNX backend (pure ONNX, no pyannote.audio)"""
+        try:
+            from core.speaker_diarization_onnx_altunenes import AltunenesONNXDiarizer
+        except ImportError as e:
+            raise RuntimeError(
+                f"Altunenes ONNX diarizer not available: {e}\n"
+                "Install with: pip install onnxruntime scikit-learn"
+            )
+        
+        # Nếu user chọn số speaker cụ thể, tạo range linh hoạt xung quanh số đó
+        # min = max(2, num-1), max = num+1
+        min_spk, max_spk = self.min_speakers, self.max_speakers
+        num_spk = self.num_clusters
+        if self.num_clusters > 0:
+            min_spk = max(2, self.num_clusters - 1)
+            max_spk = self.num_clusters + 1
+            num_spk = -1  # Để model dùng min/max thay vì ép cứng
+            print(f"[SpeakerDiarizer] User selected {self.num_clusters} speakers -> Range: min={min_spk}, max={max_spk}")
+        else:
+            print(f"[SpeakerDiarizer] Auto-detect speakers")
+
+        self._pyannote_backend = AltunenesONNXDiarizer(
+            num_speakers=num_spk,
+            min_speakers=min_spk,
+            max_speakers=max_spk,
+            num_threads=self.num_threads,
+            min_duration_on=self.min_duration_on,
+            min_duration_off=self.min_duration_off,
+            threshold=self.threshold
+        )
+        self._pyannote_backend.initialize()
+        self.model_info = get_model_info("community1_onnx")
+    
+    def _init_sherpa_onnx(self):
+        """Initialize sherpa-onnx backend"""
         # Try to import sherpa_onnx here (for embedded Python compatibility)
         try:
             import sherpa_onnx as so
@@ -324,7 +470,7 @@ class SpeakerDiarizer:
             if not SOUNDFILE_AVAILABLE: missing.append("soundfile")
             raise RuntimeError(f"Missing dependencies: {missing}")
         
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         # Default segmentation model path
         if self.segmentation_model is None:
@@ -364,6 +510,13 @@ class SpeakerDiarizer:
         if self.model_info:
             print(f"[SpeakerDiarizer] Model info: {self.model_info['name']} ({self.model_info['size']})")
         
+        # Model Sherpa chỉ có 1 tham số num_clusters nên dùng trực tiếp
+        num_clusters = self.num_clusters
+        if self.num_clusters > 0:
+            print(f"[SpeakerDiarizer] User selected {self.num_clusters} speakers (Sherpa fixed count)")
+        else:
+            print(f"[SpeakerDiarizer] Auto-detect speakers")
+        
         # Create config following the sample code pattern
         # Note: num_threads needs to be set in BOTH segmentation and embedding configs
         so = get_sherpa_onnx()
@@ -379,7 +532,7 @@ class SpeakerDiarizer:
                 num_threads=self.num_threads,  # Set threads for embedding extractor
             ),
             clustering=so.FastClusteringConfig(
-                num_clusters=self.num_clusters,  # Number of speakers (-1 for auto-detect)
+                num_clusters=num_clusters,  # Number of speakers (-1 for auto-detect)
                 threshold=self.threshold          # Clustering threshold (smaller = more speakers)
             ),
             min_duration_on=self.min_duration_on,
@@ -416,8 +569,12 @@ class SpeakerDiarizer:
         SpeakerDiarizer._call_count += 1
         print(f"[SpeakerDiarizer] *** process() called #{SpeakerDiarizer._call_count} ***")
         
-        if self.sd is None:
+        if self.sd is None and self._pyannote_backend is None:
             self.initialize()
+        
+        # Delegate to Pyannote backend if using pyannote model
+        if self._pyannote_backend is not None:
+            return self._process_pyannote(audio_file, progress_callback, audio_data, audio_sample_rate)
         
         # Use pre-loaded audio if provided, otherwise load from file
         if audio_data is not None:
@@ -453,19 +610,218 @@ class SpeakerDiarizer:
             )
             segments.append(segment)
         
+        # Post-processing: Clip segments to speech regions (VAD)
+        segments = self._clip_segments_to_speech(segments, audio, sample_rate)
+
+        # Post-processing: Merge short islands (< 1.5s) between same speaker
+        if segments:
+            segments = self._merge_short_islands(segments, max_short_duration=1.5)
+
         if segments:
             num_speakers = max(s.speaker for s in segments) + 1
             print(f"[SpeakerDiarizer] Found {len(segments)} segments from {num_speakers} speakers")
             # Print all segments to console for debugging
-            print(f"\n[SpeakerDiarizer] ===== SPEAKER SEGMENTS =====")
+            print(f"\n[SpeakerDiarizer] ===== SPEAKER SEGMENTS (Post-Processed) =====")
             for i, seg in enumerate(segments, 1):
                 print(f"[{i:3d}] {seg}")
             print(f"[SpeakerDiarizer] ===== END OF SEGMENTS =====\n")
         else:
             print("[SpeakerDiarizer] No speakers found!")
-        
+
         return segments
+
+    def _clip_segments_to_speech(self, segments: List[Segment],
+                                 audio: np.ndarray, sample_rate: int) -> List[Segment]:
+        """Clip diarization segments tại ranh giới speech/silence từ VAD.
+
+        Diarization model có thể kéo dài segment qua khoảng lặng.
+        Dùng VAD để xác định vùng có tiếng nói, rồi clip segment —
+        chỉ giữ phần giao với speech regions.
+        """
+        if not segments:
+            return segments
+
+        try:
+            from core.asr_engine import get_vad_segments
+            vad_segs = get_vad_segments(audio, sample_rate=sample_rate,
+                                        min_silence_ms=300, padding_ms=200)
+            speech_regions = [(s / sample_rate, e / sample_rate) for s, e in vad_segs]
+        except Exception as e:
+            print(f"[SpeakerDiarizer] VAD clip failed: {e}, using original segments")
+            return segments
+
+        if not speech_regions:
+            return segments
+
+        total_speech = sum(e - s for s, e in speech_regions)
+        print(f"[SpeakerDiarizer] VAD: {len(speech_regions)} speech regions "
+              f"({total_speech:.1f}s speech / {len(audio)/sample_rate:.1f}s audio)")
+
+        # Clip: giữ phần giao giữa mỗi diarization segment và speech regions
+        clipped = []
+        for seg in segments:
+            for sp_start, sp_end in speech_regions:
+                clip_start = max(seg.start, sp_start)
+                clip_end = min(seg.end, sp_end)
+                if clip_end - clip_start > 0.05:
+                    clipped.append(Segment(
+                        start=clip_start, end=clip_end, speaker=seg.speaker
+                    ))
+
+        clipped.sort(key=lambda s: s.start)
+
+        if len(clipped) != len(segments):
+            print(f"[SpeakerDiarizer] Clipped segments: {len(segments)} -> {len(clipped)}")
+
+        return clipped if clipped else segments
+
+    def _merge_short_islands(self, segments: List[Segment], max_short_duration: float = 1.5) -> List[Segment]:
+        """
+        Gộp các đoạn ngắn (< max_short_duration) nằm giữa cùng 1 người nói.
+        Pattern: SpkA -> [SpkX(<1.5s)] -> [SpkY(<1.5s)] -> ... -> SpkA
+        → Gộp tất cả vào SpkA
+        """
+        if len(segments) < 3:
+            return segments
+            
+        n = len(segments)
+        to_skip = set()
+        
+        i = 0
+        while i < n:
+            if i in to_skip:
+                i += 1
+                continue
+                
+            spk_a = segments[i].speaker
+            
+            # Tìm chuỗi các đoạn ngắn liên tiếp phía sau
+            j = i + 1
+            short_segments_indices = []
+            
+            while j < n:
+                if segments[j].duration < max_short_duration:
+                    short_segments_indices.append(j)
+                    j += 1
+                else:
+                    break
+            
+            # Nếu sau chuỗi ngắn là SpkA, đánh dấu gộp
+            if short_segments_indices and j < n:
+                if segments[j].speaker == spk_a:
+                    for idx in short_segments_indices:
+                        to_skip.add(idx)
+                    # j là đoạn SpkA kết thúc chuỗi, ta sẽ xử lý tiếp từ j
+                    i = j
+                    continue
+            
+            i += 1
+            
+        # Tạo kết quả cuối cùng
+        result = []
+        i = 0
+        while i < n:
+            if i in to_skip:
+                i += 1
+                continue
+                
+            current = segments[i]
+            
+            # Kiểm tra xem có chuỗi gộp bắt đầu từ đây không
+            if i + 1 < n and (i + 1) in to_skip:
+                j = i + 1
+                while j < n and j in to_skip:
+                    j += 1
+                
+                # j là đoạn SpkA tiếp theo
+                if j < n and segments[j].speaker == current.speaker:
+                    # Tạo segment mới kéo dài từ đầu SpkA này đến hết SpkA kia
+                    current = Segment(start=current.start, end=segments[j].end, speaker=current.speaker)
+                    i = j + 1
+                    result.append(current)
+                    continue
+            
+            result.append(current)
+            i += 1
+            
+        return result
     
+    def _process_pyannote(self, audio_file, progress_callback, audio_data, audio_sample_rate):
+        """Process using Pyannote/Community-1 ONNX backend"""
+        # Call Pyannote backend
+        result = self._pyannote_backend.process(
+            audio_file, progress_callback, audio_data, audio_sample_rate
+        )
+        
+        # Handle DiarizeOutput (new format with exclusive_speaker_diarization)
+        # or list of dicts (old format)
+        segments = []
+        
+        if hasattr(result, 'exclusive_speaker_diarization'):
+            # New format: DiarizeOutput object with Annotation
+            # Use exclusive_speaker_diarization for cleaner ASR mapping
+            for turn, _, speaker_label in result.exclusive_speaker_diarization.itertracks(yield_label=True):
+                # Extract speaker ID from label (e.g., "SPEAKER_00" -> 0)
+                if isinstance(speaker_label, str) and speaker_label.startswith("SPEAKER_"):
+                    speaker_id = int(speaker_label.split("_")[1])
+                else:
+                    speaker_id = int(speaker_label)
+                
+                segment = Segment(
+                    start=turn.start,
+                    end=turn.end,
+                    speaker=speaker_id
+                )
+                segments.append(segment)
+        elif hasattr(result, 'itertracks'):
+            # Annotation object directly
+            for turn, _, speaker_label in result.itertracks(yield_label=True):
+                if isinstance(speaker_label, str) and speaker_label.startswith("SPEAKER_"):
+                    speaker_id = int(speaker_label.split("_")[1])
+                else:
+                    speaker_id = int(speaker_label)
+                
+                segment = Segment(
+                    start=turn.start,
+                    end=turn.end,
+                    speaker=speaker_id
+                )
+                segments.append(segment)
+        else:
+            # Old format: list of dicts
+            for seg_dict in result:
+                segment = Segment(
+                    start=seg_dict["start"],
+                    end=seg_dict["end"],
+                    speaker=seg_dict["speaker"]
+                )
+                segments.append(segment)
+
+        # Post-processing: Clip segments to speech regions (VAD)
+        if audio_data is not None:
+            segments = self._clip_segments_to_speech(
+                segments, audio_data, audio_sample_rate or 16000)
+        else:
+            try:
+                vad_audio, vad_sr = load_audio(audio_file, 16000)
+                segments = self._clip_segments_to_speech(segments, vad_audio, vad_sr)
+            except Exception as e:
+                print(f"[SpeakerDiarizer] Could not load audio for VAD clip: {e}")
+
+        # Post-processing: Merge short islands (< 1.5s) between same speaker
+        if segments:
+            segments = self._merge_short_islands(segments, max_short_duration=1.5)
+
+        if segments:
+            num_speakers = max(s.speaker for s in segments) + 1
+            print(f"[SpeakerDiarizer] Found {len(segments)} segments from {num_speakers} speakers")
+            print(f"\n[SpeakerDiarizer] ===== SPEAKER SEGMENTS (Post-Processed) =====")
+            for i, seg in enumerate(segments, 1):
+                print(f"[{i:3d}] {seg}")
+            print(f"[SpeakerDiarizer] ===== END OF SEGMENTS =====\n")
+
+        return segments
+
     def process_with_transcription(self,
                                    audio_file: str,
                                    transcribed_segments: List[Dict],
@@ -511,8 +867,8 @@ class SpeakerDiarizer:
                         speaker_votes[speaker_id] = 0
                     speaker_votes[speaker_id] += overlap_duration
             
-            # If there's no clear overlap, or no raw_words, or only one speaker vote, fallback to segment-level
-            if not raw_words or len(speaker_votes) <= 1:
+            # Nếu không có raw_words → segment-level voting (không thể word-level)
+            if not raw_words:
                 if speaker_votes:
                     best_speaker_id = max(speaker_votes, key=speaker_votes.get)
                     best_speaker = f"Người nói {best_speaker_id + 1}"
@@ -525,8 +881,6 @@ class SpeakerDiarizer:
                         best_speaker_id = 0
                 
                 seg_copy = dict(trans_seg)
-                if "raw_words" in seg_copy:
-                    del seg_copy["raw_words"]  # Clean up memory
                 seg_copy.update({
                     "speaker": best_speaker,
                     "speaker_id": best_speaker_id
@@ -535,28 +889,74 @@ class SpeakerDiarizer:
                 continue
 
             # Word-level speaker assignment
+            # Tạo adjusted_segments: co boundary 150ms tại chỗ ĐỔI speaker
+            # Giữ nguyên boundary giữa các segment cùng speaker
+            BOUNDARY_MARGIN = 0.15   # 150ms margin tại speaker transition
+            NEXT_SPEAKER_BIAS = 2.0  # Bias 2:1 về speaker sau khi từ rơi vào gap
+
+            adjusted_segments = []
+            n_segs = len(speaker_segments)
+            for idx, seg in enumerate(speaker_segments):
+                adj_start = seg.start
+                adj_end = seg.end
+
+                # Co start nếu segment trước là speaker khác
+                if idx > 0 and speaker_segments[idx - 1].speaker != seg.speaker:
+                    adj_start = seg.start + BOUNDARY_MARGIN
+
+                # Co end nếu segment sau là speaker khác
+                if idx < n_segs - 1 and speaker_segments[idx + 1].speaker != seg.speaker:
+                    adj_end = seg.end - BOUNDARY_MARGIN
+
+                # Đảm bảo segment còn hợp lệ (>50ms)
+                if adj_end - adj_start > 0.05:
+                    adjusted_segments.append(Segment(
+                        start=adj_start, end=adj_end, speaker=seg.speaker))
+                else:
+                    adjusted_segments.append(seg)
+
             word_groups = []
             current_speaker_id = None
             current_group = []
 
             for w in raw_words:
                 w_start = w.get("start", 0)
-                w_end = w.get("end", 0)
-                
-                # Find best speaker for this word
-                w_votes = {}
-                for spk_seg in speaker_segments:
-                    o_start = max(w_start, spk_seg.start)
-                    o_end = min(w_end, spk_seg.end)
-                    o_dur = max(0, o_end - o_start)
-                    if o_dur > 0:
-                        w_votes[spk_seg.speaker] = w_votes.get(spk_seg.speaker, 0) + o_dur
-                
-                if w_votes:
-                    w_spk_id = max(w_votes, key=w_votes.get)
-                else:
-                    # Fallback to previous word's speaker or segment's best speaker
-                    w_spk_id = current_speaker_id if current_speaker_id is not None else max(speaker_votes, key=speaker_votes.get)
+                w_spk_id = None
+
+                # Dùng START time trên adjusted_segments (đã co margin)
+                for spk_seg in adjusted_segments:
+                    if spk_seg.start <= w_start <= spk_seg.end:
+                        w_spk_id = spk_seg.speaker
+                        break
+
+                # Fallback: từ rơi vào gap (có thể do margin tạo ra)
+                # Bias 2:1 về speaker SAU nếu 2 bên khác speaker
+                if w_spk_id is None:
+                    prev_seg = None
+                    next_seg = None
+                    for spk_seg in adjusted_segments:
+                        if spk_seg.end <= w_start:
+                            if prev_seg is None or spk_seg.end > prev_seg.end:
+                                prev_seg = spk_seg
+                        elif spk_seg.start > w_start:
+                            if next_seg is None or spk_seg.start < next_seg.start:
+                                next_seg = spk_seg
+
+                    if prev_seg and next_seg:
+                        dist_prev = w_start - prev_seg.end
+                        dist_next = next_seg.start - w_start
+                        if prev_seg.speaker != next_seg.speaker:
+                            # Khác speaker → bias về speaker sau
+                            w_spk_id = next_seg.speaker if dist_next <= dist_prev * NEXT_SPEAKER_BIAS else prev_seg.speaker
+                        else:
+                            # Cùng speaker → gán luôn
+                            w_spk_id = prev_seg.speaker
+                    elif prev_seg:
+                        w_spk_id = prev_seg.speaker
+                    elif next_seg:
+                        w_spk_id = next_seg.speaker
+                    else:
+                        w_spk_id = current_speaker_id if current_speaker_id is not None else max(speaker_votes, key=speaker_votes.get)
 
                 if w_spk_id != current_speaker_id:
                     if current_group:
@@ -573,8 +973,6 @@ class SpeakerDiarizer:
             if len(word_groups) == 1:
                 spk_id = word_groups[0][0]
                 seg_copy = dict(trans_seg)
-                if "raw_words" in seg_copy:
-                    del seg_copy["raw_words"]
                 seg_copy.update({
                     "speaker": f"Người nói {spk_id + 1}",
                     "speaker_id": spk_id
@@ -605,14 +1003,13 @@ class SpeakerDiarizer:
                 g_text = " ".join(g_punct)
                 
                 seg_copy = dict(trans_seg)
-                if "raw_words" in seg_copy:
-                    del seg_copy["raw_words"]
                 seg_copy.update({
                     "text": g_text,
                     "start": g_start,
                     "end": g_end,
                     "speaker": f"Người nói {spk_id + 1}",
-                    "speaker_id": spk_id
+                    "speaker_id": spk_id,
+                    "raw_words": group_words,  # Giữ raw_words cho từng group
                 })
                 results.append(seg_copy)
         
@@ -686,6 +1083,10 @@ class SpeakerDiarizer:
             self.sd = None
             gc.collect()
             print("[SpeakerDiarizer] Model unloaded successfully")
+        
+        if self._pyannote_backend is not None:
+            self._pyannote_backend.unload()
+            self._pyannote_backend = None
 
 
 def default_progress_callback(num_processed_chunk: int, num_total_chunks: int) -> int:
@@ -702,6 +1103,15 @@ def test_diarization(model_id: str = "titanet_small", audio_file: str = None):
     print(f"Model: {model_id}")
     print(f"{'='*60}\n")
     
+    if audio_file is None:
+        print("Error: No audio file provided.")
+        print(f"Usage: python speaker_diarization.py --model {model_id} --audio <path>")
+        return None
+    
+    if not os.path.exists(audio_file):
+        print(f"Error: Audio file not found: {audio_file}")
+        return None
+    
     # Get model info
     model_info = get_model_info(model_id)
     if model_info:
@@ -717,24 +1127,6 @@ def test_diarization(model_id: str = "titanet_small", audio_file: str = None):
         num_clusters=-1,
         num_threads=4
     )
-    
-    # Find test file
-    if audio_file is None:
-        test_files = [
-            r"D:\App\asr-vn\test_20min.wav",
-            r"D:\App\asr-vn\test_audio.wav",
-            "./test_20min.wav",
-            "./test_audio.wav",
-        ]
-        
-        for f in test_files:
-            if os.path.exists(f):
-                audio_file = f
-                break
-    
-    if not audio_file:
-        print("Test file not found!")
-        return None
     
     print(f"Using test file: {audio_file}")
     
@@ -791,6 +1183,88 @@ def test_all_models(audio_file: str = None):
         print("\n" + "-"*70 + "\n")
     
     return results
+
+
+def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_threads,
+                    threshold=0.6, progress_callback=None, cancel_check=None):
+    """
+    Chạy speaker diarization trên file audio (high-level orchestration).
+
+    Args:
+        audio_file: Đường dẫn file audio
+        segments: List[dict] - transcribed segments với keys: text, start, end
+        speaker_model_id: str - ID model embedding
+        num_speakers: int - số người nói (0 = auto)
+        num_threads: int - số CPU threads
+        threshold: float - ngưỡng phân biệt người nói (0.0-1.0)
+        progress_callback: callable(str) - callback báo tiến trình
+        cancel_check: callable() -> bool - trả True nếu cần hủy
+
+    Returns:
+        tuple: (speaker_segments_raw, elapsed, result_segments)
+    """
+    import time as _time
+
+    emit = progress_callback or (lambda msg: None)
+    is_cancelled = cancel_check or (lambda: False)
+
+    start_time = _time.time()
+
+    try:
+        _setup_ffmpeg_path()
+    except Exception:
+        pass
+
+    emit("PHASE:Diarization|Đang khởi tạo model|0")
+
+    diarizer = SpeakerDiarizer(
+        embedding_model_id=speaker_model_id,
+        num_clusters=num_speakers,
+        num_threads=num_threads,
+        threshold=threshold
+    )
+    diarizer.initialize()
+
+    emit("PHASE:Diarization|Đang phân tách Người nói|10")
+
+    _last_progress = [0]
+
+    def internal_progress_callback(num_processed, num_total):
+        if num_total == 0:
+            return 0
+        progress = int(num_processed / num_total * 100)
+        if progress >= _last_progress[0] + 5 or num_processed == num_total:
+            _last_progress[0] = progress
+            phase_progress = 10 + int(progress * 0.75)
+            emit(f"PHASE:Diarization|Đang phân tách Người nói|{phase_progress}")
+            _time.sleep(0.001)
+        return 1 if is_cancelled() else 0
+
+    raw_segments = diarizer.process(audio_file, progress_callback=internal_progress_callback)
+
+    speaker_segments_raw = [
+        {
+            "speaker": f"Người nói {seg.speaker + 1}",
+            "speaker_id": seg.speaker,
+            "start": seg.start,
+            "end": seg.end,
+            "duration": seg.duration
+        }
+        for seg in raw_segments
+    ]
+
+    emit("PHASE:Diarization|Đang gán nhãn Người nói|90")
+
+    results = diarizer.process_with_transcription(
+        audio_file=audio_file,
+        transcribed_segments=segments,
+        speaker_segments=raw_segments
+    )
+
+    elapsed = _time.time() - start_time
+    emit("PHASE:Diarization|Hoàn thành|100")
+
+    return speaker_segments_raw, elapsed, results
 
 
 if __name__ == "__main__":

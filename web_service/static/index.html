@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sherpa Vietnamese ASR</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#2b2b2b">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+</head>
+
+<body>
+    <!-- Header -->
+    <header id="app-header">
+        <div class="header-title">
+            Sherpa Vietnamese ASR
+            <button class="btn-about" onclick="showAboutDialog()" title="Thông tin ứng dụng">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            </button>
+        </div>
+        <div class="header-right">
+            <div id="auth-anonymous" class="auth-section">
+                <button id="btn-login" class="btn btn-sm" onclick="showLoginModal()">Đăng nhập</button>
+            </div>
+            <div id="auth-loggedin" class="auth-section" style="display:none">
+                <button class="btn btn-sm" onclick="toggleMeetingsPanel()">Quản lý tập tin</button>
+                <div class="user-menu-wrapper">
+                    <button class="user-menu-btn" onclick="toggleUserMenu(event)" id="user-menu-btn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                        <span id="username-display"></span>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div id="user-dropdown" class="user-dropdown" style="display:none">
+                        <div class="user-dropdown-item" onclick="showChangePasswordModal()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            Đổi mật khẩu
+                        </div>
+                        <hr class="user-dropdown-divider">
+                        <div class="user-dropdown-item user-dropdown-danger" onclick="logout()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                            Đăng xuất
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main id="app-main">
+        <!-- Install PWA Panel (collapsible, hidden by default) -->
+        <div class="panel collapsed" id="install-panel" style="display:none">
+            <div class="panel-header" onclick="togglePanel('install-panel')">
+                <span class="panel-toggle">&#9660;</span> Cài đặt ứng dụng?
+            </div>
+            <div class="panel-body">
+                <div class="install-steps">
+                    <div class="install-step" id="install-step-1">
+                        <button class="btn btn-sm btn-install-cert" onclick="showCertGuide()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                            </svg>
+                            B1: Tải và cài cert SSL
+                        </button>
+                        <div id="cert-guide" class="install-guide" style="display:none"></div>
+                    </div>
+                    <div class="install-step" id="install-step-2">
+                        <button class="btn btn-sm btn-install" id="btn-install-app" disabled onclick="installPWA()">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            B2: Cài đặt ứng dụng
+                        </button>
+                        <div id="install-status-msg" class="install-status-msg" style="display:none"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Config Panel (collapsible) -->
+        <div class="panel" id="config-panel">
+            <div class="panel-header" onclick="togglePanel('config-panel')">
+                <span class="panel-toggle">&#9660;</span> Cấu hình
+            </div>
+            <div class="panel-body">
+                <div class="config-grid">
+                    <div class="config-row">
+                        <label>Model ASR:</label>
+                        <select id="cfg-model"></select>
+                    </div>
+                    <div class="config-row">
+                        <label>Thêm dấu:</label>
+                        <input type="range" id="cfg-punct" min="1" max="10" value="6">
+                        <span id="cfg-punct-label">Vừa (6)</span>
+                    </div>
+                    <div class="config-row">
+                        <label>Viết hoa:</label>
+                        <input type="range" id="cfg-case" min="1" max="10" value="6">
+                        <span id="cfg-case-label">Vừa (6)</span>
+                    </div>
+                    <div class="config-row full-width">
+                        <label>
+                            <input type="checkbox" id="cfg-diarization" checked>
+                            Phân tách người nói (Speaker diarization)
+                        </label>
+                    </div>
+                    <div id="diarization-options">
+                        <div class="config-row">
+                            <label>Số người nói:</label>
+                            <select id="cfg-num-speakers">
+                                <option value="0">Không rõ (tự động)</option>
+                            </select>
+                        </div>
+                        <div class="config-row">
+                            <label>Model người nói:</label>
+                            <select id="cfg-speaker-model"></select>
+                        </div>
+                        <div class="config-row">
+                            <label>Ngưỡng:</label>
+                            <input type="range" id="cfg-threshold" min="10" max="150" value="70" step="1">
+                            <span id="cfg-threshold-label">0.70</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Area -->
+        <div class="panel">
+            <!-- Drop Zone -->
+            <div id="drop-zone" class="drop-zone">
+                <p id="anonymous-warning" class="file-anonymous-warning" style="display:none">Ở chế độ không đăng nhập, khi tải lại hay thoát trình duyệt, dữ liệu sẽ không được lưu lại</p>
+                <div class="drop-zone-text">
+                    <div class="drop-zone-left">
+                        <p id="anonymous-warning-empty" class="drop-warning" style="display:none">Ở chế độ không đăng nhập, khi tải lại hay thoát trình duyệt, dữ liệu sẽ không được lưu lại</p>
+                        <p>Kéo thả file âm thanh (nếu có JSON thì thả tiếp theo sau) vào đây hoặc click để chọn file (tối đa 500MB)</p>
+                        <p class="drop-hint">mp3, wav, m4a, flac, aac, wma, ogg, opus, mp4, mkv, avi, mov, webm, flv, wmv, json</p>
+                    </div>
+                    <span class="drop-icon">&#128193;</span>
+                </div>
+                <div id="file-selected" class="file-selected" style="display:none">
+                    <span class="file-icon">&#128196;</span>
+                    <span id="file-name"></span>
+                    <span id="file-size"></span>
+                    <button class="btn-clear" onclick="clearFile()" title="Xóa file">&times;</button>
+                </div>
+                <input type="file" id="file-input"
+                    accept=".mp3,.wav,.m4a,.flac,.aac,.wma,.ogg,.opus,.mp4,.mkv,.avi,.mov,.webm,.flv,.wmv,.json"
+                    style="display:none">
+            </div>
+
+            <!-- Upload Progress -->
+            <div id="upload-progress" class="progress-container" style="display:none">
+                <div class="progress-bar">
+                    <div id="upload-bar" class="progress-fill"></div>
+                </div>
+                <span id="upload-percent">0%</span>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="action-buttons">
+                <button id="btn-process" class="btn btn-primary" onclick="processFile()" disabled>Xử lý</button>
+                <button id="btn-cancel" class="btn btn-danger" onclick="cancelProcess()" style="display:none">Kết
+                    thúc</button>
+                <button id="btn-load-json" class="btn" onclick="loadJSON()" disabled>&#8679; Upload JSON</button>
+                <button id="btn-save-json" class="btn" onclick="saveJSON()" disabled>&#8681; Tải JSON</button>
+                <button id="btn-copy" class="btn" onclick="copyText()" disabled>Sao chép văn bản</button>
+            </div>
+
+            <!-- Processing Progress -->
+            <div id="process-progress" class="progress-container" style="display:none">
+                <div class="progress-bar">
+                    <div id="process-bar" class="progress-fill"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="process-percent">0%</span>
+                    <span id="process-phase"></span>
+                    <span id="process-message">Đang chờ...</span>
+                </div>
+            </div>
+
+            <!-- Queue Info -->
+            <div id="queue-info" class="queue-info" style="display:none">
+                <span class="queue-icon">&#9203;</span>
+                <span id="queue-message">Bạn đang ở vị trí #<span id="queue-position">0</span>
+                    trong hàng đợi (<span id="queue-total">0</span> file đang chờ).
+                    Vui lòng đợi và không tắt trình duyệt.</span>
+            </div>
+        </div>
+
+        <!-- Results Area -->
+        <div class="panel result-panel" id="result-panel" style="display:none">
+            <div id="quality-strip" class="quality-strip" style="display:none"></div>
+            <div class="result-header">
+                <div class="result-tabs">
+                    <button class="tab-btn active" onclick="switchTab('content')">Nội dung</button>
+                    <button class="tab-btn" onclick="switchTab('speakers')">Người nói</button>
+                </div>
+                <div class="search-widget" id="search-widget">
+                    <input type="text" id="search-input" placeholder="Tìm kiếm..." oninput="onSearchInput()">
+                    <span id="search-count"></span>
+                    <button class="search-btn" onclick="searchNav(-1)" title="Trước">&#9650;</button>
+                    <button class="search-btn" onclick="searchNav(1)" title="Sau">&#9660;</button>
+                    <button class="search-btn" onclick="clearSearch()" title="Đóng">&times;</button>
+                </div>
+            </div>
+            <div id="result-content" class="result-content"></div>
+            <div id="result-speakers" class="result-content" style="display:none"></div>
+            <div id="result-timing" class="result-timing"></div>
+        </div>
+
+        <!-- Audio Player -->
+        <div id="player-panel" class="player-panel" style="display:none">
+            <button id="btn-play" class="btn-play" onclick="togglePlay()">
+                <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6,3 20,12 6,21"/></svg>
+                <svg class="pause-icon" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="17" y2="20"/></svg>
+            </button>
+            <input type="range" id="player-seek" class="player-seek" min="0" max="100" value="0" step="0.1"
+                oninput="seekAudio(this.value)">
+            <span id="player-time">00:00 / 00:00</span>
+            <button id="btn-save-edits" class="btn-save-edits" onclick="saveEdits()" style="display:none">Lưu thay đổi</button>
+        </div>
+
+        <!-- Scroll to top -->
+        <button id="btn-scroll-top" class="btn-scroll-top" onclick="scrollToTop()" title="Lên đầu trang">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18,15 12,9 6,15"/></svg>
+        </button>
+    </main>
+
+    <!-- Login Modal -->
+    <div id="login-modal" class="modal" style="display:none">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Đăng nhập</h3>
+                <button class="modal-close" onclick="hideLoginModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Tên đăng nhập:</label>
+                    <input type="text" id="login-username" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label>Mật khẩu:</label>
+                    <input type="password" id="login-password" autocomplete="current-password"
+                        onkeydown="if(event.key==='Enter')doLogin()">
+                </div>
+                <div id="login-error" class="error-msg" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="doLogin()">Đăng nhập</button>
+                <button class="btn" onclick="hideLoginModal()">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Split Speaker Modal -->
+    <div id="split-speaker-modal" class="modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3>Tách người nói</h3>
+                <button class="modal-close" onclick="hideSplitSpeakerModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Người nói hiện tại: <strong id="split-current-speaker"></strong></label>
+                </div>
+                <div class="form-group">
+                    <label>Chọn người nói mới:</label>
+                    <select id="split-speaker-select" onchange="document.getElementById('split-speaker-input').value=this.value">
+                        <option value="">-- Chọn từ danh sách --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Hoặc nhập tên mới:</label>
+                    <input type="text" id="split-speaker-input" placeholder="Nhập tên người nói..."
+                        onkeydown="if(event.key==='Enter')doSplitSpeaker()">
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label style="margin-bottom:8px">Phạm vi:</label>
+                    <div class="radio-group">
+                        <label class="radio-label">
+                            <input type="radio" name="split-scope" value="to_end" checked>
+                            <span>Từ câu này đến hết đoạn</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="split-scope" value="single">
+                            <span>Chỉ câu này</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="doSplitSpeaker()">Tách</button>
+                <button class="btn" onclick="hideSplitSpeakerModal()">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Password Modal -->
+    <div id="change-password-modal" class="modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3>Đổi mật khẩu</h3>
+                <button class="modal-close" onclick="hideChangePasswordModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Mật khẩu cũ:</label>
+                    <input type="password" id="chpw-old" autocomplete="current-password">
+                </div>
+                <div class="form-group">
+                    <label>Mật khẩu mới:</label>
+                    <input type="password" id="chpw-new" autocomplete="new-password">
+                </div>
+                <div class="form-group">
+                    <label>Xác nhận mật khẩu mới:</label>
+                    <input type="password" id="chpw-confirm" autocomplete="new-password"
+                        onkeydown="if(event.key==='Enter')doChangePassword()">
+                </div>
+                <div id="chpw-error" class="error-msg" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="doChangePassword()">Đổi mật khẩu</button>
+                <button class="btn" onclick="hideChangePasswordModal()">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Context Menu -->
+    <div id="context-menu" class="context-menu" style="display:none">
+        <div class="ctx-item" onclick="ctxSplitSpeaker()">Tách người nói từ câu này</div>
+        <div class="ctx-item" onclick="ctxMergeUp()">Gộp với người nói phía trước</div>
+        <div class="ctx-item" onclick="ctxMergeDown()">Gộp với người nói phía sau</div>
+        <hr class="ctx-divider">
+        <div class="ctx-item" onclick="ctxRenameSpeaker()">Đổi tên người nói</div>
+        <hr class="ctx-divider">
+        <div class="ctx-item" onclick="ctxCopy()">Sao chép</div>
+    </div>
+
+    <!-- Speaker Rename Modal -->
+    <div id="rename-modal" class="modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3>Đổi tên người nói</h3>
+                <button class="modal-close" onclick="hideRenameModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Người nói hiện tại: <strong id="rename-current"></strong></label>
+                </div>
+                <div class="form-group">
+                    <label>Tên mới:</label>
+                    <input type="text" id="rename-input">
+                </div>
+                <div class="form-group">
+                    <label>Chọn từ danh sách:</label>
+                    <select id="rename-select" onchange="document.getElementById('rename-input').value=this.value">
+                        <option value="">-- Chọn --</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="doRenameSpeaker(true)">Sửa tất cả</button>
+                <button class="btn btn-success" onclick="doRenameSpeaker(false)">Sửa tên này</button>
+                <button class="btn" onclick="hideRenameModal()">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Meeting Name Modal -->
+    <div id="meeting-name-modal" class="modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h3>Tên cuộc họp</h3>
+                <button class="modal-close" onclick="hideMeetingNameModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Tên cuộc họp (để trống sẽ dùng tên file):</label>
+                    <input type="text" id="meeting-name-input" placeholder="Nhập tên cuộc họp..."
+                        onkeydown="if(event.key==='Enter')confirmMeetingName()">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="confirmMeetingName()">Xử lý</button>
+                <button class="btn" onclick="hideMeetingNameModal()">Hủy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Meetings Panel (overlay) -->
+    <div id="meetings-panel" class="meetings-panel" style="display:none">
+        <div class="meetings-header">
+            <h3>Quản lý tập tin</h3>
+            <div class="meetings-header-right">
+                <input type="text" id="meetings-search" placeholder="Tìm kiếm..." oninput="searchMeetings()">
+                <button class="modal-close" onclick="closeMeetingsPanel()">&times;</button>
+            </div>
+        </div>
+        <div id="meetings-toolbar" class="meetings-toolbar" style="display:none">
+            <label class="mg-select-label">
+                <input type="checkbox" id="mg-select-all" onchange="toggleSelectAll()"> Chọn tất cả
+            </label>
+            <button class="btn btn-sm btn-danger" onclick="deleteSelectedMeetings()">Xóa đã chọn</button>
+        </div>
+        <div id="meetings-list" class="meetings-list"></div>
+    </div>
+
+    <!-- About Dialog -->
+    <div id="about-modal" class="modal" style="display:none">
+        <div class="modal-content about-dialog">
+            <div class="modal-header">
+                <h3>Thông tin</h3>
+                <button class="modal-close" onclick="hideAboutDialog()">&times;</button>
+            </div>
+            <div class="modal-body about-body">
+                <div class="about-hero">
+                    <div class="about-app-name">sherpa-vietnamese-asr</div>
+                    <div class="about-version">Phiên bản 1.0 &mdash; 10/03/2026</div>
+                </div>
+
+                <div class="about-info-grid">
+                    <div class="about-info-item">
+                        <span class="about-info-label">Thiết kế</span>
+                        <span>Nguyễn Hồng Quân</span>
+                        <span class="about-info-sub">nhquan.thanhuy@tphcm.gov.vn</span>
+                        <span class="about-info-sub">Phòng Chuyển đổi số - Cơ yếu, VP Thành ủy TP.HCM</span>
+                    </div>
+                    <div class="about-info-item">
+                        <span class="about-info-label">Lập trình</span>
+                        <span>Antigravity</span>
+                    </div>
+                </div>
+
+                <div class="about-license">
+                    Phần mềm sử dụng trong môi trường giáo dục, hành chính công, tổ chức Đảng, đoàn thể. Không sử dụng cho mục đích thương mại.
+                </div>
+
+                <details class="about-details">
+                    <summary>Chức năng</summary>
+                    <ul>
+                        <li>Chuyển tập tin ghi âm thành văn bản tiếng Việt</li>
+                        <li>Phân tách người nói (Speaker Diarization)</li>
+                        <li>Thêm dấu câu tự động</li>
+                        <li>Phân tích chất lượng âm thanh (DNSMOS)</li>
+                        <li>Nhận dạng real-time qua microphone</li>
+                        <li>Hỗ trợ hotwords (từ khóa tùy chỉnh)</li>
+                    </ul>
+                </details>
+
+                <details class="about-details">
+                    <summary>Công nghệ sử dụng</summary>
+                    <ul>
+                        <li><b>Giao diện:</b> Python 3, PyQt6</li>
+                        <li><b>ASR Engine:</b> Sherpa-ONNX (Zipformer)</li>
+                        <li><b>Speaker Diarization:</b> TitaNet, Pyannote, ONNX Altunenes</li>
+                        <li><b>Xử lý âm thanh:</b> FFmpeg, Pydub</li>
+                        <li><b>NLP:</b> ViBERT-capu (Thêm dấu câu)</li>
+                        <li><b>Audio Quality:</b> DNSMOS</li>
+                    </ul>
+                </details>
+            </div>
+            <div class="modal-footer about-footer">
+                <button class="btn" onclick="hideAboutDialog()">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JSON upload (hidden input) -->
+    <input type="file" id="json-input" accept=".json" style="display:none" onchange="onJSONSelected(this)">
+
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/upload.js"></script>
+    <script src="/static/js/player.js"></script>
+    <script src="/static/js/speaker.js"></script>
+    <script src="/static/js/search.js"></script>
+    <script src="/static/js/meetings.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+
+</html>

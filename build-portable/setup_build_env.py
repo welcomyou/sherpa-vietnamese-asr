@@ -56,6 +56,12 @@ def install_packages():
         "scipy",
         "numba",
         "sentence-transformers",
+        # Speaker Diarization dependencies
+        "pyannote.audio",        # Community-1 PyTorch backend
+        "kaldi_native_fbank",    # Feature extraction for ONNX
+        "pydub",                 # Audio format conversion
+        "scikit-learn",          # AHC clustering for ONNX
+        "filelock",              # Thread-safe vocabulary processing
     ]
     
     # Upgrade pip first

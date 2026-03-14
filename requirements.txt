@@ -26,6 +26,9 @@ sentencepiece>=0.1.99
 # Speaker Diarization
 speechbrain>=0.5.15
 einops>=0.7.0
+pyannote.audio>=3.1.0  # Required for Community-1 PyTorch
+pyannote.core>=6.0.0
+av>=11.0.0  # Required for audio decoding
 
 # GUI
 PyQt6>=6.5.0

@@ -1,0 +1,20 @@
+# Dependencies bo sung cho ban sherpa-vietnamese-asr-service
+# (ngoai cac dependencies trong requirements.txt)
+
+# Web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# Database (async SQLite - optional, dang dung sync)
+# aiosqlite>=0.19.0
+
+# SSL certificate generation
+cryptography>=41.0.0
+
+# Windows Service (optional)
+# pywin32>=306

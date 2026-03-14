@@ -12,133 +12,112 @@ from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-from common import (BASE_DIR, COLORS, DIARIZATION_AVAILABLE, SPEAKER_EMBEDDING_MODELS,
-                    normalize_vietnamese, DragDropLabel, SearchWidget, ClickableTextEdit,
+from core.config import BASE_DIR, COLORS, MODEL_DOWNLOAD_INFO, DEBUG_LOGGING, ALLOWED_THREADS
+from core.config import get_speaker_embedding_models, is_diarization_available
+from core.utils import normalize_vietnamese
+from core.asr_json import serialize_segments, deserialize_segments, load_asr_json, save_asr_json as _save_asr_json_file
+from common import (DragDropLabel, SearchWidget, ClickableTextEdit,
                     SpeakerRenameDialog, SplitSpeakerDialog, SpeakerDiarizationThread,
-                    TranscriberThread, show_missing_model_dialog, MODEL_DOWNLOAD_INFO)
-from audio_analyzer import (
+                    TranscriberThread, show_missing_model_dialog)
+
+DIARIZATION_AVAILABLE = is_diarization_available()
+SPEAKER_EMBEDDING_MODELS = get_speaker_embedding_models()
+from core.audio_analyzer import (
     AudioQualityAnalyzer, AnalysisResult, QualityMetrics,
     AnalysisThread, check_dnsmos_model_exists, DNSMOSDownloader
 )
 from quality_result_dialog import QualityResultDialog
 
-class JSONLoadThread(QThread):
+class FastJSONLoadThread(QThread):
     progress_updated = pyqtSignal(int, str)
     finished_loading = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, json_path, audio_path=None, parent=None):
+    def __init__(self, json_path, parent=None):
         super().__init__(parent)
         self.json_path = json_path
-        self.audio_path = audio_path
-        self.result_playback_path = audio_path # Default to original
-
+        
     def run(self):
         try:
-            import json
-            import time
-            import os
-            
-            # --- Xử lý tải và convert Audio nếu cần ---
-            if self.audio_path:
-                file_ext = os.path.splitext(self.audio_path)[1].lower()
-                if file_ext != '.wav':
-                    self.progress_updated.emit(5, f"Đang chuyển đổi {file_ext} sang file WAV tạm...")
-                    try:
-                        from pydub import AudioSegment
-                        import tempfile
-                        audio = AudioSegment.from_file(self.audio_path)
-                        temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
-                        temp_path = temp_file.name
-                        temp_file.close()
-                        audio.export(temp_path, format='wav')
-                        self.result_playback_path = temp_path
-                    except Exception as e:
-                        print(f"[JSONLoadThread] Failed to convert audio: {e}")
-                        self.result_playback_path = self.audio_path
-            
-            # --- Đọc tệp JSON ---
             self.progress_updated.emit(10, "Đang đọc file JSON...")
-            
-            with open(self.json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if 'segments' not in data:
-                self.error_occurred.emit("Invalid JSON: no 'segments' key")
-                return
-            
-            json_segments = data['segments']
-            speaker_mapping = data.get('speaker_names', {})
-            
+            data = load_asr_json(self.json_path)
+
             self.progress_updated.emit(40, "Đang xử lý dữ liệu...")
-            
-            segments = []
-            current_speaker = ''
-            current_speaker_id = 0
-            has_speakers = False
-            seg_counter = 0
-            
-            total = len(json_segments)
-            for i, seg in enumerate(json_segments):
-                if total > 0 and i % max(1, total // 10) == 0:
-                    prog = 40 + int(35 * (i / total))
-                    self.progress_updated.emit(prog, f"Đang chuyển đổi đoạn {i}/{total}...")
-                    
-                seg_type = seg.get('type', 'text')
-                
-                if seg_type == 'speaker':
-                    current_speaker = seg.get('speaker', '')
-                    raw_id = seg.get('speaker_id', 0)
-                    try:
-                        current_speaker_id = int(raw_id)
-                    except (ValueError, TypeError):
-                        current_speaker_id = raw_id
-                    has_speakers = True
-                    continue
-                
-                if seg_type == 'text':
-                    original_text = seg.get('text', '')
-                    partials = seg.get('partials', [])
-                    partials = [p for p in partials if p.get('text', '').strip()]
-                    
-                    if not partials and original_text:
-                        partials = [{'text': original_text}]
-                    
-                    internal_seg = {
-                        'text': original_text,
-                        'start': seg.get('start_time', 0),
-                        'start_time': seg.get('start_time', 0),
-                        'index': seg_counter,
-                        'speaker': current_speaker,
-                        'speaker_id': current_speaker_id,
-                    }
-                    
-                    if partials:
-                        internal_seg['partials'] = partials
-                        internal_seg['end'] = partials[-1].get('timestamp', internal_seg['start'] + 1.0)
-                    else:
-                        internal_seg['end'] = internal_seg['start'] + 1.0
-                        internal_seg['partials'] = [{
-                            'text': internal_seg['text'],
-                            'timestamp': internal_seg['end']
-                        }]
-                    
-                    segments.append(internal_seg)
-                    seg_counter += 1
-            
+            segments, speaker_mapping, has_speakers = deserialize_segments(data)
+
             self.progress_updated.emit(75, "Đang chuẩn bị hiển thị...")
-            
+
             # Lưu trữ vào self, KO truyền qua signal để tránh PyQt pickling lớn gây lag UI
             self.result_segments = segments
             self.result_speaker_mapping = speaker_mapping
             self.result_has_speakers = has_speakers
-            
+
             self.finished_loading.emit()
-            
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             self.error_occurred.emit(str(e))
+
+class BackgroundAudioConvertThread(QThread):
+    finished_converting = pyqtSignal(str) # -> Trả về đường dẫn file wav
+
+    def __init__(self, audio_path, parent=None):
+        super().__init__(parent)
+        self.audio_path = audio_path
+
+    def run(self):
+        try:
+            import os
+            import subprocess
+            import tempfile
+            
+            file_ext = os.path.splitext(self.audio_path)[1].lower()
+            if file_ext == '.wav':
+                self.finished_converting.emit(self.audio_path)
+                return
+                
+            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
+            temp_path = temp_file.name
+            temp_file.close()
+
+            import sys
+            if getattr(sys, 'frozen', False):
+                ffmpeg_path = os.path.join(os.path.dirname(sys.executable), 'ffmpeg', 'bin', 'ffmpeg.exe')
+                if not os.path.exists(ffmpeg_path):
+                    ffmpeg_path = 'ffmpeg' # fallback to system ffmpeg
+            else:
+                from common import BASE_DIR
+                ffmpeg_path = os.path.join(BASE_DIR, 'ffmpeg', 'bin', 'ffmpeg.exe')
+                if not os.path.exists(ffmpeg_path):
+                    ffmpeg_path = 'ffmpeg'
+            
+            # ffmpeg -i file -vn -ac 1 -c:a pcm_s16le -y temp
+            command = [
+                ffmpeg_path,
+                '-i', self.audio_path,
+                '-vn',
+                '-ac', '1',
+                '-c:a', 'pcm_s16le',
+                '-loglevel', 'quiet',
+                '-y',
+                temp_path
+            ]
+            
+            # Try FFmpeg directly
+            try:
+                subprocess.run(command, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                self.finished_converting.emit(temp_path)
+            except Exception as ffmpeg_err:
+                print(f"[BackgroundAudioConvertThread] FFmpeg pipe failed: {ffmpeg_err}. Falling back to pydub...")
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(self.audio_path)
+                audio.export(temp_path, format='wav')
+                self.finished_converting.emit(temp_path)
+            
+        except Exception as e:
+            print(f"[BackgroundAudioConvertThread] Lỗi chuyển đổi: {e}")
+            self.finished_converting.emit(self.audio_path) # Fallback to original
 
 
 class FileProcessingTab(QWidget):
@@ -319,6 +298,7 @@ class FileProcessingTab(QWidget):
         self.combo_model = QComboBox()
         self.combo_model.addItem("zipformer-30M-rnnt-6000h (⭐)", "zipformer-30m-rnnt-6000h")
         self.combo_model.addItem("sherpa-onnx-zipformer-vi-2025-04-20", "sherpa-onnx-zipformer-vi-2025-04-20")
+        self.combo_model.addItem("ROVER - Voting (chính xác hơn)", "rover-voting")
         self.combo_model.currentIndexChanged.connect(self._reset_analyzer)
         form_config.addRow("Model:", self.combo_model)
         
@@ -429,7 +409,7 @@ class FileProcessingTab(QWidget):
         
         # Number of speakers
         self.spin_num_speakers = QComboBox()
-        self.spin_num_speakers.addItems(["Không rõ (tự động)", "2", "3", "4", "5"])
+        self.spin_num_speakers.addItems(["Không rõ (tự động)", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"])
         self.spin_num_speakers.setCurrentIndex(0)
         self.spin_num_speakers.setEnabled(False)
         self.spin_num_speakers.setToolTip("Số lượng Người nói dự kiến trong file âm thanh")
@@ -450,8 +430,8 @@ class FileProcessingTab(QWidget):
         
         # Diarization Threshold Slider
         self.slider_diarization_threshold = QSlider(Qt.Orientation.Horizontal)
-        self.slider_diarization_threshold.setRange(1, 10)
-        self.slider_diarization_threshold.setValue(6)
+        self.slider_diarization_threshold.setRange(10, 150)  # 0.10 to 1.50, step 0.01
+        self.slider_diarization_threshold.setValue(70)  # Default 0.70
         self.slider_diarization_threshold.setEnabled(False)
         self.slider_diarization_threshold.setStyleSheet(f"""
             QSlider::groove:horizontal {{
@@ -471,7 +451,7 @@ class FileProcessingTab(QWidget):
                 border-radius: 3px;
             }}
         """)
-        self.label_diarization_threshold = QLabel("0.6")
+        self.label_diarization_threshold = QLabel("0.70")  # Default display
         self.label_diarization_threshold.setStyleSheet(f"color: {COLORS['text_secondary']}; min-width: 30px; padding-bottom: 4px;")
         self.slider_diarization_threshold.valueChanged.connect(self.on_diarization_threshold_changed)
         
@@ -480,7 +460,7 @@ class FileProcessingTab(QWidget):
         diarization_thresh_layout.addWidget(self.label_diarization_threshold)
         
         form_config.addRow("  └─ Ngưỡng phân biệt:", diarization_thresh_layout)
-        self.label_diarization_threshold_tip = QLabel("Cao (0.8) = Gộp nhiều | Thấp (0.3) = Tách kỹ")
+        self.label_diarization_threshold_tip = QLabel("Cao (1.00) = Gộp nhiều | Thấp (0.30) = Tách kỹ | ONNX: 0.80-1.20")
         self.label_diarization_threshold_tip.setStyleSheet("font-size: 9px; color: #888; font-style: italic; margin-left: 4px;")
         form_config.addRow("", self.label_diarization_threshold_tip)
         
@@ -488,10 +468,18 @@ class FileProcessingTab(QWidget):
         embedding_layout = QHBoxLayout()
         
         self.combo_speaker_model = QComboBox()
-        self.combo_speaker_model.addItem("🎯 Nvidia NeMo Titanet Small (EN) - 38.4MB, Good", "titanet_small")
-        self.combo_speaker_model.addItem("🌏 3D Speaker ERes2NetV2 (ZH+EN) - 68.1MB, Multilang", "eres2netv2_zh")
+        # ⭐ = Recommended (Altunenes ONNX - Fast, no HF token needed)
+        self.combo_speaker_model.addItem("Pyannote Community-1 Altunenes ONNX (Nhanh) ⭐", "community1_onnx")
+        self.combo_speaker_model.addItem("Pyannote Community-1 (Pytorch) (Chậm, chính xác)", "community1")
+        self.combo_speaker_model.addItem("Nvidia Nemo Titanet small (Dự phòng)", "titanet_small")
         self.combo_speaker_model.setCurrentIndex(0)
         self.combo_speaker_model.setEnabled(False)
+        self.combo_speaker_model.setToolTip(
+            "⭐ Altunenes ONNX: Khuyến nghị - Nhanh, không cần HF Token\n"
+            "   Pyannote Pytorch: Chính xác cao nhất, cần HF Token\n"
+            "   Titanet: Dự phòng - Nhẹ, tiếng Anh"
+        )
+        self.combo_speaker_model.currentIndexChanged.connect(self.on_speaker_model_changed)
         
         self.btn_rerun_diarization = QPushButton("Phân đoạn lại")
         self.btn_rerun_diarization.setStyleSheet(f"""
@@ -797,16 +785,31 @@ class FileProcessingTab(QWidget):
         self.label_threads.setText(str(value))
 
     def on_diarization_threshold_changed(self, value):
-        threshold = value / 10.0
-        self.label_diarization_threshold.setText(str(threshold))
+        threshold = value / 100.0  # 2 decimal places: 50 -> 0.50
+        self.label_diarization_threshold.setText(f"{threshold:.2f}")  # Show 0.50, 0.70...
         
-        if threshold >= 0.8:
+        if threshold >= 1.0:
+            tip = "Rất cao (Gộp nhiều) - dùng cho ONNX"
+        elif threshold >= 0.7:
             tip = "Cao (Gộp nhiều)"
         elif threshold <= 0.4:
             tip = "Thấp (Tách kỹ)"
         else:
             tip = "Trung bình"
         self.label_diarization_threshold.setToolTip(f"Ngưỡng hiện tại: {threshold} - {tip}")
+
+    def on_speaker_model_changed(self, index):
+        """Update default threshold when speaker model changes"""
+        from core.speaker_diarization import SpeakerDiarizer
+        
+        model_id = self.combo_speaker_model.currentData()
+        default_threshold = SpeakerDiarizer.get_default_threshold(model_id)
+        
+        # Convert threshold to slider value (multiply by 100 for 2 decimal places)
+        slider_value = int(default_threshold * 100)
+        self.slider_diarization_threshold.setValue(slider_value)
+        
+        print(f"[Config] Model changed to {model_id}, threshold set to {default_threshold}")
 
     def on_speaker_diarization_changed(self, state):
         is_checked = (state == Qt.CheckState.Checked.value or state == 2)
@@ -897,9 +900,18 @@ class FileProcessingTab(QWidget):
         self.btn_copy_text.setEnabled(False)
         self.loaded_from_json = False
         
+        # Xóa dữ liệu tên Người nói cũ khi chọn file mới
+        self.speaker_name_mapping = {}
+        self.block_speaker_names = {}
+        self.custom_speaker_names = set()
+        
         # Check for existing ASR JSON
         json_path = os.path.splitext(file_path)[0] + '.asr.json'
         if os.path.exists(json_path):
+            self.btn_play.setEnabled(False) # Khoá Play
+            if hasattr(self.text_output, 'set_clickable'):
+                self.text_output.set_clickable(False) # Khoá click tua
+            
             # Hiển thị animation loading
             self.current_progress_text = "Vui lòng đợi load thông tin từ JSON..."
             self.progress_bar.setFormat("Vui lòng đợi load thông tin từ JSON...")
@@ -908,20 +920,49 @@ class FileProcessingTab(QWidget):
             from PyQt6.QtWidgets import QApplication
             QApplication.processEvents() # Ép UI render progress bar text thay đổi
             
-            thread = JSONLoadThread(json_path, audio_path=file_path)
+            thread = FastJSONLoadThread(json_path)
             self._json_load_thread = thread
             thread.progress_updated.connect(lambda p, m, t=thread: self._on_json_load_progress(p, m, t))
             thread.finished_loading.connect(lambda t=thread: self._on_json_load_finished(file_path, t))
             thread.error_occurred.connect(lambda err, t=thread: self._on_json_load_error(err, t))
             thread.start()
+            
+            # Kích hoạt convert WAV ngầm luôn
+            self._bg_audio_thread = BackgroundAudioConvertThread(file_path)
+            self._bg_audio_thread.finished_converting.connect(lambda p, t=self._bg_audio_thread: self._on_audio_converted(p, file_path, t))
+            self._bg_audio_thread.start()
             return
-        
+
         if self.segments:
              self.btn_rerun_diarization.setEnabled(self.check_speaker_diarization.isChecked())
         
         # Auto analyze audio quality
         if self.chk_auto_analyze.isChecked():
             self.analyze_file_quality()
+
+    def _on_audio_converted(self, temp_path, original_path, thread=None):
+        if thread and thread != getattr(self, '_bg_audio_thread', None):
+            thread.deleteLater()
+            return
+            
+        if temp_path != original_path:
+            self._playback_cache[original_path] = temp_path
+            
+        url = QUrl.fromLocalFile(os.path.abspath(temp_path))
+        self.player.setSource(url)
+        self.player_container.setVisible(True)
+        self.btn_play.setEnabled(True)
+        if hasattr(self.text_output, 'set_clickable'):
+            self.text_output.set_clickable(True) # Mở khoá click tua
+            
+        if getattr(self, '_json_load_thread', None) is None:
+            self.stop_spinner()
+            self.progress_bar.setFormat("✓ Đã tải dữ liệu và âm thanh hoàn chỉnh")
+            self.progress_bar.setValue(100)
+            
+        thread.deleteLater()
+        if getattr(self, '_bg_audio_thread', None) == thread:
+            self._bg_audio_thread = None
 
     def _on_json_load_progress(self, percentage, msg, thread=None):
         if thread and thread != getattr(self, '_json_load_thread', None):
@@ -958,8 +999,6 @@ class FileProcessingTab(QWidget):
         self.current_highlight_index = -1
         self._last_rendered_highlight = -1
         
-        playback_path = thread.result_playback_path
-        
         # Dọn dẹp an toàn Thread bằng deleteLater()
         thread.deleteLater()
         if getattr(self, '_json_load_thread', None) == thread:
@@ -968,13 +1007,6 @@ class FileProcessingTab(QWidget):
         self.loaded_from_json = True
         self.json_saved = True
             
-        if playback_path != file_path:
-            self._playback_cache[file_path] = playback_path
-            
-        url = QUrl.fromLocalFile(os.path.abspath(playback_path))
-        self.player.setSource(url)
-        self.player_container.setVisible(True)
-        self.btn_play.setEnabled(True)
         self.btn_save_json.setEnabled(True)
         self.btn_copy_text.setEnabled(True)
         
@@ -1006,9 +1038,12 @@ class FileProcessingTab(QWidget):
     def _render_next_chunk(self):
         if not hasattr(self, '_render_chunks') or self._render_chunk_idx >= len(self._render_chunks):
             self._incremental_timer.stop()
-            self.stop_spinner()
-            self.progress_bar.setFormat("✓ Đã tải từ JSON")
-            self.progress_bar.setValue(100)
+            if getattr(self, '_bg_audio_thread', None) is None:
+                self.stop_spinner()
+                self.progress_bar.setFormat("✓ Đã tải từ JSON")
+                self.progress_bar.setValue(100)
+            else:
+                self.progress_bar.setFormat("✓ Đã tải JSON. Đang chuẩn bị âm thanh chất lượng cao...")
             return
             
         cursor = self.text_output.textCursor()
@@ -1092,7 +1127,7 @@ class FileProcessingTab(QWidget):
         
         def process_blocks():
             nonlocal current_speaker, current_blocks, speaker_block_count
-            if not current_speaker or not current_blocks:
+            if not current_blocks:
                 return
             block_render_count = getattr(self, '_block_render_count', 0) + 1
             self._block_render_count = block_render_count
@@ -1161,7 +1196,7 @@ class FileProcessingTab(QWidget):
             chunks.append(html_content)
 
         for seg in merged_segments:
-            speaker = seg.get('speaker', 'Người nói 1')
+            speaker = seg.get('speaker', '') or 'Chưa gán'
             if speaker != current_speaker:
                 speaker_block_count += 1
                 process_blocks()
@@ -1180,16 +1215,19 @@ class FileProcessingTab(QWidget):
 
     def get_config(self):
         slider_val = self.slider_punct_conf.value()
-        # Đồng nhất công thức với start_transcription()
-        confidence = 0.8 - (slider_val - 1) * (0.6 / 9)
+        # Công thức: slider cao → confidence âm → model mạnh mẽ hơn (thêm nhiều dấu hơn)
+        # confidence > 0: cộng vào $KEEP → bảo thủ. confidence < 0: trừ $KEEP → mạnh mẽ
+        # slider=2: +0.35, slider=5: ~0, slider=7: -0.37, slider=10: -0.8
+        confidence = 0.5 - (slider_val - 1) * (1.3 / 9)
         
         case_val = self.slider_case_conf.value()
         # Slider=1 -> -1.5 (rút hoàn toàn viết hoa)
         # Slider=10 -> 0.5 (khuyến khích viết hoa)
         case_confidence = -1.5 + (case_val - 1) * (2.0 / 9)
         
-        # Nếu kéo 1 trong 2 thanh về mức 1 -> Bypass model phục hồi hoàn toàn
-        bypass_restorer = (slider_val == 1 or case_val == 1)
+        # Chỉ bypass khi thanh dấu câu = 1 (không muốn thêm dấu)
+        # Nếu case=1 nhưng punct>1 vẫn chạy model (case_confidence âm sẽ suppress viết hoa)
+        bypass_restorer = (slider_val == 1)
         
         return {
             "cpu_threads": self.slider_threads.value(),
@@ -1206,6 +1244,11 @@ class FileProcessingTab(QWidget):
     def start_transcription(self):
         if not self.selected_file:
             return
+        
+        # Xóa dữ liệu tên Người nói cũ khi xử lý ASR mới (có thể sinh ra speaker ID khác)
+        self.speaker_name_mapping = {}
+        self.block_speaker_names = {}
+        self.custom_speaker_names = set()
 
         # Reset saved flag for new transcription
         self.json_saved = False
@@ -1255,13 +1298,27 @@ class FileProcessingTab(QWidget):
             application_path = os.path.dirname(sys.executable)
         else:
             application_path = os.path.dirname(os.path.abspath(__file__))
-            
+
         model_folder_name = self.combo_model.currentData()
-        model_path = os.path.join(application_path, "models", model_folder_name)
-        
-        if not os.path.exists(model_path):
-            show_missing_model_dialog(self, model_folder_name, model_path)
-            return
+
+        # ROVER mode: dùng thư mục models làm base, pipeline sẽ tự load 2 model
+        from core.asr_engine import ROVER_MODEL_ID, ROVER_MODEL_IDS
+        is_rover = (model_folder_name == ROVER_MODEL_ID)
+
+        if is_rover:
+            models_dir = os.path.join(application_path, "models")
+            # Kiểm tra cả 2 model tồn tại
+            for mid in ROVER_MODEL_IDS:
+                p = os.path.join(models_dir, mid)
+                if not os.path.isdir(p):
+                    show_missing_model_dialog(self, mid, p)
+                    return
+            model_path = models_dir  # Pipeline sẽ dùng thư mục này để tìm cả 2 model
+        else:
+            model_path = os.path.join(application_path, "models", model_folder_name)
+            if not os.path.exists(model_path):
+                show_missing_model_dialog(self, model_folder_name, model_path)
+                return
 
         self.toggle_inputs(False)
         self.text_output.clear()
@@ -1285,9 +1342,10 @@ class FileProcessingTab(QWidget):
         
         # Dùng get_config() để tránh duplicate logic và dễ bị desync
         config = self.get_config()
-        
+        config["rover_mode"] = is_rover
+
         # Override/thêm các field cần thiết
-        config["diarization_threshold"] = self.slider_diarization_threshold.value() / 10.0
+        config["diarization_threshold"] = self.slider_diarization_threshold.value() / 100.0  # 2 decimal places
         
         # num_speakers cần xử lý riêng vì là text "tự động" hoặc số
         num_speakers_text = self.spin_num_speakers.currentText()
@@ -1308,7 +1366,15 @@ class FileProcessingTab(QWidget):
         else:
             config["_text_only_mode"] = False
         
-        self.transcriber = TranscriberThread(self.selected_file, model_path, config)
+        # Sử dụng WAV cache nếu có để xử lý nhanh hơn và nhất quán
+        audio_file_for_processing = self.selected_file
+        if self.selected_file in self._playback_cache:
+            cached_wav = self._playback_cache[self.selected_file]
+            if os.path.exists(cached_wav):
+                audio_file_for_processing = cached_wav
+                print(f"[Process] Using cached WAV: {cached_wav}")
+
+        self.transcriber = TranscriberThread(audio_file_for_processing, model_path, config)
         self.transcriber.progress.connect(self.update_progress)
         self.transcriber.finished.connect(self.on_finished)
         self.transcriber.error.connect(self.on_error)
@@ -1499,7 +1565,7 @@ class FileProcessingTab(QWidget):
             
             time_str = fmt_time(total)
             
-            details = f"📊 TỔNG THỜIGIAN: {time_str}\n\n📝 CHI TIẾT CÁC GIAI ĐOẠN:"
+            details = f"📊 TỔNG THỜI GIAN: {time_str}\n\n📝 CHI TIẾT CÁC GIAI ĐOẠN:"
             
             if upload_convert > 0.01:
                 details += f"\n  • Tải & chuẩn hóa audio: {fmt_time(upload_convert)}"
@@ -1510,7 +1576,7 @@ class FileProcessingTab(QWidget):
             if punctuation > 0.01:
                 details += f"\n  • Thêm dấu câu: {fmt_time(punctuation)}"
             if alignment > 0.01:
-                details += f"\n  • Căn chỉnh thớigian: {fmt_time(alignment)}"
+                details += f"\n  • Căn chỉnh thời gian: {fmt_time(alignment)}"
             if diarization > 0.01 and self.check_speaker_diarization.isChecked():
                 details += f"\n  • Phân đoạn Người nói: {fmt_time(diarization)}"
             
@@ -1560,70 +1626,17 @@ class FileProcessingTab(QWidget):
                 return
         
         try:
-            # Build JSON segments
-            json_segments = []
-            current_speaker = None
-            
-            for i, seg in enumerate(self.segments):
-                speaker = seg.get('speaker', '')
-                speaker_id = seg.get('speaker_id', 0)
-                
-                # Check speaker name mapping (keys are str)
-                display_name = speaker
-                sid_str = str(speaker_id)
-                if sid_str in self.speaker_name_mapping:
-                    display_name = self.speaker_name_mapping[sid_str]
-                
-                # Add speaker separator when speaker changes
-                if display_name != current_speaker and display_name:
-                    json_segments.append({
-                        'type': 'speaker',
-                        'speaker': display_name,
-                        'speaker_id': int(speaker_id) if isinstance(speaker_id, (int, float)) or (isinstance(speaker_id, str) and speaker_id.isdigit()) else speaker_id,
-                        'start_time': seg.get('start', seg.get('start_time', 0))
-                    })
-                    current_speaker = display_name
-                
-                # Clean partials
-                clean_partials = []
-                for p in seg.get('partials', []):
-                    clean_partials.append({
-                        'text': p.get('text', ''),
-                        'timestamp': p.get('timestamp', 0)
-                    })
-                
-                # If no partials, create single partial
-                if not clean_partials:
-                    seg_end = seg.get('end', seg.get('start', 0) + 1.0)
-                    clean_partials.append({
-                        'text': seg.get('text', ''),
-                        'timestamp': seg_end
-                    })
-                
-                json_segments.append({
-                    'type': 'text',
-                    'text': seg.get('text', ''),
-                    'start_time': seg.get('start', seg.get('start_time', 0)),
-                    'segment_id': i,
-                    'partials': clean_partials
-                })
-            
-            # Get model info
             model_name = self.combo_model.currentData() if hasattr(self, 'combo_model') else 'unknown'
-            
-            json_data = {
-                'version': 1,
-                'model': model_name,
-                'model_type': 'file',
-                'created_at': __import__('datetime').datetime.now().isoformat(),
-                'duration_sec': round(self.player_duration / 1000.0, 2) if self.player_duration > 0 else 0,
-                'speaker_names': dict(self.speaker_name_mapping) if self.speaker_name_mapping else {},
-                'segments': json_segments
-            }
-            
-            with open(json_path, 'w', encoding='utf-8') as f:
-                import json
-                json.dump(json_data, f, ensure_ascii=False, indent=2)
+            duration_sec = self.player_duration / 1000.0 if self.player_duration > 0 else 0
+
+            json_data = serialize_segments(
+                self.segments,
+                speaker_name_mapping=self.speaker_name_mapping,
+                model_name=model_name,
+                model_type='file',
+                duration_sec=duration_sec
+            )
+            _save_asr_json_file(json_path, json_data)
             
             # Mark as saved
             self.json_saved = True
@@ -1645,9 +1658,10 @@ class FileProcessingTab(QWidget):
         try:
             from PyQt6.QtWidgets import QApplication
             
-            # Tạo text từ segments
-            lines = []
+            # Tạo text từ segments - giống format hiển thị trên view
+            paragraphs = []
             current_speaker = None
+            current_texts = []
             
             for seg in self.segments:
                 speaker = seg.get('speaker', '')
@@ -1664,14 +1678,20 @@ class FileProcessingTab(QWidget):
                 else:
                     display_name = speaker
                 
-                # Thêm tên ngướ i nói nếu thay đổi
+                # Nếu đổi speaker, lưu paragraph cũ và bắt đầu paragraph mới
                 if display_name != current_speaker and display_name:
-                    lines.append(f"\n{display_name}:")
+                    if current_speaker and current_texts:
+                        paragraphs.append(f"{current_speaker}:\n{' '.join(current_texts)}")
                     current_speaker = display_name
-                
-                lines.append(text)
+                    current_texts = [text]
+                else:
+                    current_texts.append(text)
             
-            full_text = '\n'.join(lines).strip()
+            # Thêm paragraph cuối cùng
+            if current_speaker and current_texts:
+                paragraphs.append(f"{current_speaker}:\n{' '.join(current_texts)}")
+            
+            full_text = '\n'.join(paragraphs)
             
             # Copy vào clipboard
             clipboard = QApplication.clipboard()
@@ -1687,90 +1707,24 @@ class FileProcessingTab(QWidget):
     def _load_asr_json(self, json_path):
         """Load dữ liệu ASR từ file JSON"""
         try:
-            import json
-            with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            if 'segments' not in data:
-                print(f"[_load_asr_json] Invalid JSON: no 'segments' key")
-                return False
-            
-            json_segments = data['segments']
-            
-            # Load speaker names
-            if 'speaker_names' in data:
-                self.speaker_name_mapping = data['speaker_names']
-            
-            # Convert JSON segments to internal format
-            self.segments = []
-            current_speaker = ''
-            current_speaker_id = 0  # int by default
-            has_speakers = False
-            seg_counter = 0
-            
-            for seg in json_segments:
-                seg_type = seg.get('type', 'text')
-                
-                if seg_type == 'speaker':
-                    current_speaker = seg.get('speaker', '')
-                    # Force int: JSON may store as string "0", "1"...
-                    raw_id = seg.get('speaker_id', 0)
-                    try:
-                        current_speaker_id = int(raw_id)
-                    except (ValueError, TypeError):
-                        current_speaker_id = raw_id
-                    has_speakers = True
-                    continue
-                
-                if seg_type == 'text':
-                    # Dùng text gốc từ JSON
-                    original_text = seg.get('text', '')
-                    
-                    # Copy partials và lọc bỏ partials rỗng
-                    partials = seg.get('partials', [])
-                    partials = [p for p in partials if p.get('text', '').strip()]
-                    
-                    # Nếu không có partials, tạo từ text
-                    if not partials and original_text:
-                        partials = [{'text': original_text}]
-                    
-                    # Build internal segment - dùng text gốc, không reconstruct
-                    internal_seg = {
-                        'text': original_text,
-                        'start': seg.get('start_time', 0),
-                        'start_time': seg.get('start_time', 0),
-                        'index': seg_counter,
-                        'speaker': current_speaker,
-                        'speaker_id': current_speaker_id,
-                    }
-                    
-                    if partials:
-                        internal_seg['partials'] = partials
-                        # Set end from last partial timestamp
-                        internal_seg['end'] = partials[-1].get('timestamp', internal_seg['start'] + 1.0)
-                    else:
-                        internal_seg['end'] = internal_seg['start'] + 1.0
-                        internal_seg['partials'] = [{
-                            'text': internal_seg['text'],
-                            'timestamp': internal_seg['end']
-                        }]
-                    
-                    self.segments.append(internal_seg)
-                    seg_counter += 1
-            
+            data = load_asr_json(json_path)
+            segments, speaker_mapping, has_speakers = deserialize_segments(data)
+
+            self.segments = segments
+            self.speaker_name_mapping = speaker_mapping
             self.has_speaker_diarization = has_speakers
             self.current_highlight_index = -1
             self._last_rendered_highlight = -1
-            
+
             # Render
             self.render_text_content(immediate=True)
-            
+
             # Mark as saved since data was loaded from existing JSON file
             self.json_saved = True
-            
+
             print(f"[_load_asr_json] Loaded {len(self.segments)} segments from {json_path}")
             return True
-            
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1791,57 +1745,216 @@ class FileProcessingTab(QWidget):
         
         query_norm = normalize_vietnamese(query)
         query_lower = query.lower()
-
+        
+        # Build concatenated text with segment boundaries mapping
+        # This allows searching across segment boundaries
+        concatenated_parts = []
+        seg_boundaries = []  # List of (global_start, global_end, seg_idx, seg_start_pos)
+        global_pos = 0
+        
         for i, seg in enumerate(self.segments):
-            text = seg['text']
-            text_lower = text.lower()
+            text = seg.get('text', '')
+            if not text:
+                continue
             
-            start = 0
-            while True:
-                idx = text_lower.find(query_lower, start)
-                if idx == -1:
-                    break
+            seg_start_global = global_pos
+            seg_end_global = global_pos + len(text)
+            
+            concatenated_parts.append(text)
+            seg_boundaries.append({
+                'global_start': seg_start_global,
+                'global_end': seg_end_global,
+                'seg_idx': i,
+                'text': text,
+                'text_lower': text.lower(),
+                'text_norm': normalize_vietnamese(text)
+            })
+            
+            global_pos = seg_end_global + 1  # +1 for space separator between segments
+            concatenated_parts.append(' ')  # Add space separator
+        
+        concatenated_text = ''.join(concatenated_parts)
+        concatenated_lower = concatenated_text.lower()
+        concatenated_norm = normalize_vietnamese(concatenated_text)
+        
+        # Helper function to map global position to segment position
+        def map_global_to_seg(global_pos):
+            """Map global position to (seg_idx, local_pos)"""
+            for boundary in seg_boundaries:
+                if boundary['global_start'] <= global_pos < boundary['global_end']:
+                    return boundary['seg_idx'], global_pos - boundary['global_start']
+            # Check if at boundary (last position of a segment)
+            for boundary in seg_boundaries:
+                if global_pos == boundary['global_end']:
+                    return boundary['seg_idx'], global_pos - boundary['global_start']
+            return None, None
+        
+        # Search in concatenated text (case-insensitive)
+        start = 0
+        while True:
+            idx = concatenated_lower.find(query_lower, start)
+            if idx == -1:
+                break
+            
+            match_end = idx + len(query)
+            
+            # Find which segment(s) this match spans
+            start_seg_idx, start_local = map_global_to_seg(idx)
+            end_seg_idx, end_local = map_global_to_seg(match_end - 1)  # -1 because match_end is exclusive
+            
+            if start_seg_idx is None:
+                start = idx + 1
+                continue
+            
+            if end_seg_idx is None:
+                # Match extends beyond last segment, adjust
+                end_seg_idx = len(self.segments) - 1
+                end_local = len(self.segments[end_seg_idx].get('text', ''))
+            
+            # Add match for each segment that the query spans
+            if start_seg_idx == end_seg_idx:
+                # Match within single segment
+                seg_text = self.segments[start_seg_idx].get('text', '')
+                end_pos = min(start_local + len(query), len(seg_text))
                 self.search_matches.append({
-                    'seg_idx': i,
-                    'start': idx,
-                    'end': idx + len(query),
-                    'text': text[idx:idx + len(query)],
+                    'seg_idx': start_seg_idx,
+                    'start': start_local,
+                    'end': end_pos,
+                    'text': seg_text[start_local:end_pos],
                     'score': 1.0
                 })
-                start = idx + 1
-            
-            text_norm = normalize_vietnamese(text)
-            start = 0
-            while True:
-                idx = text_norm.find(query_norm, start)
-                if idx == -1:
-                    break
+            else:
+                # Match spans multiple segments
+                # Add match to first segment (from start to end of segment)
+                seg_text_first = self.segments[start_seg_idx].get('text', '')
+                first_seg_match_len = len(seg_text_first) - start_local
+                self.search_matches.append({
+                    'seg_idx': start_seg_idx,
+                    'start': start_local,
+                    'end': len(seg_text_first),
+                    'text': seg_text_first[start_local:],
+                    'score': 1.0,
+                    'spans_to_next': True  # Mark that this match continues to next segment
+                })
                 
-                # Ánh xạ vị trí từ normalized sang original
-                orig_start = self._map_norm_to_orig(text, idx)
-                orig_end = self._map_norm_to_orig(text, idx + len(query_norm))
-                
-                is_duplicate = False
-                for existing in self.search_matches:
-                    if existing['seg_idx'] == i and abs(existing['start'] - orig_start) < 2:
-                        is_duplicate = True
-                        break
-                
-                if not is_duplicate and orig_start < len(text):
-                    end_pos = min(orig_end, len(text))
+                # Add match to second segment (from start of segment)
+                # Calculate how much of query goes into second segment
+                query_remaining = len(query) - first_seg_match_len - 1  # -1 for space separator
+                seg_text_second = self.segments[end_seg_idx].get('text', '')
+                second_end = min(int(query_remaining), len(seg_text_second))
+                if second_end > 0:
                     self.search_matches.append({
-                        'seg_idx': i,
+                        'seg_idx': end_seg_idx,
+                        'start': 0,
+                        'end': second_end,
+                        'text': seg_text_second[:second_end],
+                        'score': 1.0,
+                        'continued_from_prev': True  # Mark that this is continuation
+                    })
+            
+            start = idx + 1
+        
+        # Also search with normalized text (for Vietnamese accent-insensitive search)
+        start = 0
+        while True:
+            idx = concatenated_norm.find(query_norm, start)
+            if idx == -1:
+                break
+            
+            match_end = idx + len(query_norm)
+            
+            start_seg_idx, start_local = map_global_to_seg(idx)
+            end_seg_idx, end_local = map_global_to_seg(match_end - 1)
+            
+            if start_seg_idx is None:
+                start = idx + 1
+                continue
+            
+            if end_seg_idx is None:
+                end_seg_idx = len(self.segments) - 1
+                end_local = len(self.segments[end_seg_idx].get('text', ''))
+            
+            # Map normalized position to original position within the segment
+            seg_text = self.segments[start_seg_idx].get('text', '')
+            orig_start = self._map_norm_to_orig(seg_text, start_local)
+            
+            # Check for duplicate (already found by exact search)
+            is_duplicate = False
+            for existing in self.search_matches:
+                if existing['seg_idx'] == start_seg_idx and abs(existing['start'] - orig_start) < 2:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate and orig_start < len(seg_text):
+                if start_seg_idx == end_seg_idx:
+                    # Match within single segment - use original end
+                    end_boundary = seg_boundaries[start_seg_idx]
+                    match_len_in_seg = end_boundary['global_end'] - (end_boundary['global_start'] + start_local)
+                    if match_len_in_seg > len(query_norm):
+                        match_len_in_seg = len(query_norm)
+                    
+                    orig_end = self._map_norm_to_orig(seg_text, start_local + match_len_in_seg)
+                    orig_end = min(orig_end, len(seg_text))
+                    
+                    self.search_matches.append({
+                        'seg_idx': start_seg_idx,
                         'start': orig_start,
-                        'end': end_pos,
-                        'text': text[orig_start:end_pos],
+                        'end': orig_end,
+                        'text': seg_text[orig_start:orig_end],
                         'score': 0.9
                     })
-                start = idx + 1
+                else:
+                    # Match spans multiple segments - add match to first segment
+                    orig_end = len(seg_text)
+                    self.search_matches.append({
+                        'seg_idx': start_seg_idx,
+                        'start': orig_start,
+                        'end': orig_end,
+                        'text': seg_text[orig_start:],
+                        'score': 0.9,
+                        'spans_to_next': True
+                    })
+                    
+                    # Add match to second segment (normalized)
+                    seg_text_second = self.segments[end_seg_idx].get('text', '')
+                    if seg_text_second:
+                        # Find the boundary for start segment
+                        start_boundary = None
+                        for boundary in seg_boundaries:
+                            if boundary['seg_idx'] == start_seg_idx:
+                                start_boundary = boundary
+                                break
+                        
+                        # Calculate remaining length after first segment
+                        if start_boundary:
+                            first_seg_norm_len = start_boundary['global_end'] - (start_boundary['global_start'] + start_local)
+                        else:
+                            first_seg_norm_len = len(normalize_vietnamese(seg_text)) - start_local
+                        remaining_norm_len = len(query_norm) - first_seg_norm_len - 1  # -1 for space
+                        
+                        # Map remaining length to original length in second segment
+                        second_norm_text = normalize_vietnamese(seg_text_second)
+                        actual_remaining = min(int(remaining_norm_len), len(second_norm_text))
+                        orig_end_second = self._map_norm_to_orig(seg_text_second, actual_remaining)
+                        orig_end_second = min(orig_end_second, len(seg_text_second))
+                        
+                        if orig_end_second > 0:
+                            self.search_matches.append({
+                                'seg_idx': end_seg_idx,
+                                'start': 0,
+                                'end': orig_end_second,
+                                'text': seg_text_second[:orig_end_second],
+                                'score': 0.9,
+                                'continued_from_prev': True
+                            })
+            
+            start = idx + 1
         
         self.search_matches.sort(key=lambda x: (x['seg_idx'], x['start']))
         
         count = len(self.search_matches)
         self.search_widget.label_count.setText(f"0/{count}")
+        self.search_widget.set_has_results(count > 0)
         
         if count > 0:
             self.current_search_index = 0
@@ -1892,6 +2005,7 @@ class FileProcessingTab(QWidget):
         self.search_matches = []
         self.current_search_index = -1
         self._last_rendered_highlight = -1
+        self.search_widget.set_has_results(False)
         self.render_text_content(immediate=True)
 
     def scroll_to_segment(self, seg_idx):
@@ -1941,7 +2055,7 @@ class FileProcessingTab(QWidget):
         chunk_end_pos = chunk_start_pos + len(text)
         matches_in_chunk = []
         
-        for match in self.search_matches:
+        for match_idx, match in enumerate(self.search_matches):
             if match['seg_idx'] == seg_idx:
                 match_start = match['start']
                 match_end = match['end']
@@ -1951,7 +2065,29 @@ class FileProcessingTab(QWidget):
                     # Điều chỉnh vị trí relative với chunk
                     rel_start = max(0, match_start - chunk_start_pos)
                     rel_end = min(len(text), match_end - chunk_start_pos)
-                    is_current = (self.search_matches.index(match) == self.current_search_index)
+                    
+                    # Check if this match is the current one
+                    is_current = (match_idx == self.current_search_index)
+                    
+                    # Also check if this match is part of a multi-segment match
+                    # If this match spans to next and current points to it, next is also current
+                    # If this match continues from prev and current points to prev, this is also current
+                    if not is_current:
+                        if match.get('continued_from_prev') and self.current_search_index >= 0:
+                            # Check if the previous match is current and spans to this
+                            prev_match_idx = match_idx - 1
+                            if prev_match_idx == self.current_search_index:
+                                prev_match = self.search_matches[prev_match_idx]
+                                if prev_match.get('spans_to_next'):
+                                    is_current = True
+                        elif match.get('spans_to_next') and self.current_search_index >= 0:
+                            # Check if the next match is current and continues from this
+                            next_match_idx = match_idx + 1
+                            if next_match_idx == self.current_search_index:
+                                next_match = self.search_matches[next_match_idx]
+                                if next_match.get('continued_from_prev'):
+                                    is_current = True
+                    
                     matches_in_chunk.append({
                         'start': rel_start,
                         'end': rel_end,
@@ -2091,9 +2227,27 @@ class FileProcessingTab(QWidget):
         scrollbar = self.text_output.verticalScrollBar()
         current_scroll = scrollbar.value()
         
+        # Disable updates to prevent flickering/jumping to top
+        self.text_output.setUpdatesEnabled(False)
         self.text_output.setHtml(html_content)
         
-        scrollbar.setValue(current_scroll)
+        # Restore scrollbar asynchronously after layout is updated
+        from PyQt6.QtCore import QTimer
+        self._scroll_attempts = getattr(self, '_scroll_attempts', 0)
+        self._scroll_attempts = 0
+        
+        def restore_scroll():
+            self._scroll_attempts += 1
+            scrollbar.setValue(current_scroll)
+            if scrollbar.maximum() < current_scroll and self._scroll_attempts < 50:
+                QTimer.singleShot(10, restore_scroll)
+            else:
+                self.text_output.setUpdatesEnabled(True)
+                
+        if current_scroll > 0:
+            restore_scroll()
+        else:
+            self.text_output.setUpdatesEnabled(True)
 
     def _merge_speaker_segments(self, segments, max_gap_sec=2.0):
         if not segments:
@@ -2106,7 +2260,7 @@ class FileProcessingTab(QWidget):
         current_speaker = sorted_segs[0].get('speaker', 'Người nói 1')
         
         for seg in sorted_segs[1:]:
-            speaker = seg.get('speaker', 'Người nói 1')
+            speaker = seg.get('speaker', '') or 'Chưa gán'
             prev_end = current_group[-1].get('end', 0)
             curr_start = seg.get('start', 0)
             
@@ -2187,11 +2341,11 @@ class FileProcessingTab(QWidget):
         speaker_block_count = 0
         
         for seg in merged_segments:
-            speaker = seg.get('speaker', 'Người nói 1')
+            speaker = seg.get('speaker', '') or 'Chưa gán'
             
             if speaker != current_speaker:
                 speaker_block_count += 1
-                if current_speaker and current_blocks:
+                if current_blocks:
                     block_render_count = getattr(self, '_block_render_count', 0) + 1
                     self._block_render_count = block_render_count
                     
@@ -2214,7 +2368,8 @@ class FileProcessingTab(QWidget):
                         display_name = self.speaker_name_mapping[speaker_id_str]
                     else:
                         display_name = current_speaker
-                    print(f"[RENDER DEBUG] Block {block_idx}: speaker_id={speaker_id}({type(speaker_id).__name__}), speaker_id_str='{speaker_id_str}', current_speaker='{current_speaker}', display_name='{display_name}', mapping={self.speaker_name_mapping}")
+                    if DEBUG_LOGGING:
+                        print(f"[RENDER DEBUG] Block {block_idx}: speaker_id={speaker_id}({type(speaker_id).__name__}), speaker_id_str='{speaker_id_str}', current_speaker='{current_speaker}', display_name='{display_name}', mapping={self.speaker_name_mapping}")
                     
                     html_content += f"<div style='margin: 16px 0; padding: 10px; background-color: #f8f9fa; border-left: 3px solid {COLORS['accent']}; border-radius: 0 4px 4px 0;'>"
                     
@@ -2271,7 +2426,7 @@ class FileProcessingTab(QWidget):
             
             current_blocks.append(seg)
         
-        if current_speaker and current_blocks:
+        if current_blocks:
             block_render_count = getattr(self, '_block_render_count', 0) + 1
             self._block_render_count = block_render_count
             
@@ -2350,9 +2505,26 @@ class FileProcessingTab(QWidget):
         scrollbar = self.text_output.verticalScrollBar()
         current_scroll = scrollbar.value()
         
+        # Disable updates to prevent flickering/jumping to top
+        self.text_output.setUpdatesEnabled(False)
         self.text_output.setHtml(html_content)
         
-        scrollbar.setValue(current_scroll)
+        # Restore scrollbar asynchronously after layout is updated
+        from PyQt6.QtCore import QTimer
+        attempts = [0]
+        
+        def restore_scroll():
+            attempts[0] += 1
+            scrollbar.setValue(current_scroll)
+            if scrollbar.maximum() < current_scroll and attempts[0] < 50:
+                QTimer.singleShot(10, restore_scroll)
+            else:
+                self.text_output.setUpdatesEnabled(True)
+                
+        if current_scroll > 0:
+            restore_scroll()
+        else:
+            self.text_output.setUpdatesEnabled(True)
 
     def display_raw_speaker_segments(self, speaker_segments):
         if not speaker_segments:
@@ -2423,6 +2595,11 @@ class FileProcessingTab(QWidget):
             QMessageBox.critical(self.window(), "Lỗi", "Speaker diarization không khả dụng.")
             return
         
+        # Xóa dữ liệu tên Người nói cũ khi phân đoạn lại (speaker ID có thể thay đổi)
+        self.speaker_name_mapping = {}
+        self.block_speaker_names = {}
+        self.custom_speaker_names = set()
+        
         reply = QMessageBox.question(self.window(), "Xác nhận", 
                                    "Bạn có chắc chắn muốn chạy lại phân đoạn Người nói?\n"
                                    "Quá trình này có thể mất vài phút.",
@@ -2441,12 +2618,21 @@ class FileProcessingTab(QWidget):
         num_speakers = -1 if self.spin_num_speakers.currentIndex() == 0 else int(self.spin_num_speakers.currentText())
         speaker_model_id = self.combo_speaker_model.currentData()
         
+        # Sử dụng WAV cache nếu có để xử lý nhanh hơn và nhất quán
+        audio_file_for_diarization = self.selected_file
+        if self.selected_file in self._playback_cache:
+            cached_wav = self._playback_cache[self.selected_file]
+            if os.path.exists(cached_wav):
+                audio_file_for_diarization = cached_wav
+                print(f"[Diarization] Using cached WAV: {cached_wav}")
+        
         self.diarization_thread = SpeakerDiarizationThread(
-            audio_file=self.selected_file,
+            audio_file=audio_file_for_diarization,
             segments=self.segments,
             speaker_model_id=speaker_model_id,
             num_speakers=num_speakers,
-            num_threads=self.slider_threads.value()
+            num_threads=self.slider_threads.value(),
+            threshold=self.slider_diarization_threshold.value() / 100.0
         )
         self.diarization_thread.progress.connect(self.update_progress)
         self.diarization_thread.finished.connect(self.on_diarization_finished)
@@ -2670,19 +2856,22 @@ class FileProcessingTab(QWidget):
     def seek_to_sentence(self, idx):
         """Click-to-seek: hỗ trợ cả partial anchor (1000000+) và legacy index"""
         timestamp_sec = None
-        print(f"[seek_to_sentence] idx={idx}")
+        if DEBUG_LOGGING:
+            print(f"[seek_to_sentence] idx={idx}")
         
         if idx >= 1000000:
             # Partial chunk anchor: 1000000 + seg_idx * 1000 + chunk_idx
             adjusted = idx - 1000000
             seg_idx = adjusted // 1000
             chunk_idx = adjusted % 1000
-            print(f"[seek_to_sentence] Partial anchor: seg_idx={seg_idx}, chunk_idx={chunk_idx}, total_segments={len(self.segments)}")
+            if DEBUG_LOGGING:
+                print(f"[seek_to_sentence] Partial anchor: seg_idx={seg_idx}, chunk_idx={chunk_idx}, total_segments={len(self.segments)}")
             
             if 0 <= seg_idx < len(self.segments):
                 seg = self.segments[seg_idx]
                 partials = seg.get('partials', [])
-                print(f"[seek_to_sentence] Segment text='{seg.get('text', '')[:40]}', start={seg.get('start', 0):.2f}, partials={len(partials)}")
+                if DEBUG_LOGGING:
+                    print(f"[seek_to_sentence] Segment text='{seg.get('text', '')[:40]}', start={seg.get('start', 0):.2f}, partials={len(partials)}")
                 if partials and chunk_idx < len(partials):
                     clicked_partial = partials[chunk_idx]
                     if chunk_idx == 0:
@@ -2691,17 +2880,20 @@ class FileProcessingTab(QWidget):
                     else:
                         # Chunk sau: seek tới timestamp của chunk trước (= bắt đầu chunk này)
                         timestamp_sec = partials[chunk_idx - 1]['timestamp']
-                    print(f"[seek_to_sentence] -> chunk '{clicked_partial['text'][:30]}' ts={clicked_partial['timestamp']:.2f}, seek_to={timestamp_sec:.2f}s")
+                    if DEBUG_LOGGING:
+                        print(f"[seek_to_sentence] -> chunk '{clicked_partial['text'][:30]}' ts={clicked_partial['timestamp']:.2f}, seek_to={timestamp_sec:.2f}s")
                 else:
                     # Fallback: seek tới start của segment
                     timestamp_sec = seg.get('start', seg.get('start_time', 0))
-                    print(f"[seek_to_sentence] -> FALLBACK seek_to={timestamp_sec:.2f}s")
+                    if DEBUG_LOGGING:
+                        print(f"[seek_to_sentence] -> FALLBACK seek_to={timestamp_sec:.2f}s")
         else:
             # Legacy: segment index trực tiếp
             if 0 <= idx < len(self.segments):
                 seg = self.segments[idx]
                 timestamp_sec = seg.get('start', seg.get('start_time', 0))
-                print(f"[seek_to_sentence] -> Legacy seek_to={timestamp_sec:.2f}s")
+                if DEBUG_LOGGING:
+                    print(f"[seek_to_sentence] -> Legacy seek_to={timestamp_sec:.2f}s")
         
         if timestamp_sec is not None:
             import time
@@ -2709,22 +2901,25 @@ class FileProcessingTab(QWidget):
             
             self.current_highlight_index = idx
             self.player.setPosition(int(timestamp_sec * 1000))
-            print(f"[seek_to_sentence] setPosition({int(timestamp_sec * 1000)}ms)")
+            if DEBUG_LOGGING:
+                print(f"[seek_to_sentence] setPosition({int(timestamp_sec * 1000)}ms)")
             self.render_text_content(immediate=True)
     
     def on_speaker_label_clicked(self, speaker_id, block_index):
         """Xử lý khi click vào tên Người nói"""
-        print(f"\n[RENAME DEBUG] === on_speaker_label_clicked ===")
-        print(f"[TAB_FILE][RENAME] === SPEAKER CLICKED === id={speaker_id}, block={block_index}")
-        print(f"[RENAME DEBUG] speaker_id from anchor = '{speaker_id}' (type={type(speaker_id).__name__})")
-        print(f"[RENAME DEBUG] block_index = {block_index}")
+        if DEBUG_LOGGING:
+            print(f"\n[RENAME DEBUG] === on_speaker_label_clicked ===")
+            print(f"[TAB_FILE][RENAME] === SPEAKER CLICKED === id={speaker_id}, block={block_index}")
+            print(f"[RENAME DEBUG] speaker_id from anchor = '{speaker_id}' (type={type(speaker_id).__name__})")
+            print(f"[RENAME DEBUG] block_index = {block_index}")
         
         # Convert to int  
         try:
             speaker_id_int = int(speaker_id)
         except (ValueError, TypeError):
             speaker_id_int = speaker_id
-        print(f"[RENAME DEBUG] speaker_id_int = {speaker_id_int} (type={type(speaker_id_int).__name__})")
+        if DEBUG_LOGGING:
+            print(f"[RENAME DEBUG] speaker_id_int = {speaker_id_int} (type={type(speaker_id_int).__name__})")
         
         # Debug: show all unique speaker_ids in segments
         if self.segments:
@@ -2732,7 +2927,8 @@ class FileProcessingTab(QWidget):
             for seg in self.segments:
                 sid = seg.get('speaker_id', '???')
                 unique_ids.add((sid, type(sid).__name__))
-            print(f"[RENAME DEBUG] Unique speaker_ids in segments: {unique_ids}")
+            if DEBUG_LOGGING:
+                print(f"[RENAME DEBUG] Unique speaker_ids in segments: {unique_ids}")
         
         # Tìm tên hiện tại
         current_name = None
@@ -2749,7 +2945,8 @@ class FileProcessingTab(QWidget):
         if not current_name:
             current_name = f"Người nói {speaker_id_int + 1}" if isinstance(speaker_id_int, int) else speaker_id
         
-        print(f"[RENAME DEBUG] current_name = '{current_name}'")
+        if DEBUG_LOGGING:
+            print(f"[RENAME DEBUG] current_name = '{current_name}'")
         
         # Collect all active speaker names to show in the list
         active_speaker_names = set(self.custom_speaker_names)
@@ -2764,7 +2961,8 @@ class FileProcessingTab(QWidget):
         dialog = SpeakerRenameDialog(speaker_id_int, current_name, active_speaker_names, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_name, apply_to_all = dialog.get_result()
-            print(f"[RENAME DEBUG] new_name='{new_name}', apply_to_all={apply_to_all}")
+            if DEBUG_LOGGING:
+                print(f"[RENAME DEBUG] new_name='{new_name}', apply_to_all={apply_to_all}")
             
             if new_name:
                 if apply_to_all:
@@ -2782,8 +2980,9 @@ class FileProcessingTab(QWidget):
                         if seg_sid == speaker_id_int:
                             seg['speaker'] = new_name
                             match_count += 1
-                    print(f"[RENAME DEBUG] Matched {match_count}/{total_count} segments with speaker_id=={speaker_id_int}")
-                    print(f"[RENAME DEBUG] speaker_name_mapping = {self.speaker_name_mapping}")
+                    if DEBUG_LOGGING:
+                        print(f"[RENAME DEBUG] Matched {match_count}/{total_count} segments with speaker_id=={speaker_id_int}")
+                        print(f"[RENAME DEBUG] speaker_name_mapping = {self.speaker_name_mapping}")
                 else:
                     # === SỬA TÊN NÀY: Gán lại block cho speaker khác ===
                     # Tìm block range
@@ -2803,7 +3002,7 @@ class FileProcessingTab(QWidget):
                         current_block_idx = 0
                         prev_speaker = None
                         for i, seg in enumerate(self.segments):
-                            seg_speaker = seg.get('speaker', 'Người nói 1')
+                            seg_speaker = seg.get('speaker', '') or 'Chưa gán'
                             if i == 0 or seg_speaker != prev_speaker:
                                 if i > 0:
                                     current_block_idx += 1
@@ -2919,7 +3118,8 @@ class FileProcessingTab(QWidget):
     def on_split_speaker_requested(self, anchor_id):
         """Xử lý khi yêu cầu tách Người nói"""
         # Convert anchor_id to segment index
-        print(f"[TAB_FILE][SPLIT] === SPLIT SPEAKER === anchor_id={anchor_id}")
+        if DEBUG_LOGGING:
+            print(f"[TAB_FILE][SPLIT] === SPLIT SPEAKER === anchor_id={anchor_id}")
         if anchor_id >= 1000000:
             adjusted = anchor_id - 1000000
             sentence_idx = adjusted // 1000
@@ -3053,10 +3253,12 @@ class FileProcessingTab(QWidget):
         
         current_speaker = self.segments[sentence_idx].get('speaker', 'Người nói 1')
         current_speaker_id = self.segments[sentence_idx].get('speaker_id', 0)
-        print(f"[TAB_FILE][MERGE] At sentence_idx={sentence_idx}: current_speaker={current_speaker}, id={current_speaker_id}")
+        if DEBUG_LOGGING:
+            print(f"[TAB_FILE][MERGE] At sentence_idx={sentence_idx}: current_speaker={current_speaker}, id={current_speaker_id}")
         
         if direction == 'prev':
-            print(f"[TAB_FILE][MERGE] Mode: MERGE TO PREVIOUS")
+            if DEBUG_LOGGING:
+                print(f"[TAB_FILE][MERGE] Mode: MERGE TO PREVIOUS")
             # Tìm Người nói phía trước
             prev_idx = None
             prev_speaker = None
@@ -3065,7 +3267,8 @@ class FileProcessingTab(QWidget):
                 if speaker != current_speaker:
                     prev_idx = i
                     prev_speaker = speaker
-                    print(f"[TAB_FILE][MERGE] Found prev speaker at segment[{i}]: '{prev_speaker}'")
+                    if DEBUG_LOGGING:
+                        print(f"[TAB_FILE][MERGE] Found prev speaker at segment[{i}]: '{prev_speaker}'")
                     break
             
             if prev_speaker is None:
@@ -3075,11 +3278,13 @@ class FileProcessingTab(QWidget):
             block_start = self._find_block_start(sentence_idx)
             # Lấy speaker_id của ngướ i nói trước
             prev_speaker_id = self.segments[prev_idx].get('speaker_id', 0)
-            print(f"[TAB_FILE][MERGE] Merging from {block_start} to {sentence_idx} into '{prev_speaker}'")
+            if DEBUG_LOGGING:
+                print(f"[TAB_FILE][MERGE] Merging from {block_start} to {sentence_idx} into '{prev_speaker}'")
             for i in range(block_start, sentence_idx + 1):
                 old_s = self.segments[i].get('speaker', '')
                 old_id = self.segments[i].get('speaker_id', '')
-                print(f"[TAB_FILE][MERGE]   segment[{i}]: '{old_s}'(id={old_id}) -> '{prev_speaker}'(id={prev_speaker_id})")
+                if DEBUG_LOGGING:
+                    print(f"[TAB_FILE][MERGE]   segment[{i}]: '{old_s}'(id={old_id}) -> '{prev_speaker}'(id={prev_speaker_id})")
                 self.segments[i]['speaker'] = prev_speaker
                 self.segments[i]['speaker_id'] = prev_speaker_id
             self.merged_speaker_blocks = []
