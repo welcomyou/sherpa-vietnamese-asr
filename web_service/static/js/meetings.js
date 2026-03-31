@@ -51,7 +51,8 @@ async function loadMeetings(search) {
         _allMeetings = await apiFetch(url);
         renderMeetingsPage();
     } catch (e) {
-        listEl.innerHTML = '<div class="meetings-loading" style="color:var(--danger)">Lỗi: ' + e.message + '</div>';
+        const safeMsg = e.message ? e.message.replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'})[c]) : '';
+        listEl.innerHTML = '<div class="meetings-loading" style="color:var(--danger)">Lỗi: ' + safeMsg + '</div>';
     }
 }
 

@@ -19,20 +19,22 @@ import configparser
 def cleanup_temp_files():
     """Xóa các file tạm asr_* trong thư mục temp của hệ thống."""
     import tempfile
-    
+
     temp_dir = tempfile.gettempdir()
     for filename in os.listdir(temp_dir):
         if filename.startswith('asr_'):
             try:
                 filepath = os.path.join(temp_dir, filename)
-                os.unlink(filepath)
-                print(f"[Cleanup] Deleted: {filepath}")
-            except:
+                # Chỉ xóa regular files, bỏ qua symlinks và directories
+                if os.path.isfile(filepath) and not os.path.islink(filepath):
+                    os.unlink(filepath)
+                    print(f"[Cleanup] Deleted: {filepath}")
+            except OSError:
                 pass
 
 # Use centralized CPU detection from core
-from core.config import get_allowed_cpu_count, ALLOWED_THREADS
-print(f"[Init] Detected physical CPU cores: {ALLOWED_THREADS}")
+from core.config import ALLOWED_THREADS, DEFAULT_THREADS
+print(f"[Init] CPU: {DEFAULT_THREADS} physical cores, {ALLOWED_THREADS} logical threads")
 
 # Set OpenMP/MKL threads to match allowed cores to prevent over-subscription
 os.environ["OMP_NUM_THREADS"] = str(ALLOWED_THREADS)
@@ -101,7 +103,7 @@ class MainWindow(QMainWindow):
         """Load configuration from config.ini with separate sections for File and Live tabs"""
         config = configparser.ConfigParser()
         if os.path.exists(CONFIG_FILE):
-            config.read(CONFIG_FILE)
+            config.read(CONFIG_FILE, encoding='utf-8')
         else:
             # Create default config with separate sections
             config['FileSettings'] = {
@@ -112,9 +114,10 @@ class MainWindow(QMainWindow):
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
-                'speaker_model': 'titanet_small',
+                'speaker_model': 'community1_pure_ort',
                 'save_ram': 'True',
                 'auto_analyze_quality': 'True',
+                'rms_normalize': 'False',
             }
             config['LiveSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
@@ -135,9 +138,10 @@ class MainWindow(QMainWindow):
                 'speaker_diarization': old.get('speaker_diarization', 'True'),
                 'show_speaker_labels': old.get('show_speaker_labels', 'True'),
                 'num_speakers': old.get('num_speakers', '0'),
-                'speaker_model': old.get('speaker_model', 'titanet_small'),
+                'speaker_model': old.get('speaker_model', 'community1_pure_ort'),
                 'save_ram': old.get('save_ram', 'True'),
                 'auto_analyze_quality': 'True',
+                'rms_normalize': 'False',
             }
             config['LiveSettings'] = {
                 'model': old.get('model', 'a-little-better-model'),
@@ -158,7 +162,7 @@ class MainWindow(QMainWindow):
                 'speaker_diarization': 'True',
                 'show_speaker_labels': 'True',
                 'num_speakers': '0',
-                'speaker_model': 'titanet_small',
+                'speaker_model': 'community1_pure_ort',
                 'save_ram': 'True',
             }
         if 'LiveSettings' not in config:
@@ -175,7 +179,7 @@ class MainWindow(QMainWindow):
         """Save configuration to config.ini"""
         if config is None:
             config = self.config
-        with open(CONFIG_FILE, 'w') as f:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             config.write(f)
 
     def apply_config(self):
@@ -196,6 +200,7 @@ class MainWindow(QMainWindow):
                 file_tab.combo_model, file_tab.slider_threads, file_tab.slider_punct_conf,
                 file_tab.slider_case_conf, file_tab.check_speaker_diarization, file_tab.check_show_speaker_labels,
                 file_tab.spin_num_speakers, file_tab.combo_speaker_model, file_tab.check_save_ram,
+                file_tab.check_rms_normalize,
                 file_tab.slider_diarization_threshold
             ]
             for w in widgets_to_block:
@@ -207,7 +212,10 @@ class MainWindow(QMainWindow):
                 if index >= 0:
                     file_tab.combo_model.setCurrentIndex(index)
                 
-                threads = file_settings.getint('cpu_threads', 4)
+                threads = file_settings.getint('cpu_threads', DEFAULT_THREADS)
+                if threads > ALLOWED_THREADS:
+                    print(f"[Config] cpu_threads={threads} > max={ALLOWED_THREADS} (physical cores), clamping")
+                    threads = ALLOWED_THREADS
                 file_tab.slider_threads.setValue(threads)
                 file_tab.label_threads.setText(str(threads))
                 
@@ -236,17 +244,23 @@ class MainWindow(QMainWindow):
                 elif 2 <= num_speakers <= 5:
                     file_tab.spin_num_speakers.setCurrentIndex(num_speakers - 1)
                 
-                speaker_model = file_settings.get('speaker_model', 'titanet_small')
+                speaker_model = file_settings.get('speaker_model', 'community1_pure_ort')
+                # Migration: remap old model IDs to pure_ort
+                if speaker_model in ('titanet_small', 'community1_onnx', 'community1'):
+                    speaker_model = 'community1_pure_ort'
                 index = file_tab.combo_speaker_model.findData(speaker_model)
                 if index >= 0:
                     file_tab.combo_speaker_model.setCurrentIndex(index)
                 
                 save_ram = file_settings.getboolean('save_ram', True)
                 file_tab.check_save_ram.setChecked(save_ram)
-                
+
+                rms_normalize = file_settings.getboolean('rms_normalize', True)
+                file_tab.check_rms_normalize.setChecked(rms_normalize)
+
+
+
                 # Auto analyze quality setting
-                auto_analyze = file_settings.getboolean('auto_analyze_quality', True)
-                file_tab.chk_auto_analyze.setChecked(auto_analyze)
             finally:
                 # Unblock signals
                 for w in widgets_to_block:
@@ -264,7 +278,10 @@ class MainWindow(QMainWindow):
                 if index >= 0:
                     live_tab.combo_model.setCurrentIndex(index)
                 
-                threads = live_settings.getint('cpu_threads', 4)
+                threads = live_settings.getint('cpu_threads', DEFAULT_THREADS)
+                if threads > ALLOWED_THREADS:
+                    print(f"[Config] Live cpu_threads={threads} > max={ALLOWED_THREADS}, clamping")
+                    threads = ALLOWED_THREADS
                 live_tab.slider_threads.setValue(threads)
                 live_tab.label_threads.setText(str(threads))
             finally:
@@ -304,7 +321,7 @@ class MainWindow(QMainWindow):
             
             speaker_model = file_tab.combo_speaker_model.currentData()
             if speaker_model is None:
-                speaker_model = 'titanet_small'
+                speaker_model = 'community1_pure_ort'
             
             # Update config while preserving keys not in UI (e.g., hf_token)
             self.config['FileSettings']['model'] = model
@@ -316,8 +333,9 @@ class MainWindow(QMainWindow):
             self.config['FileSettings']['num_speakers'] = str(num_speakers)
             self.config['FileSettings']['speaker_model'] = speaker_model
             self.config['FileSettings']['save_ram'] = str(file_tab.check_save_ram.isChecked())
+            self.config['FileSettings']['rms_normalize'] = str(file_tab.check_rms_normalize.isChecked())
+
             self.config['FileSettings']['diarization_threshold'] = str(file_tab.slider_diarization_threshold.value())
-            self.config['FileSettings']['auto_analyze_quality'] = str(file_tab.chk_auto_analyze.isChecked())
             self.save_config()
         finally:
             # Reconnect signals
@@ -473,6 +491,8 @@ class MainWindow(QMainWindow):
         file_tab.spin_num_speakers.currentIndexChanged.connect(self.save_file_config)
         file_tab.combo_speaker_model.currentIndexChanged.connect(self.save_file_config)
         file_tab.check_save_ram.stateChanged.connect(self.save_file_config)
+        file_tab.check_rms_normalize.stateChanged.connect(self.save_file_config)
+
         file_tab.slider_diarization_threshold.valueChanged.connect(self.save_file_config)
     
     def _disconnect_file_signals(self):
@@ -512,6 +532,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             file_tab.check_save_ram.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_rms_normalize.stateChanged.disconnect(self.save_file_config)
         except:
             pass
         try:
@@ -583,14 +607,15 @@ class MainWindow(QMainWindow):
         
         # Nội dung chính
         content_text = """
-<p style='color: #cccccc; margin: 8px 0;'><b>Thiết kế:</b> Nguyễn Hồng Quân (nhquan.thanhuy@tphcm.gov.vn)<br>
+<p style='color: #cccccc; margin: 8px 0;'><b>Thiết kế:</b> Nguyễn Hồng Quân<br>
+nhquan.thanhuy@tphcm.gov.vn — 098.558.3555<br>
 Chuyên viên Phòng Chuyển đổi số - Cơ yếu,<br>
 Văn phòng Thành ủy Thành phố Hồ Chí Minh.</p>
 
-<p style='color: #cccccc; margin: 8px 0;'><b>Lập trình:</b> Antigravity</p>
+<p style='color: #cccccc; margin: 8px 0;'><b>Lập trình:</b> Claude và những người bạn</p>
 
-<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 1.0<br>
-Ngày 10 tháng 03 năm 2026</p>
+<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 2.0<br>
+Ngày 30 tháng 03 năm 2026</p>
 
 <p style='color: #ffd700; margin: 15px 0; font-weight: bold; text-align: center;'>
 PHẦN MỀM SỬ DỤNG TRONG MÔI TRƯỜNG GIÁO DỤC, HÀNH CHÍNH CÔNG, TỔ CHỨC ĐẢNG, ĐOÀN THỂ.<br>
@@ -599,22 +624,20 @@ KHÔNG SỬ DỤNG CHO MỤC ĐÍCH THƯƠNG MẠI.
 
 <p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CHỨC NĂNG:</p>
 <p style='color: #cccccc; margin: 5px 0;'>
-• Chuyển tập tin ghi âm thành văn bản tiếng Việt<br>
-• Phân tách ngưới nói (Speaker Diarization)<br>
-• Thêm dấu câu tự động<br>
-• Phân tích chất lượng âm thanh (DNSMOS)<br>
+• Chuyển ghi âm thành văn bản tiếng Việt (offline)<br>
+• Phân tách người nói (Speaker Diarization)<br>
+• Tự động thêm dấu câu, viết hoa<br>
 • Nhận dạng real-time qua microphone<br>
 • Hỗ trợ hotwords (từ khóa tùy chỉnh)
 </p>
 
-<p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CÔNG NGHỆ SỬ DỤNG:</p>
+<p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CÔNG NGHỆ:</p>
 <ul style='color: #cccccc; margin: 5px 0; padding-left: 20px;'>
-<li><b>Giao diện:</b> Python 3, PyQt6</li>
-<li><b>ASR Engine:</b> Sherpa-ONNX (Zipformer)</li>
-<li><b>Speaker Diarization:</b> TitaNet, Pyannote, ONNX Altunenes</li>
-<li><b>Xử lý âm thanh:</b> FFmpeg, Pydub</li>
-<li><b>NLP:</b> ViBERT-capu (Thêm dấu câu)</li>
-<li><b>Audio Quality:</b> DNSMOS</li>
+<li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T</li>
+<li><b>Diarization:</b> Pyannote Community-1 (Pure ONNX Runtime)</li>
+<li><b>Dấu câu:</b> ViBERT-capu (ONNX)</li>
+<li><b>VAD:</b> Silero VAD (ONNX)</li>
+<li><b>Giao diện:</b> PyQt6</li>
 </ul>
 """
         content = QLabel(content_text)

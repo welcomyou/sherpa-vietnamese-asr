@@ -1,4 +1,5 @@
-# core/asr_engine.py - ASR pipeline: overlap handling, segment splitting, audio loading, transcription
+# core/asr_engine_myort.py - ASR pipeline using pure ONNX Runtime (no sherpa-onnx dependency)
+# Copy of core/asr_engine.py with sherpa_onnx replaced by onnxruntime
 # KHÔNG import PyQt6 - pure Python, dùng callback thay signal
 
 import logging
@@ -13,6 +14,7 @@ from difflib import SequenceMatcher
 import numpy as np
 
 from core.config import DEBUG_LOGGING, get_hotwords_config, BASE_DIR
+from core.hotword_context import build_context_graph
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +231,7 @@ def merge_chunks_with_overlap(chunk_results, overlap_duration_sec=OVERLAP_SEC):
     return merged_words, merged_text
 
 
-def remove_repeated_ngrams(words, max_ngram=5, max_gap_sec=0.3):
+def remove_repeated_ngrams(words, max_ngram=1, max_gap_sec=0.3):
     """
     Phát hiện và xóa n-gram lặp liên tiếp trong danh sách words.
 
@@ -492,7 +494,7 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None):
                 from pydub import AudioSegment
                 setup_ffmpeg_path()
 
-                temp_wav = file_path + '.temp.wav'
+                import tempfile
                 format_map = {'.m4a': 'm4a', '.ogg': 'ogg', '.wma': 'wma', '.opus': 'opus'}
                 if file_ext in format_map:
                     audio_segment = AudioSegment.from_file(file_path, format=format_map[file_ext])
@@ -500,11 +502,14 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None):
                     audio_segment = AudioSegment.from_file(file_path)
 
                 audio_segment = audio_segment.set_channels(1)
-                audio_segment.export(temp_wav, format='wav')
-                file_to_load = temp_wav
-                audio, sr = librosa.load(file_to_load, sr=sample_rate, mono=True, res_type="soxr_vhq")
-                if os.path.exists(temp_wav):
-                    os.remove(temp_wav)
+                tmp_fd, temp_wav = tempfile.mkstemp(suffix='.wav', prefix='asr_')
+                os.close(tmp_fd)
+                try:
+                    audio_segment.export(temp_wav, format='wav')
+                    audio, sr = librosa.load(temp_wav, sr=sample_rate, mono=True, res_type="soxr_vhq")
+                finally:
+                    if os.path.exists(temp_wav):
+                        os.remove(temp_wav)
             except ImportError:
                 raise ImportError(f"Không thể đọc file {file_ext}. Vui lòng cài đặt pydub: pip install pydub")
             except Exception as e2:
@@ -617,21 +622,262 @@ def chunk_long_segment(seg_start, seg_end, max_sec=30, overlap_sec=3.0, sample_r
     return chunks
 
 
+def concat_vad_speech(audio, vad_segments):
+    """
+    Nối tất cả VAD speech segments thành 1 audio liên tục, bỏ silence.
+
+    Args:
+        audio: numpy array audio đã preprocess
+        vad_segments: list of (start_sample, end_sample)
+
+    Returns:
+        concat_audio: numpy array chỉ chứa speech
+        offset_map: list of (concat_start_sample, original_start_sample, length_samples)
+                     dùng để map timestamp từ concat space → original space
+    """
+    parts = []
+    offset_map = []
+    concat_pos = 0
+    for seg_start, seg_end in vad_segments:
+        seg_len = seg_end - seg_start
+        offset_map.append((concat_pos, seg_start, seg_len))
+        parts.append(audio[seg_start:seg_end])
+        concat_pos += seg_len
+
+    if not parts:
+        return audio.copy(), [(0, 0, len(audio))]
+
+    concat_audio = np.concatenate(parts)
+    return concat_audio, offset_map
+
+
+def map_concat_time_to_original(concat_time, offset_map, sample_rate=16000):
+    """
+    Map timestamp từ concat audio space → original audio space.
+
+    Args:
+        concat_time: thời gian (giây) trong concat audio
+        offset_map: list of (concat_start_sample, original_start_sample, length_samples)
+        sample_rate: 16000
+
+    Returns:
+        original_time: thời gian (giây) trong audio gốc
+    """
+    concat_sample = int(concat_time * sample_rate)
+
+    for concat_start, orig_start, length in offset_map:
+        if concat_start <= concat_sample < concat_start + length:
+            offset_in_seg = concat_sample - concat_start
+            return (orig_start + offset_in_seg) / sample_rate
+
+    # Fallback: nếu nằm ngoài (do làm tròn), dùng segment gần nhất
+    if offset_map:
+        # Trước segment đầu
+        if concat_sample < offset_map[0][0]:
+            return offset_map[0][1] / sample_rate
+        # Sau segment cuối
+        last = offset_map[-1]
+        return (last[1] + last[2]) / sample_rate
+
+    return concat_time
+
+
 
 
 # =============================================================================
-# SHERPA ONNX LAZY IMPORT
+# ORT LAZY IMPORT + FBANK
 # =============================================================================
 
-_sherpa_onnx = None
+_ort_module = None
+_knf_opts = None  # NOTE: not thread-safe — use threading.Lock in production
 
-def get_sherpa_onnx():
-    """Lazy import sherpa_onnx to ensure DLL paths are set up first."""
-    global _sherpa_onnx
-    if _sherpa_onnx is None:
-        import sherpa_onnx as so
-        _sherpa_onnx = so
-    return _sherpa_onnx
+def get_ort():
+    """Lazy import onnxruntime."""
+    global _ort_module
+    if _ort_module is None:
+        import onnxruntime as ort_mod
+        ort_mod.set_default_logger_severity(3)
+        _ort_module = ort_mod
+    return _ort_module
+
+
+def compute_fbank_ort(audio, sr=16000):
+    """Compute fbank using kaldi-native-fbank (same C++ backend as sherpa-onnx)."""
+    global _knf_opts
+    import kaldi_native_fbank as knf
+    if _knf_opts is None:
+        _knf_opts = knf.FbankOptions()
+        _knf_opts.frame_opts.dither = 0.0
+        _knf_opts.frame_opts.snip_edges = False
+        _knf_opts.frame_opts.samp_freq = sr
+        _knf_opts.frame_opts.frame_length_ms = 25.0
+        _knf_opts.frame_opts.frame_shift_ms = 10.0
+        _knf_opts.frame_opts.window_type = "povey"
+        _knf_opts.mel_opts.num_bins = 80
+        _knf_opts.mel_opts.low_freq = 20.0
+        _knf_opts.mel_opts.high_freq = 7600.0
+        _knf_opts.energy_floor = 1.0
+    fbank = knf.OnlineFbank(_knf_opts)
+    fbank.accept_waveform(sr, audio.tolist())
+    fbank.input_finished()
+    n = fbank.num_frames_ready
+    features = np.empty((n, 80), dtype=np.float32)
+    for i in range(n):
+        features[i] = fbank.get_frame(i)
+    return features
+
+
+def _log_add(a, b):
+    """LogAdd: log(exp(a) + exp(b)) — numerically stable."""
+    if a < b: a, b = b, a
+    diff = b - a
+    return a if diff < -36.0 else a + np.log1p(np.exp(diff))
+
+
+# =============================================================================
+# MODEL CACHE - Tái sử dụng model giữa các request (server mode)
+# Queue xử lý tuần tự 1 file → không cần thread lock
+# =============================================================================
+
+_recognizer_cache = {}  # {(model_path, threads, paths): recognizer}
+_punct_restorer = None  # Singleton - model giống nhau, chỉ đổi confidence per-call
+_diarizer_cache = None
+_diarizer_cache_key = None
+
+
+def clear_model_cache(which="all"):
+    """Giải phóng model cache. which: 'all', 'recognizer', 'restorer', 'diarizer'"""
+    global _recognizer_cache, _punct_restorer
+    global _diarizer_cache, _diarizer_cache_key
+
+    if which in ("all", "recognizer"):
+        _recognizer_cache.clear()
+        logger.info("[ModelCache] Cleared ASR recognizer cache")
+
+    if which in ("all", "restorer"):
+        if _punct_restorer is not None:
+            try:
+                _punct_restorer.unload()
+            except Exception:
+                pass
+            _punct_restorer = None
+            logger.info("[ModelCache] Cleared PunctuationRestorer cache")
+
+    if which in ("all", "diarizer"):
+        if _diarizer_cache is not None:
+            try:
+                _diarizer_cache.unload()
+            except Exception:
+                pass
+            _diarizer_cache = None
+            _diarizer_cache_key = None
+            logger.info("[ModelCache] Cleared SpeakerDiarizer cache")
+
+    import gc
+    gc.collect()
+
+
+def _get_cached_restorer(device, confidence, case_confidence):
+    """Lấy PunctuationRestorer từ cache, cập nhật confidence per-request.
+    Model BERT load 1 lần duy nhất. Confidence chỉ là threshold cộng vào
+    logit sau softmax — đổi thoải mái mà không cần reload model.
+    """
+    global _punct_restorer
+
+    if _punct_restorer is not None:
+        # Reuse model, chỉ cập nhật confidence (không reload ~200-400MB model)
+        _punct_restorer.gec_model.confidence = confidence
+        _punct_restorer.gec_model.case_confidence = case_confidence
+        logger.info(f"[ModelCache] Reusing PunctuationRestorer "
+                    f"(conf={confidence:.3f}, case={case_confidence:.3f})")
+        return _punct_restorer
+
+    from core.punctuation_restorer_improved import ImprovedPunctuationRestorer
+    _punct_restorer = ImprovedPunctuationRestorer(
+        device=device, confidence=confidence, case_confidence=case_confidence
+    )
+    logger.info(f"[ModelCache] Loaded new PunctuationRestorer "
+                f"(conf={confidence:.3f}, case={case_confidence:.3f})")
+    return _punct_restorer
+
+
+def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
+                          threshold, auth_token=None, merge_short_speaker=True):
+    """Lấy SpeakerDiarizer từ cache hoặc tạo mới + initialize.
+
+    Chiến lược cache:
+    - Pyannote/Altunenes: cache theo (model_id, threads, threshold), đổi num_speakers
+      per-call mà không reload model (~50-200MB ONNX)
+    - Sherpa: cache theo (model_id, threads, threshold, num_clusters) vì clustering
+      config baked vào OfflineSpeakerDiarization object, không đổi được
+    """
+    global _diarizer_cache, _diarizer_cache_key
+
+    if _diarizer_cache is not None:
+        old_model, old_threads, old_threshold = _diarizer_cache_key[:3]
+        base_match = (old_model == embedding_model_id and
+                      old_threads == num_threads and
+                      old_threshold == round(threshold, 4))
+
+        if base_match:
+            is_sherpa = (_diarizer_cache._pyannote_backend is None and
+                         _diarizer_cache.sd is not None)
+
+            if is_sherpa:
+                # Sherpa: chỉ reuse nếu num_clusters cũng khớp
+                old_nc = _diarizer_cache_key[3] if len(_diarizer_cache_key) > 3 else None
+                if old_nc == num_clusters:
+                    _diarizer_cache.merge_short_speaker = merge_short_speaker
+                    logger.info(f"[ModelCache] Reusing SpeakerDiarizer sherpa "
+                                f"({embedding_model_id})")
+                    return _diarizer_cache
+                # num_clusters đổi → phải recreate sherpa (clustering baked in)
+            else:
+                # Pyannote/Altunenes: update num_speakers per-call, không reload model
+                _update_diarizer_speakers(_diarizer_cache, num_clusters)
+                _diarizer_cache.merge_short_speaker = merge_short_speaker
+                logger.info(f"[ModelCache] Reusing SpeakerDiarizer pyannote "
+                            f"({embedding_model_id}, speakers={num_clusters})")
+                return _diarizer_cache
+
+    # Cần tạo mới — unload cũ nếu có
+    if _diarizer_cache is not None:
+        try:
+            _diarizer_cache.unload()
+        except Exception:
+            pass
+
+    from core.speaker_diarization import SpeakerDiarizer
+    diarizer = SpeakerDiarizer(
+        embedding_model_id=embedding_model_id,
+        num_clusters=num_clusters,
+        num_threads=num_threads,
+        threshold=threshold,
+        auth_token=auth_token,
+        merge_short_speaker=merge_short_speaker,
+    )
+    diarizer.initialize()
+    _diarizer_cache = diarizer
+    _diarizer_cache_key = (embedding_model_id, num_threads, round(threshold, 4), num_clusters)
+    logger.info(f"[ModelCache] Loaded new SpeakerDiarizer ({embedding_model_id})")
+    return diarizer
+
+
+def _update_diarizer_speakers(diarizer, num_clusters):
+    """Cập nhật num_speakers trên cached pyannote/altunenes backend.
+    Backend hỗ trợ per-call num_speakers — chỉ cần update attributes."""
+    diarizer.num_clusters = num_clusters
+    backend = diarizer._pyannote_backend
+    if backend is None:
+        return
+    if num_clusters > 0:
+        backend.num_speakers = -1  # Dùng min/max range thay vì ép cứng
+        backend.min_speakers = max(2, num_clusters - 1)
+        backend.max_speakers = num_clusters + 1
+    else:
+        backend.num_speakers = -1
+        backend.min_speakers = None
+        backend.max_speakers = None
 
 
 # =============================================================================
@@ -643,7 +889,13 @@ ROVER_MODEL_ID = "rover-voting"  # ID dùng trong UI/config
 
 
 def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
-    """Tạo OfflineRecognizer từ model_path."""
+    """Tạo hoặc lấy từ cache ORT sessions (encoder, decoder, joiner + tokens).
+    Returns dict with ORT sessions + id2token mapping."""
+    cache_key = (os.path.normpath(model_path), cpu_threads, max_active_paths)
+    if cache_key in _recognizer_cache:
+        logger.info(f"[ModelCache] Reusing ORT recognizer: {os.path.basename(model_path)}")
+        return _recognizer_cache[cache_key]
+
     def find_file(pattern):
         files = [f for f in os.listdir(model_path) if f.startswith(pattern) and f.endswith(".onnx")]
         float_files = [f for f in files if "int8" not in f]
@@ -656,74 +908,339 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
     encoder = find_file("encoder-")
     decoder = find_file("decoder-")
     joiner = find_file("joiner-")
-    tokens = os.path.join(model_path, "tokens.txt")
+    tokens_path = os.path.join(model_path, "tokens.txt")
 
-    if not all([encoder, decoder, joiner]) or not os.path.exists(tokens):
+    if not all([encoder, decoder, joiner]) or not os.path.exists(tokens_path):
         raise FileNotFoundError(f"Thiếu file model trong: {model_path}")
 
-    kwargs = {
-        "tokens": tokens, "encoder": encoder, "decoder": decoder, "joiner": joiner,
-        "num_threads": cpu_threads, "sample_rate": 16000, "feature_dim": 80,
-        "decoding_method": "modified_beam_search", "max_active_paths": max_active_paths,
+    ort = get_ort()
+    prov = ['CPUExecutionProvider']
+
+    # Tính Z = threads thực (có HT bonus nếu có)
+    from core.config import compute_ort_threads
+    Z = compute_ort_threads(cpu_threads)
+
+    # Encoder: full Z threads cho matmul lớn
+    opts_enc = ort.SessionOptions()
+    opts_enc.intra_op_num_threads = Z
+    opts_enc.inter_op_num_threads = 1
+    opts_enc.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    opts_enc.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts_enc.log_severity_level = 3
+
+    # Decoder/Joiner: Z//3 (benchmark: nhanh 7% vs 1 thread)
+    dec_joi_threads = max(1, Z // 3)
+    opts_small = ort.SessionOptions()
+    opts_small.intra_op_num_threads = dec_joi_threads
+    opts_small.inter_op_num_threads = 1
+    opts_small.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    opts_small.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts_small.enable_cpu_mem_arena = False
+    opts_small.log_severity_level = 3
+
+    enc_sess = ort.InferenceSession(encoder, opts_enc, providers=prov)
+    dec_sess = ort.InferenceSession(decoder, opts_small, providers=prov)
+    joi_sess = ort.InferenceSession(joiner, opts_small, providers=prov)
+
+    # Load tokens
+    id2token = {}
+    with open(tokens_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                id2token[int(parts[-1])] = parts[0]
+
+    # Get vocab size from joiner
+    V = joi_sess.get_outputs()[0].shape[-1]
+    if not V:
+        V = len(id2token)
+
+    # Hotword context graph (Aho-Corasick)
+    context_graph = None
+    try:
+        hw_config = get_hotwords_config(model_path)
+        hw_file = hw_config.get("hotwords_file", "")
+        bpe_model = os.path.join(model_path, "bpe.model")
+        if hw_file and os.path.exists(bpe_model):
+            hw_score = hw_config.get("hotwords_score", 1.5)
+            context_graph = build_context_graph(hw_file, bpe_model, default_score=hw_score)
+    except Exception as e:
+        print(f"[Hotwords] Failed to build context graph: {e}")
+
+    recognizer = {
+        'enc_sess': enc_sess, 'dec_sess': dec_sess, 'joi_sess': joi_sess,
+        'id2token': id2token, 'vocab_size': V,
+        'max_active_paths': max_active_paths,
+        'model_path': model_path, 'dec_cache': {},
+        'context_graph': context_graph,
     }
-    hotwords_config = get_hotwords_config(model_path, BASE_DIR)
-    if hotwords_config:
-        kwargs.update(hotwords_config)
-        print(f"[Hotwords] {os.path.basename(model_path)}: score {hotwords_config.get('hotwords_score', 1.5)}")
 
-    return get_sherpa_onnx().OfflineRecognizer.from_transducer(**kwargs)
+    logger.info(f"[ModelCache] Cached new ORT recognizer: {os.path.basename(model_path)} "
+                f"(enc={os.path.basename(encoder)}, V={V}, "
+                f"threads: enc={Z} dec/joi={dec_joi_threads} [cpu_threads={cpu_threads}, Z={Z}])")
+
+    _recognizer_cache[cache_key] = recognizer
+    return recognizer
 
 
-def decode_chunk(recognizer, audio_chunk, time_offset=0.0):
+def _ort_beam_search(recognizer, features, beam_size=8):
+    """ORT modified beam search matching sherpa-onnx C++ exactly.
+    Returns (token_ids, timestamps_frames, ys_log_probs, T, emit_logits).
+    emit_logits: list of raw joiner logits [V] per emitted token (for entropy, 1-pass).
+
+    Hotword boosting (nếu có context_graph):
+    - Giống sherpa-onnx: Aho-Corasick automaton inject vào beam search
+    - Mỗi hypothesis giữ 1 context_state
+    - Non-blank token → forward_one_step → score_delta cộng vào log-prob
+    - Cuối decode → finalize: trừ partial score chưa hoàn thành
     """
-    Decode một audio chunk, trả về merged words list.
-    Tách riêng để dùng chung cho single-model và ROVER.
-    """
-    s = recognizer.create_stream()
-    s.accept_waveform(16000, audio_chunk)
-    recognizer.decode_stream(s)
+    BLANK_ID = 0
+    UNK_ID = 2     # BPE <unk> — skip hotword matching (giống sherpa-onnx C++)
+    CONTEXT_SIZE = 2
 
-    result = s.result
-    text = result.text.strip()
-    if not text:
-        del s
+    enc_sess = recognizer['enc_sess']
+    dec_sess = recognizer['dec_sess']
+    joi_sess = recognizer['joi_sess']
+    V = recognizer['vocab_size']
+    dec_cache = recognizer['dec_cache']
+    ctx_graph = recognizer.get('context_graph')  # None nếu không có hotwords
+
+    x = features[np.newaxis, :, :].astype(np.float32)
+    x_lens = np.array([features.shape[0]], dtype=np.int64)
+    enc_out, enc_lens = enc_sess.run(None, {"x": x, "x_lens": x_lens})
+    T = int(enc_lens[0])
+    enc_out = enc_out[0, :T, :]
+
+    init_ys = [-1] * (CONTEXT_SIZE - 1) + [BLANK_ID]
+    dec_input = [max(0, y) for y in init_ys]
+    ctx_key = tuple(dec_input)
+    if ctx_key not in dec_cache:
+        dec_cache[ctx_key] = dec_sess.run(
+            None, {"y": np.array([dec_input], dtype=np.int64)})[0][0]
+
+    # hyps_dict: key=tuple(ys) → (ys, log_prob, frames, ys_probs, emit_logits, context_state)
+    init_ctx_state = ctx_graph.root if ctx_graph else None
+    hyps_dict = {tuple(init_ys): (list(init_ys), 0.0, [], [], [], init_ctx_state)}
+
+    # Pre-allocate
+    D = enc_out.shape[1]
+    D_dec = dec_cache[ctx_key].shape[0]
+    enc_buf = np.empty((beam_size, D), dtype=np.float32)
+    dec_buf = np.empty((beam_size, D_dec), dtype=np.float32)
+
+    for t in range(T):
+        prev = list(hyps_dict.values())
+        B = len(prev)
+
+        # Decoder: cache lookup
+        missing_ctxs, missing_idx = [], []
+        for i, (ys, lp, fr, yp, el, cs) in enumerate(prev):
+            ctx = tuple(max(0, y) for y in ys[-CONTEXT_SIZE:])
+            cached = dec_cache.get(ctx)
+            if cached is not None:
+                dec_buf[i] = cached
+            else:
+                missing_ctxs.append(ctx)
+                missing_idx.append(i)
+
+        if missing_ctxs:
+            batch = np.array([list(c) for c in missing_ctxs], dtype=np.int64)
+            results = dec_sess.run(None, {"y": batch})[0]
+            for j, idx in enumerate(missing_idx):
+                dec_buf[idx] = results[j]
+                dec_cache[missing_ctxs[j]] = results[j].copy()
+
+        # Joiner
+        enc_buf[:B] = enc_out[t]
+        logits = joi_sess.run(
+            None, {"encoder_out": enc_buf[:B], "decoder_out": dec_buf[:B]})[0]
+
+        # Log-softmax + score accumulation
+        mx = np.max(logits, axis=-1, keepdims=True)
+        shifted = logits - mx
+        log_probs = shifted - np.log(np.sum(np.exp(shifted), axis=-1, keepdims=True))
+        for i in range(B):
+            log_probs[i, :] += prev[i][1]
+
+        # Global top-k
+        flat = log_probs.reshape(-1)
+        k = min(beam_size, len(flat))
+        top_idx = np.argpartition(flat, -k)[-k:]
+        top_idx = top_idx[np.argsort(flat[top_idx])[::-1]]
+
+        # Build new hypotheses with log-sum-exp dedup
+        new_hyps = {}
+        for idx in top_idx:
+            hi = int(idx // V)
+            token = int(idx % V)
+            score = float(flat[idx])
+            p_ys, p_lp, p_fr, p_yp, p_el, p_cs = prev[hi]
+
+            if token == BLANK_ID:
+                new_ys = list(p_ys)
+                new_fr, new_yp, new_el = list(p_fr), list(p_yp), list(p_el)
+                new_cs = p_cs
+            else:
+                tok_lp = float(log_probs[hi, token]) - p_lp
+                new_ys = p_ys + [token]
+                new_fr = p_fr + [t]
+                new_yp = p_yp + [tok_lp]
+                new_el = p_el + [logits[hi].copy()]
+
+                # Hotword boosting (skip blank + unk, giống sherpa-onnx C++)
+                new_cs = p_cs
+                if ctx_graph is not None and p_cs is not None and token != UNK_ID:
+                    hw_delta, new_cs = ctx_graph.forward_one_step(p_cs, token)
+                    score += hw_delta
+
+            key = tuple(new_ys)
+            if key in new_hyps:
+                old = new_hyps[key]
+                new_hyps[key] = (old[0], _log_add(old[1], score), old[2], old[3], old[4], old[5])
+            else:
+                new_hyps[key] = (new_ys, score, new_fr, new_yp, new_el, new_cs)
+
+        hyps_dict = new_hyps
+
+    # Finalize: trừ partial hotword score chưa hoàn thành
+    if ctx_graph is not None:
+        for key in hyps_dict:
+            ys, lp, fr, yp, el, cs = hyps_dict[key]
+            if cs is not None:
+                lp += ctx_graph.finalize(cs)
+            hyps_dict[key] = (ys, lp, fr, yp, el, cs)
+
+    # Length-normalized final selection
+    best = max(hyps_dict.values(), key=lambda h: h[1] / max(len(h[0]), 1))
+    token_ids = [tok for tok in best[0][CONTEXT_SIZE:] if tok > 0]
+    return token_ids, best[2], best[3], T, best[4]
+
+
+    # (greedy search & decode_chunk_greedy removed — ROVER Model B uses beam=4 via decode_chunk)
+
+
+def _compute_token_entropy(raw_logits, V):
+    """Compute entropy metrics from a single token's joiner logits.
+    Shared function — dùng chung cho beam search và greedy search.
+    Returns: dict {tsallis_norm, margin, entropy_norm, top1_prob}"""
+    max_entropy = math.log(V) if V > 1 else 1.0
+    alpha_ts = 1.0 / 3.0
+    tsallis_max_val = (1.0 / (alpha_ts - 1.0)) * (1.0 - V ** (1.0 - alpha_ts)) if V > 1 else 1.0
+
+    logits_s = raw_logits - np.max(raw_logits)
+    probs = np.exp(logits_s)
+    probs /= np.sum(probs)
+    entropy = -float(np.sum(probs * np.log(probs + 1e-30)))
+    tsallis = float((1.0 / (alpha_ts - 1.0)) * (1.0 - np.sum(probs ** alpha_ts)))
+    tsallis_norm = tsallis / tsallis_max_val if tsallis_max_val > 0 else 0.0
+    sorted_p = np.sort(probs)[::-1]
+    top1 = float(sorted_p[0])
+    top2 = float(sorted_p[1]) if len(sorted_p) > 1 else 1e-10
+    return {
+        "tsallis_norm": round(float(tsallis_norm), 4),
+        "margin": round(top1 - top2, 4),
+        "entropy_norm": round(entropy / max_entropy, 4),
+        "top1_prob": top1,
+    }
+
+
+_ENTROPY_FALLBACK = {"tsallis_norm": 0, "margin": 1, "entropy_norm": 0, "top1_prob": 1.0}
+
+
+def _finalize_word_entropy(w):
+    """Aggregate BPE-level entropy → word-level. Called during BPE merge.
+    Per-token confidence: tính confidence per-token rồi average,
+    tránh cross-penalty giữa margin_min token A × tsallis_max token B."""
+    w["prob"] = sum(w["probs"]) / len(w["probs"])
+    del w["probs"]
+    ents = w.pop("_ents", [])
+    if ents:
+        # Giữ tsallis_max/margin_min cho suspect_detect (backward compat)
+        w["tsallis_max"] = round(float(max(e["tsallis_norm"] for e in ents)), 4)
+        w["margin_min"] = round(float(min(e["margin"] for e in ents)), 4)
+        w["entropy_norm"] = round(float(np.mean([e["entropy_norm"] for e in ents])), 4)
+        # Per-token confidence: tính trên từng token rồi average
+        token_confs = [e["margin"] * (1.0 - e["tsallis_norm"]) for e in ents]
+        w["_conf"] = round(float(sum(token_confs) / len(token_confs)), 4)
+    else:
+        w["tsallis_max"] = None
+        w["margin_min"] = None
+        w["entropy_norm"] = None
+        w["_conf"] = None
+
+
+def decode_chunk(recognizer, audio_chunk, time_offset=0.0, precomputed_features=None):
+    """
+    Decode một audio chunk using ORT beam search, trả về merged words list.
+    Entropy (tsallis, margin) tính trong cùng 1 pass beam search — không cần decode lần 2.
+    precomputed_features: nếu có, dùng thay vì tính fbank lại (ROVER shared fbank).
+    """
+    id2token = recognizer['id2token']
+    beam_size = recognizer.get('max_active_paths', 8)
+
+    # Compute fbank (hoặc dùng precomputed)
+    features = precomputed_features if precomputed_features is not None else compute_fbank_ort(audio_chunk, 16000)
+    if features.shape[0] == 0:
         return []
 
-    text = text.lower()
+    # Beam search decode (returns emit_logits for 1-pass entropy)
+    token_ids, frames, ys_log_probs_list, T, emit_logits = _ort_beam_search(
+        recognizer, features, beam_size)
 
-    if not (hasattr(result, 'timestamps') and hasattr(result, 'tokens')):
-        del s
+    if not token_ids:
         return []
 
-    ts = result.timestamps
-    toks = result.tokens
-    ys_log_probs = getattr(result, 'ys_log_probs', None)
+    V = recognizer['vocab_size']
+
+    # Convert token IDs to BPE token strings
+    toks = [id2token.get(tid, '') for tid in token_ids]
+
+    # Compute timestamps (frame index → seconds)
+    chunk_dur = len(audio_chunk) / 16000.0
+    ts = [f / T * chunk_dur for f in frames] if T > 0 else []
+
+    if not ts:
+        return []
 
     if len(ts) >= 2:
         avg_bpe_dur = (ts[-1] - ts[0]) / (len(ts) - 1)
     else:
         avg_bpe_dur = 0.08
 
+    # Compute entropy metrics from emit_logits (1-pass, no 2nd decode)
+    token_entropy = []
+    for j in range(len(token_ids)):
+        if j < len(emit_logits):
+            token_entropy.append(_compute_token_entropy(emit_logits[j], V))
+        else:
+            token_entropy.append(_ENTROPY_FALLBACK)
+
     chunk_words = []
     for j, (t_val, tok) in enumerate(zip(ts, toks)):
         local_start = t_val
         local_end = ts[j + 1] if j < len(ts) - 1 else local_start + avg_bpe_dur
-        prob = math.exp(ys_log_probs[j]) if ys_log_probs is not None and j < len(ys_log_probs) else 1.0
+        prob = math.exp(ys_log_probs_list[j]) if j < len(ys_log_probs_list) else 1.0
 
         chunk_words.append({
             "text": tok.lower(), "start": local_start + time_offset,
             "end": local_end + time_offset, "local_start": local_start,
             "local_end": local_end, "prob": prob,
+            "_ent": token_entropy[j] if j < len(token_entropy) else None,
         })
 
-    # Merge BPE tokens thành words
+    # Lưu raw BPE tokens/timestamps
+    _raw_bpe_tokens = list(toks)
+    _raw_bpe_timestamps_local = list(ts)
+
+    # Merge BPE tokens thành words (+ aggregate entropy per word)
     merged = []
     current_word = None
     for tok_info in chunk_words:
         tok = tok_info["text"]
+        ent = tok_info.get("_ent")
         if tok.startswith(" ") or tok.startswith("\u2581"):
             if current_word is not None:
-                current_word["prob"] = sum(current_word["probs"]) / len(current_word["probs"])
+                _finalize_word_entropy(current_word)
                 merged.append(current_word)
             current_word = {
                 "text": tok.lstrip(" ").lstrip("\u2581"),
@@ -731,6 +1248,7 @@ def decode_chunk(recognizer, audio_chunk, time_offset=0.0):
                 "local_start": tok_info["local_start"], "local_end": tok_info["local_end"],
                 "last_bpe_start": tok_info["start"],
                 "probs": [tok_info.get("prob", 1.0)],
+                "_ents": [ent] if ent else [],
             }
         else:
             if current_word is not None:
@@ -739,16 +1257,24 @@ def decode_chunk(recognizer, audio_chunk, time_offset=0.0):
                 current_word["local_end"] = tok_info["local_end"]
                 current_word["last_bpe_start"] = tok_info["start"]
                 current_word["probs"].append(tok_info.get("prob", 1.0))
+                if ent:
+                    current_word["_ents"].append(ent)
             else:
                 current_word = {
                     "text": tok, "start": tok_info["start"], "end": tok_info["end"],
                     "local_start": tok_info["local_start"], "local_end": tok_info["local_end"],
                     "last_bpe_start": tok_info["start"],
                     "probs": [tok_info.get("prob", 1.0)],
+                    "_ents": [ent] if ent else [],
                 }
     if current_word is not None:
-        current_word["prob"] = sum(current_word["probs"]) / len(current_word["probs"])
+        _finalize_word_entropy(current_word)
         merged.append(current_word)
+
+    # Attach raw BPE data vào word đầu tiên (để entropy module lấy được)
+    if merged:
+        merged[0]["_chunk_bpe_tokens"] = _raw_bpe_tokens
+        merged[0]["_chunk_bpe_timestamps_local"] = _raw_bpe_timestamps_local
 
     # Tính lại word.end dựa trên last_bpe_start + avg_bpe_duration
     for wi in range(len(merged)):
@@ -760,97 +1286,551 @@ def decode_chunk(recognizer, audio_chunk, time_offset=0.0):
         w["local_end"] = estimated_end - time_offset
         del w["last_bpe_start"]
 
-    del s
     return merged
+
+
+def _zscore(prob, mean, std):
+    """Chuyển prob thô thành z-score (bao nhiêu std trên/dưới mean)."""
+    if std < 0.01:
+        return 0.0
+    return (prob - mean) / std
+
+
+def _word_confidence(w):
+    """Confidence score cho 1 từ, kết hợp margin và tsallis. Range [0, 1].
+    margin cao + tsallis thấp = model rất chắc chắn."""
+    margin = w.get("margin_min")
+    tsallis = w.get("tsallis_max")
+    if margin is not None and tsallis is not None:
+        return margin * (1.0 - tsallis)
+    return w.get("prob", 0.5)
+
+
+def _block_confidence(words):
+    """Average confidence cho một block từ."""
+    if not words:
+        return 0.0
+    scores = [_word_confidence(w) for w in words]
+    return sum(scores) / len(scores)
+
+
+# ── Hotword bonus cho ROVER ──
+_hotword_phrases_cache = None
+
+
+def _get_hotword_phrases():
+    """Lấy list hotword phrases (lowercase) từ hotword.txt. Cache lần đầu."""
+    global _hotword_phrases_cache
+    if _hotword_phrases_cache is not None:
+        return _hotword_phrases_cache
+
+    from core.hotword_context import parse_hotwords_file
+    phrases = parse_hotwords_file(
+        os.path.join(BASE_DIR, "hotword.txt"))
+    # Normalize: lowercase, sorted dài → ngắn (match dài trước)
+    _hotword_phrases_cache = sorted(
+        [p.lower() for p, _ in phrases],
+        key=len, reverse=True)
+    return _hotword_phrases_cache
+
+
+def _count_hotword_matches(words, context_before=None, context_after=None):
+    """Đếm bao nhiêu từ trong block nằm trong hotword phrase.
+
+    Scan text block (+ context trước/sau) để match hotword.
+    Context giải quyết case: "ban" ở equal block + "tổ chức" ở replace block
+    → ghép lại "ban tổ chức" → match hotword "BAN TỔ CHỨC".
+
+    Chỉ đếm match trên từ trong block chính (không đếm context).
+
+    Args:
+        words: block words chính (replace block)
+        context_before: list words trước block (từ equal block trước)
+        context_after: list words sau block (từ equal block sau)
+
+    Returns: số từ trong block được hotword support / tổng từ (ratio 0.0 - 1.0)
+    """
+    if not words:
+        return 0.0
+    phrases = _get_hotword_phrases()
+    if not phrases:
+        return 0.0
+
+    # Ghép context + block + context
+    ctx_before = list(context_before or [])
+    ctx_after = list(context_after or [])
+    all_words = ctx_before + list(words) + ctx_after
+
+    text = ' '.join(normalize_word_for_overlap(w["text"]) for w in all_words)
+    matched_chars = set()
+
+    for phrase in phrases:
+        start = 0
+        while True:
+            idx = text.find(phrase, start)
+            if idx < 0:
+                break
+            for c in range(idx, idx + len(phrase)):
+                matched_chars.add(c)
+            start = idx + 1
+
+    if not matched_chars:
+        return 0.0
+
+    # Chỉ đếm match trên từ TRONG BLOCK (skip context)
+    n_matched_words = 0
+    pos = 0
+    block_start_idx = len(ctx_before)  # index đầu tiên của block trong all_words
+    block_end_idx = block_start_idx + len(words)
+
+    for wi, w in enumerate(all_words):
+        w_text = normalize_word_for_overlap(w["text"])
+        w_start = text.find(w_text, pos)
+        if w_start >= 0:
+            w_end = w_start + len(w_text)
+            # Chỉ đếm nếu từ nằm trong block chính
+            if block_start_idx <= wi < block_end_idx:
+                if any(c in matched_chars for c in range(w_start, w_end)):
+                    n_matched_words += 1
+            pos = w_end
+
+    return n_matched_words / len(words)
+
+
+# Hotword ROVER bonus: khi 1 block có hotword mà block kia không có,
+# cộng bonus vào confidence của block có hotword.
+# bonus = hw_ratio × HOTWORD_ROVER_BONUS
+# hw_ratio = % từ trong block match hotword
+# Giá trị 0.5: đủ mạnh để ưu tiên hotword khi confidence gần nhau,
+# nhưng không override khi confidence chênh quá lớn (>0.5)
+HOTWORD_ROVER_BONUS = 0.5
 
 
 def rover_merge_words(words_a, words_b):
     """
-    ROVER: Align và merge kết quả từ 2 model dựa trên timestamp.
+    ROVER v3: Confidence-based word selection giữa Model A và B.
 
     Quy tắc:
-    1. Cả 2 model cùng từ → giữ (đồng thuận), lấy prob cao hơn
-    2. Khác từ → chọn từ có prob cao hơn
-    3. Chỉ 1 model có từ, prob >= 0.7 → giữ (model kia bỏ sót)
-    4. Chỉ 1 model có từ, prob < 0.5 → bỏ (hallucination)
+    1. equal → giữ A (cả 2 đồng ý)
+    2. replace → so sánh block-level confidence trực tiếp, chọn block tốt hơn
+    3. insert (B only) → bổ sung nếu B confidence > 0.20
+    4. delete (A only) → giữ A
+
+    Returns: (merged_words, disagree_indices)
     """
     if not words_a:
-        return words_b
+        return list(words_b) if words_b else [], set()
     if not words_b:
-        return words_a
+        return list(words_a), set()
 
-    # Align bằng timestamp: match từng từ trong A với từ gần nhất trong B
-    TIME_TOLERANCE = 0.2  # seconds
+    texts_a = [normalize_word_for_overlap(w["text"]) for w in words_a]
+    texts_b = [normalize_word_for_overlap(w["text"]) for w in words_b]
 
-    used_b = set()
-    pairs = []  # (word_a, word_b, time)
+    matcher = SequenceMatcher(None, texts_a, texts_b, autojunk=False)
 
-    for wa in words_a:
-        best_match = None
-        best_dist = TIME_TOLERANCE
-        for bi, wb in enumerate(words_b):
-            if bi in used_b:
-                continue
-            dist = abs(wa["start"] - wb["start"])
-            if dist < best_dist:
-                best_dist = dist
-                best_match = bi
-        if best_match is not None:
-            used_b.add(best_match)
-            pairs.append((wa, words_b[best_match]))
-        else:
-            pairs.append((wa, None))
-
-    # Từ trong B không match với A nào
-    for bi, wb in enumerate(words_b):
-        if bi not in used_b:
-            pairs.append((None, wb))
-
-    # Sort by timestamp
-    def pair_time(p):
-        wa, wb = p
-        if wa and wb:
-            return min(wa["start"], wb["start"])
-        return (wa or wb)["start"]
-    pairs.sort(key=pair_time)
-
-    # Merge
     result = []
-    for wa, wb in pairs:
-        if wa and wb:
-            na = normalize_word_for_overlap(wa["text"])
-            nb = normalize_word_for_overlap(wb["text"])
-            if na == nb:
-                # Đồng thuận — giữ, lấy prob cao hơn
-                chosen = wa if wa.get("prob", 0) >= wb.get("prob", 0) else wb
-                result.append(chosen)
+    n_replace_b = 0
+    n_replace_total = 0
+    n_sup = 0
+
+    # Pre-compute opcodes để truy cập context trước/sau mỗi replace block
+    opcodes = matcher.get_opcodes()
+    CONTEXT_WORDS = 3  # số từ context trước/sau block để match hotword
+
+    for oi, (tag, i1, i2, j1, j2) in enumerate(opcodes):
+        if tag == 'equal':
+            result.extend(words_a[i1:i2])
+
+        elif tag == 'replace':
+            block_a = words_a[i1:i2]
+            block_b = words_b[j1:j2]
+
+            conf_a = _block_confidence(block_a)
+            conf_b = _block_confidence(block_b)
+
+            # Lấy context trước/sau từ equal blocks lân cận
+            ctx_before_a = ctx_before_b = None
+            ctx_after_a = ctx_after_b = None
+            if oi > 0:
+                pt, pi1, pi2, pj1, pj2 = opcodes[oi - 1]
+                if pt == 'equal':
+                    ctx_before_a = words_a[max(pi1, pi2 - CONTEXT_WORDS):pi2]
+                    ctx_before_b = words_b[max(pj1, pj2 - CONTEXT_WORDS):pj2]
+            if oi < len(opcodes) - 1:
+                nt, ni1, ni2, nj1, nj2 = opcodes[oi + 1]
+                if nt == 'equal':
+                    ctx_after_a = words_a[ni1:min(ni2, ni1 + CONTEXT_WORDS)]
+                    ctx_after_b = words_b[nj1:min(nj2, nj1 + CONTEXT_WORDS)]
+
+            # Hotword tiebreaker: match hotword với context rộng
+            # VD: equal="ban" + replace_B="tổ chức ký" → context "ban tổ chức ký" → match "BAN TỔ CHỨC"
+            hw_a = _count_hotword_matches(block_a, ctx_before_a, ctx_after_a)
+            hw_b = _count_hotword_matches(block_b, ctx_before_b, ctx_after_b)
+
+            if hw_a > 0 and hw_b == 0:
+                conf_a += hw_a * HOTWORD_ROVER_BONUS
+            elif hw_b > 0 and hw_a == 0:
+                conf_b += hw_b * HOTWORD_ROVER_BONUS
+
+            n_replace_total += 1
+
+            if conf_b > conf_a:
+                chosen = block_b
+                n_replace_b += 1
             else:
-                # Khác nhau — chọn prob cao hơn
-                chosen = wa if wa.get("prob", 0) >= wb.get("prob", 0) else wb
-                if DEBUG_LOGGING:
-                    loser = wb if chosen is wa else wa
-                    print(f"[ROVER] '{chosen['text']}'({chosen.get('prob', 0):.3f}) "
-                          f"beats '{loser['text']}'({loser.get('prob', 0):.3f}) "
-                          f"at t={chosen['start']:.2f}")
-                result.append(chosen)
-        elif wa:
-            # Chỉ model A có — cần prob >= 0.6 để giữ
-            prob = wa.get("prob", 0)
-            if prob >= 0.6:
-                result.append(wa)
+                chosen = block_a
+
+            for w in chosen:
+                w["_disagree"] = True
+            result.extend(chosen)
+
+        elif tag == 'delete':
+            result.extend(words_a[i1:i2])
+
+        elif tag == 'insert':
+            for k in range(j1, j2):
+                wb = words_b[k]
+                if _word_confidence(wb) > 0.20:
+                    wb["_source"] = "B_supplement"
+                    wb["_disagree"] = True
+                    result.append(wb)
+                    n_sup += 1
+
+    # Sort theo timestamp (supplements từ insert có thể nằm sai vị trí)
+    result.sort(key=lambda w: w["start"])
+
+    # Dedup: nếu B_supplement trùng timestamp với từ đã có → bỏ
+    if n_sup > 0:
+        deduped = []
+        for w in result:
+            if w.get("_source") == "B_supplement":
+                overlap = False
+                w_norm = normalize_word_for_overlap(w["text"])
+                for existing in deduped:
+                    if (existing.get("_source") != "B_supplement" and
+                        abs(existing["start"] - w["start"]) < 0.15 and
+                        normalize_word_for_overlap(existing["text"]) == w_norm):
+                        overlap = True
+                        break
+                if not overlap:
+                    deduped.append(w)
+                else:
+                    n_sup -= 1
+                    if DEBUG_LOGGING:
+                        print(f"[ROVER] Dropped duplicate B-supplement '{w['text']}' "
+                              f"at t={w['start']:.2f}")
             else:
-                if DEBUG_LOGGING:
-                    print(f"[ROVER] Dropped A-only '{wa['text']}'({prob:.3f}) at t={wa['start']:.2f}")
+                deduped.append(w)
+        result = deduped
+
+    # Build disagree indices từ _disagree flag
+    final_disagree = set()
+    for i, w in enumerate(result):
+        if w.get("_disagree"):
+            final_disagree.add(i)
+
+    # Cleanup _source tag, GIỮ _disagree flag trên word dict
+    # để rebuild index chính xác sau merge_chunks_with_overlap
+    for w in result:
+        w.pop("_source", None)
+
+    if n_replace_total > 0 or n_sup > 0:
+        print(f"[ROVER] Replace: {n_replace_b}/{n_replace_total}→B | Sup: {n_sup}")
+
+    return result, final_disagree
+
+
+# =============================================================================
+# FILLER REMOVAL: Xóa từ vô nghĩa đứng riêng lẻ (à, ờ, á, a, ...)
+# =============================================================================
+
+FILLER_WORDS = {"à", "ờ", "ừ", "ơ", "uh", "um"}
+
+
+def remove_filler_words(words):
+    """
+    Xóa các từ vô nghĩa (filler) đứng riêng lẻ sau ASR.
+    Chỉ xóa khi từ nằm đơn lẻ (không phải phần của cụm có nghĩa).
+    """
+    if not words:
+        return words
+
+    result = []
+    removed = 0
+    for w in words:
+        if w["text"].lower() in FILLER_WORDS:
+            removed += 1
+            if DEBUG_LOGGING:
+                print(f"[Filler] Removed '{w['text']}' at t={w['start']:.2f}")
         else:
-            # Chỉ model B có — cần prob >= 0.6 để giữ
-            prob = wb.get("prob", 0)
-            if prob >= 0.6:
-                result.append(wb)
-            else:
-                if DEBUG_LOGGING:
-                    print(f"[ROVER] Dropped B-only '{wb['text']}'({prob:.3f}) at t={wb['start']:.2f}")
+            result.append(w)
+
+    if removed > 0:
+        print(f"[Filler] Removed {removed} filler words ({len(words)} → {len(result)})")
 
     return result
+
+
+# =============================================================================
+# GAP RECOVER: Phát hiện từ bị miss qua phân tích gap giữa từ ASR,
+# re-ASR bằng resample slowdown để recover từ bị thiếu.
+# Thay thế Peak Surgery cũ — chính xác hơn nhờ phân tích từng gap.
+# =============================================================================
+
+
+
+def count_energy_peaks(audio_segment, sr=16000, threshold_factor=1.0):
+    """Đếm syllable peaks dựa trên energy envelope. Trả về peak times (seconds)."""
+    from scipy.signal import find_peaks as _find_peaks
+
+    frame_len = int(sr * 0.010)
+    hop_len = int(sr * 0.005)
+    num_frames = max(1, (len(audio_segment) - frame_len) // hop_len + 1)
+
+    energy = np.zeros(num_frames)
+    for i in range(num_frames):
+        start = i * hop_len
+        frame = audio_segment[start:start + frame_len]
+        if len(frame) > 0:
+            energy[i] = np.sqrt(np.mean(frame ** 2))
+
+    kernel = np.hanning(7)
+    kernel /= kernel.sum()
+    energy_smooth = np.convolve(energy, kernel, mode='same')
+
+    non_silence = energy_smooth[energy_smooth > np.max(energy_smooth) * 0.05]
+    if len(non_silence) == 0:
+        return []
+
+    threshold = np.mean(non_silence) * threshold_factor
+    min_dist = int(90 / (hop_len / sr * 1000))
+
+    peaks, _ = _find_peaks(energy_smooth, distance=min_dist, height=threshold,
+                           prominence=threshold * 0.3)
+    return (peaks * hop_len / sr).tolist()
+
+
+
+def _compute_gap_features(audio_segment, sr=16000):
+    """Tính erange và sbr cho một đoạn audio trong gap."""
+    if len(audio_segment) < 50:
+        return 0.0, 0.0
+
+    # Energy range (dao động sóng âm)
+    frame_len = int(sr * 0.010)
+    hop_len = int(sr * 0.005)
+    num_frames = max(1, (len(audio_segment) - frame_len) // hop_len + 1)
+    frame_energies = np.array([
+        np.sqrt(np.mean(audio_segment[i * hop_len:i * hop_len + frame_len] ** 2))
+        for i in range(num_frames)
+    ])
+    erange = float(np.max(frame_energies) - np.min(frame_energies))
+
+    # Speech band ratio (tỷ lệ năng lượng dải giọng nói 300-3000Hz)
+    n_fft = min(512, len(audio_segment))
+    fft_mag = np.abs(np.fft.rfft(audio_segment[:n_fft] * np.hanning(n_fft)))
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    speech_band = (freqs >= 300) & (freqs <= 3000)
+    total_energy = np.sum(fft_mag ** 2) + 1e-10
+    sbr = float(np.sum(fft_mag[speech_band] ** 2) / total_energy)
+
+    return erange, sbr
+
+
+def compute_disagree_indices(words_main, words_other_text):
+    """
+    So sánh text ASR chính vs model thứ 2, trả về set indices trong words_main
+    mà 2 model khác nhau (disagree).
+
+    Args:
+        words_main: list of word dicts (ASR chính)
+        words_other_text: list of strings (text từ model thứ 2)
+
+    Returns:
+        set of indices trong words_main có disagree
+    """
+    main_text = [normalize_word_for_overlap(w["text"]) for w in words_main]
+    other_text = [normalize_word_for_overlap(w) for w in words_other_text]
+
+    matcher = SequenceMatcher(None, main_text, other_text)
+    disagree = set()
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+        # replace, delete: từ phía main khác other
+        for k in range(i1, i2):
+            disagree.add(k)
+        # insert: chỉ other có → flag neighbor trong main
+        if tag == 'insert':
+            if i1 > 0:
+                disagree.add(i1 - 1)
+            if i1 < len(main_text):
+                disagree.add(i1)
+
+    return disagree
+
+
+def suspect_detect(all_words, audio, disagree_indices=None):
+    """
+    Phát hiện từ nghi ngờ ASR lỗi (sai từ, thiếu từ, dư từ).
+    Kết hợp tín hiệu:
+      1. Disagree: 2 model Zipformer khác nhau → gần chắc chắn khó
+      2. Tsallis entropy (alpha=1/3, max aggregation): đo sự phân vân của model,
+         nhạy hơn Shannon entropy với đáp án cạnh tranh yếu (NVIDIA 2025)
+      3. Gap acoustic: phát hiện từ bị thiếu giữa 2 từ
+
+    Strategy hiện tại: "disagree OR (tsallis_max > 0.04 AND margin_min < 0.6)"
+    Benchmark 2026-03-28 (beam search 1-pass entropy):
+      test_vimd (sạch): F1=0.332, %to=2.9%
+      11_min (nhiễu):   F1=0.433, %to=12.2%
+
+    TODO: Tích hợp ChunkFormer CTC dominance (khanhld/chunkformer-ctc-large-vie)
+    khi chấp nhận được dung lượng (+558MB RAM, +587MB disk).
+    Tốc độ ChunkFormer nhanh (~48s/22min audio, ~16s/11min audio).
+    Strategy nâng cấp: "disagree OR (tsallis_max > 0.06 AND cf_dom_min < 10)"
+    → Yêu cầu CẢ Zipformer phân vân (tsallis) VÀ ChunkFormer CTC phân vân (dominance)
+    → Recall 63-81%, precision 43-45% (+4% recall, precision giữ nguyên)
+    Cách implement:
+      - Load ChunkFormer: ChunkFormerModel.from_pretrained('khanhld/chunkformer-ctc-large-vie')
+      - Monkey-patch model.model.ctc.log_softmax để capture CTC logits [T, 6992]
+      - model.endless_decode(file_path, chunk_size=64, left/right_context=128)
+      - dominance = top1_prob / top2_prob mỗi CTC frame (lọc blank token!=0)
+      - Map sang Zip words bằng timestamp: fps = T_frames / audio_duration
+      - Mỗi word: cf_dom_min = min(dominance) trong non-blank frames
+    Xem d:/tmp/asr-vn-research/test_3signals.py cho reference implementation.
+
+    Args:
+        all_words: list of word dicts (có 'text','start','end','prob',
+                   và 'tsallis_max'/'entropy_norm' nếu đã tính entropy trước)
+        audio: numpy array audio (cho gap detection)
+        disagree_indices: set of int — indices trong all_words mà 2 model khác nhau
+                          (None nếu không có model thứ 2)
+
+    Returns:
+        all_words đã được gắn '_suspect_level' = "warning" vào từ nghi ngờ.
+    """
+    sr = 16000
+    if len(all_words) < 2:
+        return all_words
+
+    n = len(all_words)
+    suspect_flags = [False] * n
+    gap_suspect_indices = set()
+
+    # ── Kiểm tra có entropy data không ──
+    has_tsallis = any(w.get("tsallis_max") is not None for w in all_words)
+    has_entropy = any(w.get("entropy_norm") is not None for w in all_words)
+    has_disagree = disagree_indices is not None and len(disagree_indices) > 0
+
+    # ── WORD-LEVEL SCORING ──
+    # Tsallis entropy (alpha=1/3, max aggregation) + margin_min (p1-p2):
+    # Tsallis đo model phân vân, margin_min đo khoảng cách top1-top2 nhỏ nhất.
+    # AND kết hợp: chỉ flag khi CẢ 2 tín hiệu đồng ý (tsallis cao VÀ margin thấp).
+    # Benchmark 2026-03-28: F1 tăng gấp 2 so với ngưỡng cũ (0.08/0.5).
+    #   test_vimd (sạch): F1=0.332, %to=2.9%
+    #   11_min (nhiễu):   F1=0.433, %to=12.2%
+    TSALLIS_TH = 0.04       # tsallis_max > 0.04 (cũ: 0.08)
+    MARGIN_TH = 0.6         # margin_min < 0.6 (cũ: 0.5)
+    ENTROPY_TH = 0.10       # fallback Shannon nếu chưa có tsallis
+
+    has_margin = any(w.get("margin_min") is not None for w in all_words)
+
+    for i in range(n):
+        # Tín hiệu 1: Disagree (2 model ra từ khác nhau)
+        if has_disagree and i in disagree_indices:
+            suspect_flags[i] = True
+            continue
+
+        # Tín hiệu 2: Tsallis entropy AND margin_min (cả 2 phải thỏa)
+        if has_tsallis:
+            ts = all_words[i].get("tsallis_max")
+            mg = all_words[i].get("margin_min")
+            if ts is not None and ts > TSALLIS_TH:
+                if has_margin and mg is not None:
+                    # AND: tsallis cao VÀ margin thấp → model thực sự phân vân
+                    if mg < MARGIN_TH:
+                        suspect_flags[i] = True
+                else:
+                    # Không có margin data → dùng tsallis alone (ngưỡng chặt hơn)
+                    if ts > 0.12:
+                        suspect_flags[i] = True
+        elif has_entropy:
+            ent = all_words[i].get("entropy_norm")
+            if ent is not None and ent > ENTROPY_TH:
+                suspect_flags[i] = True
+
+    # ── GAP-LEVEL DETECTION ──
+    GAP_MIN_MS = 200
+    GAP_VAD_TH = 0.90
+    GAP_ERANGE_TH = 0.04
+    GAP_LONG_MS = 500
+    GAP_PEAKS_TH = 3
+
+    for i in range(n - 1):
+        wc, wn = all_words[i], all_words[i + 1]
+        gap_start = wc["end"]
+        gap_end = wn["start"]
+        gap_ms = (gap_end - gap_start) * 1000
+
+        if gap_ms < GAP_MIN_MS:
+            continue
+
+        gs = int(gap_start * sr)
+        ge = int(gap_end * sr)
+        if gs >= ge or gs < 0 or ge > len(audio):
+            continue
+
+        gap_audio = audio[gs:ge]
+        if len(gap_audio) < 80:
+            continue
+
+        peaks = count_energy_peaks(gap_audio, sr)
+        gap_erange, _ = _compute_gap_features(gap_audio, sr)
+
+        from core.vad_utils import get_cached_vad_probs
+        vad_probs = get_cached_vad_probs()
+        vad_max_val = 0.0
+        if vad_probs is not None:
+            w0 = max(0, min(gs // 512, len(vad_probs) - 1))
+            w1 = max(w0 + 1, min(ge // 512, len(vad_probs)))
+            gv = vad_probs[w0:w1]
+            if len(gv) > 0:
+                vad_max_val = float(np.max(gv))
+
+        if (vad_max_val >= GAP_VAD_TH
+                and (gap_ms >= GAP_LONG_MS or len(peaks) >= GAP_PEAKS_TH)
+                and gap_erange >= GAP_ERANGE_TH):
+            gap_suspect_indices.add(i)
+            wc["gap_after_ms"] = int(gap_ms)
+            wn["gap_before_ms"] = int(gap_ms)
+
+    # ── GÁN KẾT QUẢ ──
+    n_disagree = n_entropy = n_gap = 0
+    for i in range(n):
+        if suspect_flags[i]:
+            all_words[i]["_suspect_level"] = "warning"
+            if has_disagree and i in disagree_indices:
+                n_disagree += 1
+            else:
+                n_entropy += 1
+        elif i in gap_suspect_indices or (i > 0 and i - 1 in gap_suspect_indices):
+            all_words[i]["_suspect_level"] = "warning"
+            n_gap += 1
+
+    n_total = n_disagree + n_entropy + n_gap
+    ent_label = "tsallis+margin" if (has_tsallis and has_margin) else ("tsallis" if has_tsallis else "entropy")
+    if n_total > 0:
+        print(f"[SuspectDetect] {n_total}/{n} từ nghi ngờ "
+              f"({n_total * 100 / n:.0f}%): "
+              f"{n_disagree} disagree + {n_entropy} {ent_label} + {n_gap} gap")
+
+    return all_words
+
+
+
+
+
 
 
 # =============================================================================
@@ -898,6 +1878,20 @@ class TranscriberPipeline:
             dict với keys: text, segments, timing, paragraphs,
                           has_speaker_diarization, speaker_segments_raw
         """
+        try:
+            return self._run_pipeline()
+        finally:
+            # Đảm bảo giải phóng tất cả model nếu save_ram=True, dù pipeline lỗi
+            # (idempotent — nếu đã clear bên trong thì gọi lại không ảnh hưởng)
+            if self.config.get("save_ram", False):
+                try:
+                    clear_model_cache("all")
+                    unload_vad_model()
+                except Exception:
+                    pass
+
+    def _run_pipeline(self):
+        """Internal pipeline implementation."""
         start_time = time.time()
         self._emit("PHASE:Init|Đang khởi tạo mô hình|0")
 
@@ -940,9 +1934,9 @@ class TranscriberPipeline:
             primary_path = os.path.join(models_dir, ROVER_MODEL_IDS[0])
             secondary_path = os.path.join(models_dir, ROVER_MODEL_IDS[1])
 
-            recognizer = create_recognizer(primary_path, cpu_threads, max_active_paths=12)
+            recognizer = create_recognizer(primary_path, cpu_threads, max_active_paths=8)
             self._emit("PHASE:Init|Đang khởi tạo mô hình phụ (ROVER)|40")
-            rover_recognizer = create_recognizer(secondary_path, cpu_threads, max_active_paths=12)
+            rover_recognizer = create_recognizer(secondary_path, cpu_threads, max_active_paths=8)
             self._emit("PHASE:Init|Đã khởi tạo 2 mô hình (ROVER)|60")
             print(f"[ROVER] Loaded 2 models: {ROVER_MODEL_IDS[0]} + {ROVER_MODEL_IDS[1]}")
         else:
@@ -970,23 +1964,73 @@ class TranscriberPipeline:
         # Segment audio
         total_samples = len(audio)
 
-        # --- VAD-based segmentation ---
+        # --- VAD-based segmentation → concat speech → silence-based chunking ---
+        # Pipeline: VAD → preprocess → concat speech (bỏ silence) → chunk 30s → ASR → map timestamp về gốc
+        vad_segments = None
+        offset_map = None    # map timestamp concat → original
+        concat_audio = None  # audio chỉ chứa speech (dùng cho ASR)
+
         try:
             self._emit("PHASE:VAD|Đang phát hiện vùng có tiếng nói|0")
             vad_segments = get_vad_segments(audio, progress_callback=self._emit)
             self._emit(f"PHASE:VAD|Phát hiện {len(vad_segments)} đoạn nói|100")
 
-            # Build chunk plan từ VAD segments
-            chunk_plan = []  # [(actual_start, actual_end, overlap_at_start, vad_group_idx)]
-            for vad_idx, (seg_start, seg_end) in enumerate(vad_segments):
-                sub_chunks = chunk_long_segment(seg_start, seg_end, max_sec=30, overlap_sec=OVERLAP_SEC)
-                for (c_start, c_end, c_overlap) in sub_chunks:
-                    chunk_plan.append((c_start, c_end, c_overlap, vad_idx))
-
             total_speech_sec = sum(e - s for s, e in vad_segments) / 16000.0
             total_audio_sec = total_samples / 16000.0
-            print(f"[VAD] {len(vad_segments)} VAD segments -> {len(chunk_plan)} chunks "
+            print(f"[VAD] {len(vad_segments)} segments "
                   f"({total_speech_sec:.1f}s speech / {total_audio_sec:.1f}s audio)")
+
+            # --- Audio preprocessing (RMS normalize trên full audio, cần global VAD context) ---
+            if not self.config.get("skip_preprocessing", False):
+                try:
+                    from core.audio_preprocessing import preprocess_audio
+                    preprocess_start = time.time()
+                    audio = preprocess_audio(
+                        audio, vad_segments,
+                        sample_rate=16000,
+                        enable_rms_normalize=self.config.get("preprocess_rms_normalize", False),
+                        progress_callback=self._emit,
+                    )
+                    preprocess_time = time.time() - preprocess_start
+                    timing_details["preprocessing"] = preprocess_time
+                    print(f"[Preprocess] Done in {preprocess_time:.2f}s")
+                except Exception as e:
+                    print(f"[Preprocess] Error (skipping): {e}")
+
+            # --- Concat speech: nối VAD segments, bỏ silence ---
+            self._emit("PHASE:VAD|Đang nối các đoạn nói|95")
+            concat_audio, offset_map = concat_vad_speech(audio, vad_segments)
+            silence_removed = (total_samples - len(concat_audio)) / 16000.0
+            print(f"[Concat] {len(vad_segments)} segments -> {len(concat_audio)/16000.0:.1f}s speech "
+                  f"(bỏ {silence_removed:.1f}s silence)")
+
+            # --- Silence-based chunking trên concat audio ---
+            concat_total = len(concat_audio)
+            concat_silent_regions = find_silent_regions(concat_audio)
+
+            segment_samples = 16000 * 30
+            segment_boundaries = [0]
+            current_pos = 0
+            while current_pos + segment_samples < concat_total:
+                target = current_pos + segment_samples
+                best_split = find_best_split_point(target, concat_total, concat_silent_regions)
+                if best_split <= current_pos + 20 * 16000:
+                    best_split = target
+                segment_boundaries.append(best_split)
+                current_pos = best_split
+            segment_boundaries.append(concat_total)
+
+            chunk_plan = []  # [(start, end, overlap_at_start)] trên concat_audio
+            for i in range(len(segment_boundaries) - 1):
+                logical_start = segment_boundaries[i]
+                logical_end = segment_boundaries[i + 1]
+                if i == 0:
+                    chunk_plan.append((logical_start, logical_end, 0))
+                else:
+                    actual_start = max(0, logical_start - OVERLAP_SAMPLES)
+                    chunk_plan.append((actual_start, logical_end, logical_start - actual_start))
+
+            print(f"[Chunk] {len(chunk_plan)} chunks trên concat audio")
 
             # Giải phóng VAD model trước khi transcribe
             if self.config.get("save_ram", False):
@@ -995,13 +2039,15 @@ class TranscriberPipeline:
                 gc.collect()
 
         except Exception as e:
-            # Fallback: dùng silence-based chunking nếu VAD lỗi
+            # Fallback: silence-based chunking trên original audio nếu VAD lỗi
             print(f"[VAD] Error: {e}, fallback to silence-based chunking")
             self._emit("PHASE:LoadAudio|Đang phân tích khoảng lặng (fallback)|60")
-            silent_regions = find_silent_regions(audio)
 
-            segment_duration = 30
-            segment_samples = 16000 * segment_duration
+            concat_audio = audio  # fallback: dùng nguyên audio gốc
+            offset_map = [(0, 0, total_samples)]  # identity map
+
+            silent_regions = find_silent_regions(audio)
+            segment_samples = 16000 * 30
             segment_boundaries = [0]
             current_pos = 0
             while current_pos + segment_samples < total_samples:
@@ -1018,70 +2064,111 @@ class TranscriberPipeline:
                 logical_start = segment_boundaries[i]
                 logical_end = segment_boundaries[i + 1]
                 if i == 0:
-                    chunk_plan.append((logical_start, logical_end, 0, 0))
+                    chunk_plan.append((logical_start, logical_end, 0))
                 else:
                     actual_start = max(0, logical_start - OVERLAP_SAMPLES)
-                    chunk_plan.append((actual_start, logical_end, logical_start - actual_start, 0))
+                    chunk_plan.append((actual_start, logical_end, logical_start - actual_start))
 
         num_chunks = len(chunk_plan)
 
-        # Transcribe each chunk
+        # Entropy đã tính trong decode_chunk (1-pass beam search) — không cần setup riêng
+
+        # Transcribe each chunk (trên concat_audio)
         chunk_results = []
         phase_label = "Đang chuyển thành văn bản (ROVER)" if is_rover else "Đang chuyển thành văn bản"
         self._emit(f"PHASE:Transcription|{phase_label}|0")
 
-        for i, (actual_start, actual_end, overlap_at_start, vad_idx) in enumerate(chunk_plan):
+        rover_raw_a = []
+        rover_raw_b = []
+
+        for i, (actual_start, actual_end, overlap_at_start) in enumerate(chunk_plan):
             if self._is_cancelled():
                 return None
 
-            chunk_audio = audio[actual_start:actual_end]
-            time_offset = actual_start / 16000.0
+            chunk_audio = concat_audio[actual_start:actual_end]
+            concat_time_offset = actual_start / 16000.0
 
-            # Decode với model chính
-            chunk_words = decode_chunk(recognizer, chunk_audio, time_offset)
+            # WPE dereverberation per-chunk (nếu bật)
+            if self.config.get("preprocess_wpe", False):
+                try:
+                    from core.audio_preprocessing import apply_wpe_dereverberation, adaptive_peak_limit
+                    chunk_audio = apply_wpe_dereverberation(chunk_audio)
+                    chunk_audio = adaptive_peak_limit(chunk_audio)
+                except Exception as e:
+                    logger.warning(f"[WPE] Chunk {i} error (skipping): {e}")
 
-            # ROVER: decode với model phụ và merge
+            # Decode — timestamps ở concat space
+            # Tính fbank 1 lần, dùng chung cho cả 2 model (ROVER)
+            shared_fbank = compute_fbank_ort(chunk_audio, 16000) if is_rover else None
+            chunk_words = decode_chunk(recognizer, chunk_audio, concat_time_offset,
+                                       precomputed_features=shared_fbank)
+
             if is_rover and rover_recognizer is not None:
-                chunk_words_b = decode_chunk(rover_recognizer, chunk_audio, time_offset)
-                chunk_words = rover_merge_words(chunk_words, chunk_words_b)
-                # Dedup ngay sau ROVER merge để xóa duplicate do timestamp lệch giữa 2 model
-                chunk_words = remove_repeated_ngrams(chunk_words, max_gap_sec=0.8)
+                # Model B: beam=4 (tối ưu cho 2025, entropy đáng tin cậy hơn greedy)
+                chunk_words_b = decode_chunk(rover_recognizer, chunk_audio, concat_time_offset,
+                                             precomputed_features=shared_fbank)
 
-            if chunk_words:
-                segment_text = " ".join(w["text"] for w in chunk_words)
-                chunk_results.append({
-                    "text": segment_text,
-                    "words": chunk_words,
-                    "audio_start_abs": time_offset,
-                    "audio_end_abs": actual_end / 16000.0,
-                    "overlap_sec": overlap_at_start / 16000.0,
-                    "vad_group": vad_idx,
-                })
+                # Map timestamps từ concat space → original audio space
+                for w in chunk_words:
+                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
+                for w in chunk_words_b:
+                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
+
+                rover_raw_a.append(chunk_words)
+                rover_raw_b.append(chunk_words_b)
+                chunk_words_for_result = chunk_words
             else:
-                chunk_results.append({
-                    "text": "",
-                    "words": [],
-                    "audio_start_abs": time_offset,
-                    "audio_end_abs": actual_end / 16000.0,
-                    "overlap_sec": overlap_at_start / 16000.0,
-                    "vad_group": vad_idx,
-                })
+                # Entropy đã tính trong decode_chunk (1-pass)
+
+                # Map timestamps
+                for w in chunk_words:
+                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
+
+                chunk_words_for_result = chunk_words
+
+            chunk_results.append({
+                "text": " ".join(w["text"] for w in chunk_words_for_result) if chunk_words_for_result else "",
+                "words": chunk_words_for_result,
+                "audio_start_abs": concat_time_offset,
+                "audio_end_abs": actual_end / 16000.0,
+                "overlap_sec": overlap_at_start / 16000.0,
+                "vad_group": 0,
+            })
 
             percent = int((i + 1) / num_chunks * 100)
             self._emit(f"PHASE:Transcription|{phase_label}|{percent}")
 
-        # Merge chunks (group by vad_group, chỉ merge overlap trong cùng VAD segment)
+        # ROVER: giữ A, bổ sung phần dư từ B, track disagree
+        rover_disagree = set()
+        if is_rover and rover_raw_a:
+            self._emit("PHASE:Transcription|Đang merge ROVER (A + B supplement)|99")
+
+            word_offset = 0  # track global index cho disagree_indices
+            for ci in range(len(rover_raw_a)):
+                words_a = rover_raw_a[ci]
+                words_b = rover_raw_b[ci]
+
+                merged, chunk_disagree = rover_merge_words(words_a, words_b)
+                merged = remove_repeated_ngrams(merged, max_gap_sec=0.8)
+
+                # Shift disagree indices to global
+                for idx in chunk_disagree:
+                    rover_disagree.add(word_offset + idx)
+
+                chunk_results[ci]["words"] = merged
+                chunk_results[ci]["text"] = " ".join(w["text"] for w in merged) if merged else ""
+                word_offset += len(merged)
+
+        # Merge chunks overlap (tất cả cùng 1 group vì đã concat)
         all_words = []
-        from itertools import groupby
-        for vad_idx, group_iter in groupby(chunk_results, key=lambda cr: cr.get("vad_group", 0)):
-            group_chunks = list(group_iter)
-            if len(group_chunks) == 1:
-                # VAD segment ngắn, không chunk → lấy trực tiếp
-                all_words.extend(group_chunks[0]["words"])
-            else:
-                # VAD segment dài bị chunk → merge overlap
-                merged_w, _ = merge_chunks_with_overlap(group_chunks, OVERLAP_SEC)
-                all_words.extend(merged_w)
+        if len(chunk_results) == 1:
+            all_words.extend(chunk_results[0]["words"])
+        elif len(chunk_results) > 1:
+            merged_w, _ = merge_chunks_with_overlap(chunk_results, OVERLAP_SEC)
+            all_words.extend(merged_w)
 
         full_text = " ".join(w["text"] for w in all_words)
 
@@ -1090,15 +2177,366 @@ class TranscriberPipeline:
 
         print(f"[Transcriber] Merged chunks into {len(all_words)} words")
 
+        # Entropy: đã tính per-chunk trong transcription loop → không cần tính lại
+        # (cả single-model và ROVER đều tính entropy trong loop trên)
+
+        # ── Disagree: rebuild từ _disagree flag trên word dict (stable sau mọi merge/cut) ──
+        if is_rover:
+            disagree_indices = set()
+            for i, w in enumerate(all_words):
+                if w.get("_disagree"):
+                    disagree_indices.add(i)
+                    w.pop("_disagree", None)  # cleanup sau khi rebuild
+            disagree_indices = disagree_indices if disagree_indices else None
+        else:
+            disagree_indices = None
+
+        if disagree_indices:
+            print(f"[Disagree] ROVER: {len(disagree_indices)}/{len(all_words)} từ "
+                  f"({len(disagree_indices)*100/max(1,len(all_words)):.1f}%)")
+
+        # Suspect Detect: disagree OR entropy (tsallis > 0.04 AND margin < 0.6)
+        all_words = suspect_detect(all_words, audio, disagree_indices=disagree_indices)
+
+        # Xóa từ vô nghĩa (filler words)
+        all_words = remove_filler_words(all_words)
+        full_text = " ".join(w["text"] for w in all_words)
+        if full_text:
+            full_text = full_text.capitalize()
+
         transcription_end_time = time.time()
         timing_details["transcription"] = transcription_end_time - start_time - timing_details["upload_convert"]
+
+        # Giải phóng ASR recognizer nếu tiết kiệm RAM
+        # (recognizer không còn cần sau transcription)
+        if self.config.get("save_ram", False):
+            clear_model_cache("recognizer")
 
         restore_duration = 0.0
         final_segments = []
         paragraphs = []
 
-        # Punctuation restoration
-        if restore_punctuation and full_text:
+        # ══════════════════════════════════════════════════════
+        # Speaker diarization — chạy TRƯỚC punctuation
+        # Flow: diarization gán speaker cho all_words → split by speaker →
+        #       punctuation per speaker → sentence split
+        # ══════════════════════════════════════════════════════
+        speaker_segments = []
+        speaker_segments_raw = []
+        diarization_start = None
+        _diar_speaker_groups = None
+
+        if self.config.get("speaker_diarization", False) and all_words:
+            try:
+                from core.speaker_diarization import SpeakerDiarizer
+                DIARIZATION_AVAILABLE = True
+            except ImportError:
+                DIARIZATION_AVAILABLE = False
+
+            if DIARIZATION_AVAILABLE:
+                try:
+                    diarization_start = time.time()
+                    self._emit("PHASE:Diarization|Đang phân tách Người nói|0")
+
+                    num_speakers = self.config.get("num_speakers", 2)
+                    speaker_model_id = self.config.get("speaker_model", "titanet_small")
+                    hf_token = self.config.get("hf_token") or os.environ.get('HF_TOKEN', None)
+
+                    self._emit("PHASE:Diarization|Đang tải model phân tách|5")
+                    logger.info("[DEBUG] Getting cached diarizer")
+                    diarizer = _get_cached_diarizer(
+                        embedding_model_id=speaker_model_id,
+                        num_clusters=num_speakers,
+                        num_threads=self.config.get("cpu_threads", 4),
+                        threshold=self.config.get("diarization_threshold", 0.6),
+                        auth_token=hf_token,
+                        merge_short_speaker=self.config.get("merge_short_speaker", True),
+                    )
+
+                    if self._is_cancelled():
+                        raise InterruptedError("Cancelled by user")
+
+                    self._emit("PHASE:Diarization|Đang phân tách Người nói|10")
+
+                    _last_progress = [0]
+
+                    def diarization_progress_callback(num_processed, num_total):
+                        if num_total == 0:
+                            return 0
+                        progress = int(num_processed / num_total * 100)
+                        if progress >= _last_progress[0] + 5 or num_processed == num_total:
+                            _last_progress[0] = progress
+                            phase_progress = 10 + int(progress * 0.75)
+                            self._emit(f"PHASE:Diarization|Đang phân tách Người nói|{phase_progress}")
+                            time.sleep(0.001)
+                        return 1 if self._is_cancelled() else 0
+
+                    print("[Transcriber] Starting speaker diarization...")
+                    raw_segments = diarizer.process(
+                        self.file_path,
+                        progress_callback=diarization_progress_callback,
+                        audio_data=audio,
+                        audio_sample_rate=16000,
+                    )
+                    print(f"[Transcriber] Speaker diarization done: {len(raw_segments)} segments")
+
+                    if self._is_cancelled():
+                        raise InterruptedError("Cancelled by user")
+
+                    speaker_segments_raw = [
+                        {
+                            "speaker": f"Người nói {seg.speaker + 1}",
+                            "speaker_id": seg.speaker,
+                            "start": seg.start,
+                            "end": seg.end,
+                            "duration": seg.duration
+                        }
+                        for seg in raw_segments
+                    ]
+
+                    self._emit("PHASE:Diarization|Đang ghép nối với văn bản|85")
+
+                    # Tạo 1 segment chứa TẤT CẢ raw_words → Fix 1,2,3 chạy trên toàn bộ
+                    one_seg = [{
+                        "text": full_text,
+                        "start": all_words[0]["start"],
+                        "end": all_words[-1]["end"],
+                        "raw_words": list(all_words),
+                    }]
+
+                    diar_results = diarizer.process_with_transcription(
+                        self.file_path,
+                        one_seg,
+                        speaker_segments=raw_segments
+                    )
+
+                    if diar_results:
+                        _diar_speaker_groups = []
+                        for dseg in diar_results:
+                            _diar_speaker_groups.append({
+                                "speaker": dseg.get("speaker", "Người nói 1"),
+                                "speaker_id": dseg.get("speaker_id", 0),
+                                "raw_words": dseg.get("raw_words", []),
+                                "start": dseg.get("start", 0),
+                                "end": dseg.get("end", 0),
+                            })
+                        print(f"[Transcriber] Speaker diarization: {len(_diar_speaker_groups)} speaker turns")
+
+                    self._emit("PHASE:Diarization|Hoàn tất phân tách|100")
+
+                    if diarization_start:
+                        timing_details["diarization"] = time.time() - diarization_start
+
+                    if self.config.get("save_ram", False):
+                        clear_model_cache("diarizer")
+
+                except InterruptedError:
+                    raise
+                except Exception as e:
+                    print(f"[Transcriber] Speaker diarization failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self._emit(f"PHASE:Diarization|Lỗi phân tách người nói: {str(e)[:80]}|0")
+
+        # ── Diarization-first: punctuation trên full_text + speaker boundary hints ──
+        # Chạy punctuation 1 lần trên toàn bộ text (full context),
+        # inject pause_hints=1.0 tại ranh giới chuyển speaker (nudge thêm dấu chấm).
+        # Sau đó sentence split + map speaker labels từ diarization.
+        if _diar_speaker_groups is not None and _diar_speaker_groups and restore_punctuation:
+            punct_start = time.time()
+            try:
+                self._emit("PHASE:Punctuation|Đang thêm dấu câu|0")
+
+                punct_confidence = self.config.get("punctuation_confidence", 0.3)
+                case_confidence = self.config.get("case_confidence", -1.0)
+                bypass = self.config.get("bypass_restorer", False)
+
+                # Build pause_hints từ word timestamps + inject tại speaker boundaries
+                # pause_hints[i] = gap (giây) sau word i
+                # Tại word cuối mỗi speaker turn: đảm bảo >= 1.0 (nudge dấu chấm)
+                pause_hints = None
+                if all_words and len(all_words) >= 2:
+                    pause_hints = []
+                    # Tập hợp word indices cuối mỗi speaker turn
+                    speaker_boundary_times = set()
+                    for turn in _diar_speaker_groups:
+                        rw = turn.get("raw_words", [])
+                        if rw:
+                            speaker_boundary_times.add(rw[-1].get("end", 0))
+
+                    for i in range(len(all_words)):
+                        if i < len(all_words) - 1:
+                            gap = all_words[i + 1].get('start', 0) - all_words[i].get('end', 0)
+                            gap = max(0.0, gap)
+                        else:
+                            gap = 1.0  # word cuối → kết thúc
+
+                        # Inject tại speaker boundary: đảm bảo gap >= 1.0
+                        w_end = all_words[i].get("end", 0)
+                        if w_end in speaker_boundary_times:
+                            gap = max(gap, 1.0)
+
+                        pause_hints.append(gap)
+
+                # Chạy punctuation 1 lần trên full_text (full context, GecBERT tự chunk)
+                if not bypass and full_text.strip():
+                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence)
+
+                    def punct_progress_cb(current, total):
+                        if self._is_cancelled():
+                            raise Exception("Cancelled by user")
+                        percent = int((current / max(1, total)) * 100)
+                        self._emit(f"PHASE:Punctuation|Đang thêm dấu câu ({current}/{total})|{percent}")
+
+                    full_text = restorer.restore(
+                        full_text, progress_callback=punct_progress_cb,
+                        pause_hints=pause_hints)
+
+                self._emit("PHASE:Align|Đang căn chỉnh thời gian|0")
+
+                # Sentence split trên full_text đã punct
+                sentences = re.split(r'(?<=[.?!])\s+', full_text)
+
+                # Build word-index → speaker mapping từ diarization
+                # Mỗi word trong all_words được gán speaker_id từ _diar_speaker_groups
+                word_speaker = [0] * len(all_words)
+                word_speaker_name = ["Người nói 1"] * len(all_words)
+                global_idx = 0
+                for turn in _diar_speaker_groups:
+                    rw = turn.get("raw_words", [])
+                    spk_id = turn.get("speaker_id", 0)
+                    spk_name = turn.get("speaker", "Người nói 1")
+                    for _ in rw:
+                        if global_idx < len(all_words):
+                            word_speaker[global_idx] = spk_id
+                            word_speaker_name[global_idx] = spk_name
+                        global_idx += 1
+
+                # Alignment: map sentences → all_words (giống flow gốc)
+                current_word_idx = 0
+                total_sentences = len(sentences)
+                last_align_progress = 0
+
+                def normalize_word(word):
+                    word = word.lower().strip()
+                    word = re.sub(r'[^\w\s]', '', word, flags=re.UNICODE)
+                    word = word.replace(' ', '')
+                    return word
+
+                for sent_idx, sent in enumerate(sentences):
+                    if not sent.strip():
+                        continue
+
+                    sent_words = [w for w in sent.split() if w.strip()]
+                    if not sent_words:
+                        continue
+
+                    sent_words_clean = [normalize_word(w) for w in sent_words]
+                    sent_words_clean = [w for w in sent_words_clean if w]
+
+                    # Tìm match trong all_words
+                    match_len = len(sent_words_clean)
+                    best_start = current_word_idx
+                    # Simple forward match
+                    if best_start < len(all_words):
+                        first_target = sent_words_clean[0] if sent_words_clean else ""
+                        for si in range(current_word_idx, min(current_word_idx + 50, len(all_words))):
+                            if normalize_word(all_words[si].get("text", "")) == first_target:
+                                best_start = si
+                                break
+
+                    end_idx = min(best_start + match_len, len(all_words))
+                    if end_idx <= best_start:
+                        end_idx = min(best_start + 1, len(all_words))
+
+                    seg_words = all_words[best_start:end_idx]
+                    if seg_words:
+                        # Split sentence tại speaker boundaries nếu sentence span nhiều speakers
+                        # Group consecutive words by speaker
+                        sub_groups = []
+                        cur_spk = word_speaker[best_start] if best_start < len(word_speaker) else 0
+                        cur_start = 0  # index trong sent_words
+                        for wi_off in range(end_idx - best_start):
+                            wi = best_start + wi_off
+                            w_spk = word_speaker[wi] if wi < len(word_speaker) else cur_spk
+                            if w_spk != cur_spk:
+                                sub_groups.append((cur_spk, cur_start, wi_off))
+                                cur_spk = w_spk
+                                cur_start = wi_off
+                        sub_groups.append((cur_spk, cur_start, end_idx - best_start))
+
+                        if len(sub_groups) == 1:
+                            # Chỉ 1 speaker → gán nguyên sentence
+                            spk_id = sub_groups[0][0]
+                            spk_name = word_speaker_name[best_start] if best_start < len(word_speaker_name) else "Người nói 1"
+                            final_segments.append({
+                                "text": sent,
+                                "start": seg_words[0].get("start", 0),
+                                "end": seg_words[-1].get("end", 0),
+                                "speaker": spk_name,
+                                "speaker_id": spk_id,
+                                "raw_words": seg_words,
+                            })
+                        else:
+                            # Nhiều speakers → split text theo tỷ lệ words
+                            for spk_id, grp_start, grp_end in sub_groups:
+                                grp_words = seg_words[grp_start:grp_end]
+                                if not grp_words:
+                                    continue
+                                # Tách text theo tỷ lệ
+                                total_w = len(seg_words)
+                                t_start = int(grp_start / total_w * len(sent_words))
+                                t_end = int(grp_end / total_w * len(sent_words))
+                                if grp_end == total_w:
+                                    t_end = len(sent_words)  # đảm bảo lấy hết
+                                grp_text = " ".join(sent_words[t_start:t_end])
+                                if not grp_text.strip():
+                                    continue
+                                spk_name = word_speaker_name[best_start + grp_start] if (best_start + grp_start) < len(word_speaker_name) else "Người nói 1"
+                                final_segments.append({
+                                    "text": grp_text,
+                                    "start": grp_words[0].get("start", 0),
+                                    "end": grp_words[-1].get("end", 0),
+                                    "speaker": spk_name,
+                                    "speaker_id": spk_id,
+                                    "raw_words": grp_words,
+                                })
+
+                    current_word_idx = end_idx
+
+                    progress = int((sent_idx + 1) / total_sentences * 100)
+                    if progress >= last_align_progress + 10:
+                        self._emit(f"PHASE:Align|Đang căn chỉnh thời gian|{progress}")
+                        last_align_progress = progress
+
+                restore_duration = time.time() - punct_start
+                timing_details["punctuation"] = restore_duration
+
+                # Fix overlapping timestamps
+                if final_segments:
+                    for i in range(len(final_segments) - 1):
+                        next_start = final_segments[i+1]['start']
+                        if final_segments[i]['end'] > next_start:
+                            final_segments[i]['end'] = next_start
+
+                # Split long segments
+                if final_segments:
+                    original_count = len(final_segments)
+                    final_segments = split_long_segments(final_segments, max_duration=12.0, preserve_raw_words=True)
+
+                print(f"[Transcriber] Diar-first pipeline: {len(final_segments)} segments, "
+                      f"{len(set(s.get('speaker_id',0) for s in final_segments))} speakers")
+
+            except Exception as e:
+                if str(e) == "Cancelled by user":
+                    return None
+                print(f"[Transcriber] Diar-first punctuation failed: {e}")
+                import traceback
+                traceback.print_exc()
+                _diar_speaker_groups = None  # fallback to original flow
+
+        # Punctuation restoration (original flow — khi không có diarization)
+        if not final_segments and restore_punctuation and full_text:
             punct_start = time.time()
             try:
                 if self.config.get("bypass_restorer", False):
@@ -1106,15 +2544,11 @@ class TranscriberPipeline:
                 else:
                     self._emit("PHASE:Punctuation|Đang thêm dấu câu (Sliding Window)|0")
 
-                    from core.punctuation_restorer_improved import ImprovedPunctuationRestorer
-
                     punct_confidence = self.config.get("punctuation_confidence", 0.3)
                     case_confidence = self.config.get("case_confidence", -1.0)
-                    logger.info(f"[DEBUG] Creating ImprovedPunctuationRestorer (confidence={punct_confidence:.3f})")
-                    restorer = ImprovedPunctuationRestorer(
-                        device="cpu", confidence=punct_confidence, case_confidence=case_confidence
-                    )
-                    logger.info("[DEBUG] ImprovedPunctuationRestorer created (model+quantization done)")
+                    logger.info(f"[DEBUG] Getting PunctuationRestorer (confidence={punct_confidence:.3f})")
+                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence)
+                    logger.info("[DEBUG] PunctuationRestorer ready")
 
                     def punct_progress_cb(current, total):
                         if self._is_cancelled():
@@ -1153,9 +2587,7 @@ class TranscriberPipeline:
                     full_text = restored_text_raw
 
                     if self.config.get("save_ram", False):
-                        restorer.unload()
-                        import gc
-                        gc.collect()
+                        clear_model_cache("restorer")
                     logger.info("[DEBUG] Punctuation restore complete")
 
                 timing_details["punctuation"] = time.time() - punct_start
@@ -1331,8 +2763,7 @@ class TranscriberPipeline:
                 logger.info(f"[DEBUG] Alignment done: {len(final_segments)} segments")
 
             except Exception as e:
-                if 'restorer' in locals() and restorer:
-                    restorer.unload()
+                # Không unload restorer ở đây - cache quản lý lifecycle
                 if str(e) == "Cancelled by user":
                     return None
                 self._emit(f"Lỗi khi thêm dấu câu: {e}")
@@ -1377,7 +2808,7 @@ class TranscriberPipeline:
                         })
                     self._emit("PHASE:Align|Fallback hoàn tất|100")
                     logger.info(f"[FALLBACK] Created {len(final_segments)} segments from pause-based segmentation")
-        else:
+        elif not final_segments:
             # No punctuation - segment by pauses
             self._emit("PHASE:Align|Đang căn chỉnh thời gian|0")
 
@@ -1398,7 +2829,7 @@ class TranscriberPipeline:
 
                 if is_pause or len(current_seg_words) > 15:
                     final_segments.append({
-                        "text": "".join(current_seg_words).strip(),
+                        "text": " ".join(current_seg_words).strip(),
                         "start": current_start,
                         "end": w['end'],
                         "raw_words": all_words[seg_start_idx:i+1]
@@ -1408,121 +2839,13 @@ class TranscriberPipeline:
 
             if current_seg_words:
                 final_segments.append({
-                    "text": "".join(current_seg_words).strip(),
+                    "text": " ".join(current_seg_words).strip(),
                     "start": current_start,
                     "end": all_words[-1]['end'],
                     "raw_words": all_words[seg_start_idx:]
                 })
 
             self._emit("PHASE:Align|Đang căn chỉnh thời gian|100")
-
-        # Speaker diarization
-        speaker_segments = []
-        speaker_segments_raw = []
-        diarization_start = None
-
-        if self.config.get("speaker_diarization", False):
-            try:
-                from core.speaker_diarization import SpeakerDiarizer
-                DIARIZATION_AVAILABLE = True
-            except ImportError:
-                DIARIZATION_AVAILABLE = False
-
-            if DIARIZATION_AVAILABLE:
-                try:
-                    diarization_start = time.time()
-                    self._emit("PHASE:Diarization|Đang phân tách Người nói|0")
-
-                    num_speakers = self.config.get("num_speakers", 2)
-                    speaker_model_id = self.config.get("speaker_model", "titanet_small")
-                    hf_token = self.config.get("hf_token") or os.environ.get('HF_TOKEN', None)
-                    diarizer = SpeakerDiarizer(
-                        embedding_model_id=speaker_model_id,
-                        num_clusters=num_speakers,
-                        num_threads=self.config.get("cpu_threads", 4),
-                        threshold=self.config.get("diarization_threshold", 0.6),
-                        auth_token=hf_token
-                    )
-
-                    self._emit("PHASE:Diarization|Đang tải model phân tách|5")
-                    logger.info("[DEBUG] diarizer.initialize() start")
-                    diarizer.initialize()
-                    logger.info("[DEBUG] diarizer.initialize() done")
-
-                    if self._is_cancelled():
-                        raise InterruptedError("Cancelled by user")
-
-                    self._emit("PHASE:Diarization|Đang phân tách Người nói|10")
-
-                    _last_progress = [0]
-
-                    def diarization_progress_callback(num_processed, num_total):
-                        if num_total == 0:
-                            return 0
-                        progress = int(num_processed / num_total * 100)
-                        if progress >= _last_progress[0] + 5 or num_processed == num_total:
-                            _last_progress[0] = progress
-                            phase_progress = 10 + int(progress * 0.75)
-                            self._emit(f"PHASE:Diarization|Đang phân tách Người nói|{phase_progress}")
-                            time.sleep(0.001)
-                        return 1 if self._is_cancelled() else 0
-
-                    print("[Transcriber] Starting speaker diarization...")
-                    self._emit("PHASE:Diarization|Đang phân tách Người nói|20")
-                    # Pass pre-loaded audio to avoid torchaudio hang on Windows daemon threads
-                    raw_segments = diarizer.process(
-                        self.file_path,
-                        progress_callback=diarization_progress_callback,
-                        audio_data=audio,
-                        audio_sample_rate=16000,
-                    )
-                    print(f"[Transcriber] Speaker diarization done: {len(raw_segments)} segments")
-
-                    if self._is_cancelled():
-                        raise InterruptedError("Cancelled by user")
-
-                    speaker_segments_raw = [
-                        {
-                            "speaker": f"Người nói {seg.speaker + 1}",
-                            "speaker_id": seg.speaker,
-                            "start": seg.start,
-                            "end": seg.end,
-                            "duration": seg.duration
-                        }
-                        for seg in raw_segments
-                    ]
-
-                    if self._is_cancelled():
-                        raise InterruptedError("Cancelled by user")
-
-                    self._emit("PHASE:Diarization|Đang ghép nối với văn bản|85")
-
-                    speaker_segments = diarizer.process_with_transcription(
-                        self.file_path,
-                        final_segments,
-                        speaker_segments=raw_segments
-                    )
-
-                    if speaker_segments:
-                        final_segments = speaker_segments
-                        self._emit("PHASE:Diarization|Hoàn tất phân tách|100")
-                        print(f"[Transcriber] Speaker diarization completed: {len(final_segments)} segments")
-
-                    if diarization_start:
-                        timing_details["diarization"] = time.time() - diarization_start
-
-                    if self.config.get("save_ram", False):
-                        diarizer.unload()
-                        import gc
-                        gc.collect()
-
-                except InterruptedError:
-                    raise  # Propagate cancellation to caller
-                except Exception as e:
-                    print(f"[Transcriber] Speaker diarization failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    self._emit(f"PHASE:Diarization|Lỗi phân tách người nói: {str(e)[:80]}|0")
 
         total_duration = time.time() - start_time
         self._emit("PHASE:Complete|Hoàn tất|100")
@@ -1548,7 +2871,7 @@ class TranscriberPipeline:
             "segments": final_segments,
             "timing": timing_info,
             "paragraphs": paragraphs,
-            "has_speaker_diarization": len(speaker_segments) > 0,
+            "has_speaker_diarization": len(speaker_segments) > 0 or (_diar_speaker_groups is not None and len(_diar_speaker_groups) > 0),
             "speaker_segments_raw": speaker_segments_raw,
             "duration_sec": duration_sec,
             "speaker_names": {},

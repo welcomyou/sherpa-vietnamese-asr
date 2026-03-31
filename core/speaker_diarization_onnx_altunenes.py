@@ -625,15 +625,54 @@ class AltunenesONNXDiarizer:
                 pipeline_kwargs["max_speakers"] = self.max_speakers
 
         if progress_callback:
-            progress_callback(5, 100)
+            progress_callback(0, 100)
 
         # Run pyannote pipeline: Segmentation → Embedding → VBx Clustering → Reconstruction
-        try:
-            from pyannote.audio.pipelines.utils.hook import ProgressHook
-            with ProgressHook() as hook:
-                result = self.pipeline(audio_input, hook=hook, **pipeline_kwargs)
-        except ImportError:
-            result = self.pipeline(audio_input, **pipeline_kwargs)
+        # Nếu có progress_callback, dùng custom hook để map weighted progress
+        # Nếu không có, dùng ProgressHook mặc định (hiện Rich bars trên console)
+        if progress_callback:
+            class _WeightedHook:
+                """Map pyannote steps to weighted overall progress."""
+                STEP_WEIGHTS = {
+                    "segmentation":         (0, 15),
+                    "speaker_counting":     (15, 25),
+                    "embeddings":           (25, 85),
+                    "discrete_diarization": (85, 100),
+                }
+                def __init__(self, cb):
+                    self.cb = cb
+                def __enter__(self):
+                    return self
+                def __exit__(self, *args):
+                    pass
+                def __call__(self, step_name, *args, **kwargs):
+                    completed = kwargs.get("completed")
+                    total = kwargs.get("total")
+                    if completed is None and len(args) >= 1 and isinstance(args[0], (int, float)):
+                        completed = args[0]
+                    if total is None and len(args) >= 2 and isinstance(args[1], (int, float)):
+                        total = args[1]
+                    if completed is not None and total is not None and total > 0:
+                        start_pct, end_pct = self.STEP_WEIGHTS.get(step_name, (0, 100))
+                        step_progress = completed / total
+                        overall = int(start_pct + (end_pct - start_pct) * step_progress)
+                        ret = self.cb(overall, 100)
+                    else:
+                        start_pct = self.STEP_WEIGHTS.get(step_name, (0, 100))[0]
+                        ret = self.cb(start_pct, 100)
+                    # Check cancellation (callback trả về != 0 khi user hủy)
+                    if ret is not None and ret != 0:
+                        raise InterruptedError("Cancelled by user")
+
+            hook = _WeightedHook(progress_callback)
+            result = self.pipeline(audio_input, hook=hook, **pipeline_kwargs)
+        else:
+            try:
+                from pyannote.audio.pipelines.utils.hook import ProgressHook
+                with ProgressHook() as hook:
+                    result = self.pipeline(audio_input, hook=hook, **pipeline_kwargs)
+            except ImportError:
+                result = self.pipeline(audio_input, **pipeline_kwargs)
 
         elapsed = time.time() - start_time
         print(f"[AltunenesONNX] Done in {elapsed:.2f}s "

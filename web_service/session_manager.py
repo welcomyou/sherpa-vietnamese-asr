@@ -119,6 +119,15 @@ class SessionManager:
         db.expire_session(session_id)
         logger.info(f"Session killed: {session_id} anonymous={session['is_anonymous']}")
 
+    def cleanup_on_startup(self, kill_processes_callback=None):
+        """Server restart: xóa mọi anonymous session + files vật lý.
+        Sau restart không ai còn kết nối nên an toàn xóa hết."""
+        sessions = db.get_active_anonymous_sessions()
+        for session in sessions:
+            self.kill_session(session["id"], kill_processes_callback)
+        if sessions:
+            logger.info(f"Startup cleanup: killed {len(sessions)} anonymous sessions, files deleted")
+
     async def cleanup_expired(self, kill_processes_callback=None):
         """Quet va don dep sessions anonymous da timeout"""
         timeout = server_config.anonymous_timeout_minutes

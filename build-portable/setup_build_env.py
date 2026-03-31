@@ -55,13 +55,19 @@ def install_packages():
         "huggingface_hub",
         "scipy",
         "numba",
-        "sentence-transformers",
+        "sounddevice",               # Desktop: mic test in quality_result_dialog
         # Speaker Diarization dependencies
-        "pyannote.audio",        # Community-1 PyTorch backend
-        "kaldi_native_fbank",    # Feature extraction for ONNX
-        "pydub",                 # Audio format conversion
-        "scikit-learn",          # AHC clustering for ONNX
-        "filelock",              # Thread-safe vocabulary processing
+        "pyannote.audio",            # Community-1 PyTorch backend
+        "kaldi_native_fbank",        # Feature extraction for ONNX
+        "pydub",                     # Audio format conversion
+        "scikit-learn",              # AHC clustering for ONNX
+        "filelock",                  # Thread-safe vocabulary processing
+        # Web service dependencies (for service build)
+        "fastapi",
+        "uvicorn[standard]",
+        "python-multipart",
+        "python-jose[cryptography]",
+        "cryptography",
     ]
     
     # Upgrade pip first

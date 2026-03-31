@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBut
                              QFileDialog, QProgressBar, QTextEdit, QComboBox, QSlider, 
                              QCheckBox, QFrame, QFormLayout, QMessageBox, QToolButton, 
                              QTabWidget, QStyle, QDialog)
-from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal, QObject, QEvent
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -43,13 +43,14 @@ class FastJSONLoadThread(QThread):
             data = load_asr_json(self.json_path)
 
             self.progress_updated.emit(40, "Đang xử lý dữ liệu...")
-            segments, speaker_mapping, has_speakers = deserialize_segments(data)
+            segments, speaker_mapping, speaker_colors, has_speakers = deserialize_segments(data)
 
             self.progress_updated.emit(75, "Đang chuẩn bị hiển thị...")
 
             # Lưu trữ vào self, KO truyền qua signal để tránh PyQt pickling lớn gây lag UI
             self.result_segments = segments
             self.result_speaker_mapping = speaker_mapping
+            self.result_speaker_colors = speaker_colors
             self.result_has_speakers = has_speakers
 
             self.finished_loading.emit()
@@ -128,7 +129,7 @@ class FileProcessingTab(QWidget):
         self.main_window = main_window
         self.selected_file = None
         self.transcriber = None
-        self.default_model_path = os.path.join(BASE_DIR, "models", "sherpa-onnx-zipformer-vi-2025-04-20")
+        self.default_model_path = os.path.join(BASE_DIR, "models", "zipformer-30m-rnnt-6000h")
         self.segments = []
         self.current_highlight_index = -1
         self._playback_cache = {}  # {original_file_path: temp_wav_path}
@@ -158,6 +159,7 @@ class FileProcessingTab(QWidget):
         
         # Speaker name management
         self.speaker_name_mapping = {}
+        self.speaker_colors = {}
         self.block_speaker_names = {}
         self.custom_speaker_names = set()
         self.merged_speaker_blocks = []
@@ -296,17 +298,17 @@ class FileProcessingTab(QWidget):
 
         # Model Selection
         self.combo_model = QComboBox()
-        self.combo_model.addItem("zipformer-30M-rnnt-6000h (⭐)", "zipformer-30m-rnnt-6000h")
-        self.combo_model.addItem("sherpa-onnx-zipformer-vi-2025-04-20", "sherpa-onnx-zipformer-vi-2025-04-20")
-        self.combo_model.addItem("ROVER - Voting (chính xác hơn)", "rover-voting")
+        self.combo_model.addItem("hynt/Zipformer-30M (nhanh)", "zipformer-30m-rnnt-6000h")
+        self.combo_model.addItem("Zipformer-Vi 2025 (68M)", "sherpa-onnx-zipformer-vi-2025-04-20")
+        self.combo_model.addItem("ROVER (chậm, chính xác)", "rover-voting")
         self.combo_model.currentIndexChanged.connect(self._reset_analyzer)
         form_config.addRow("Model:", self.combo_model)
         
         # CPU Threads
-        from common import ALLOWED_THREADS
+        from core.config import ALLOWED_THREADS, DEFAULT_THREADS
         self.slider_threads = QSlider(Qt.Orientation.Horizontal)
         self.slider_threads.setRange(1, ALLOWED_THREADS)
-        self.slider_threads.setValue(min(4, ALLOWED_THREADS))
+        self.slider_threads.setValue(DEFAULT_THREADS)
         self.slider_threads.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 border: 1px solid {COLORS['border']};
@@ -400,7 +402,7 @@ class FileProcessingTab(QWidget):
         
 
         # Speaker Diarization
-        self.check_speaker_diarization = QCheckBox("Phân tách Người nói (Speaker diarization - Chạy lâu)")
+        self.check_speaker_diarization = QCheckBox("Phân tách người nói (nếu biết và chỉ định trước số người nói, kết quả sẽ chính xác hơn)")
         self.check_speaker_diarization.setChecked(False)
         self.check_speaker_diarization.setEnabled(DIARIZATION_AVAILABLE)
         self.check_speaker_diarization.setToolTip("Tự động phân biệt các Người nói khác nhau trong file âm thanh")
@@ -461,23 +463,19 @@ class FileProcessingTab(QWidget):
         
         form_config.addRow("  └─ Ngưỡng phân biệt:", diarization_thresh_layout)
         self.label_diarization_threshold_tip = QLabel("Cao (1.00) = Gộp nhiều | Thấp (0.30) = Tách kỹ | ONNX: 0.80-1.20")
-        self.label_diarization_threshold_tip.setStyleSheet("font-size: 9px; color: #888; font-style: italic; margin-left: 4px;")
+        self.label_diarization_threshold_tip.setStyleSheet(f"font-size: 9px; color: {COLORS['text_secondary']}; font-style: italic; margin-left: 4px;")
         form_config.addRow("", self.label_diarization_threshold_tip)
         
         # Model embedding extraction + Rerun button
         embedding_layout = QHBoxLayout()
         
         self.combo_speaker_model = QComboBox()
-        # ⭐ = Recommended (Altunenes ONNX - Fast, no HF token needed)
-        self.combo_speaker_model.addItem("Pyannote Community-1 Altunenes ONNX (Nhanh) ⭐", "community1_onnx")
-        self.combo_speaker_model.addItem("Pyannote Community-1 (Pytorch) (Chậm, chính xác)", "community1")
-        self.combo_speaker_model.addItem("Nvidia Nemo Titanet small (Dự phòng)", "titanet_small")
+        self.combo_speaker_model.addItem("Pyannote Community-1 OnnxRuntime", "community1_pure_ort")
         self.combo_speaker_model.setCurrentIndex(0)
         self.combo_speaker_model.setEnabled(False)
         self.combo_speaker_model.setToolTip(
-            "⭐ Altunenes ONNX: Khuyến nghị - Nhanh, không cần HF Token\n"
-            "   Pyannote Pytorch: Chính xác cao nhất, cần HF Token\n"
-            "   Titanet: Dự phòng - Nhẹ, tiếng Anh"
+            "Pyannote Community-1 chạy hoàn toàn trên OnnxRuntime\n"
+            "Không cần PyTorch, không cần pyannote.audio"
         )
         self.combo_speaker_model.currentIndexChanged.connect(self.on_speaker_model_changed)
         
@@ -485,7 +483,7 @@ class FileProcessingTab(QWidget):
         self.btn_rerun_diarization.setStyleSheet(f"""
             QPushButton {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 font-size: 11px;
                 padding: 4px 8px;
                 border: 1px solid {COLORS['border']};
@@ -509,7 +507,27 @@ class FileProcessingTab(QWidget):
         embedding_layout.addWidget(self.btn_rerun_diarization)
         
         form_config.addRow("  └─ Model embedding:", embedding_layout)
-        
+
+        # Merge short speaker islands
+        self.check_merge_short_speaker = QCheckBox("Gộp các đoạn đổi người nói ngắn")
+        self.check_merge_short_speaker.setChecked(True)
+        self.check_merge_short_speaker.setEnabled(False)
+        self.check_merge_short_speaker.setToolTip(
+            "Gộp các đoạn ngắn (< 1.5 giây) nằm giữa cùng 1 người nói.\n"
+            "Giúp kết quả phân tách gọn hơn, tránh bị ngắt vụn."
+        )
+        form_config.addRow(self.check_merge_short_speaker)
+
+        # RMS Normalize Option
+        self.check_rms_normalize = QCheckBox("🔊 Chuẩn hóa âm lượng từng đoạn (RMS)")
+        self.check_rms_normalize.setChecked(False)
+        self.check_rms_normalize.setToolTip(
+            "Cân bằng âm lượng giữa các đoạn nói (đoạn to giảm, đoạn nhỏ tăng).\n"
+            "• Bật: Phù hợp khi âm lượng không đều (micro xa/gần, nhiều người nói)\n"
+            "• Tắt: Giữ nguyên âm lượng gốc, phù hợp khi thu âm đã chuẩn"
+        )
+        form_config.addRow(self.check_rms_normalize)
+
         # Save RAM Option
         self.check_save_ram = QCheckBox("Tiết kiệm RAM (unload model sau mỗi bước)")
         self.check_save_ram.setChecked(False)
@@ -520,14 +538,21 @@ class FileProcessingTab(QWidget):
         )
         form_config.addRow(self.check_save_ram)
         
-        # Auto analyze quality option
-        self.chk_auto_analyze = QCheckBox("Tự động phân tích chất lượng khi chọn file")
-        self.chk_auto_analyze.setChecked(True)
-        self.chk_auto_analyze.setToolTip("Tự động chạy DNSMOS và ASR-Proxy khi thêm file mới")
-        self.chk_auto_analyze.stateChanged.connect(self.on_auto_analyze_changed)
-        form_config.addRow(self.chk_auto_analyze)
         
         config_layout.addWidget(self.config_content)
+
+        # Disable scroll wheel trên tất cả config widgets (tránh thay đổi nhầm)
+        class _NoScrollFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Wheel:
+                    event.ignore()
+                    return True
+                return False
+        self._no_scroll = _NoScrollFilter(self)
+        for w in self.config_content.findChildren((QSlider, QComboBox)):
+            w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            w.installEventFilter(self._no_scroll)
+
         layout.addWidget(self.config_container)
 
         # 2. File Selection + Action Area
@@ -581,7 +606,7 @@ class FileProcessingTab(QWidget):
                 min-height: 36px;
             }}
             QPushButton:hover {{
-                background-color: #218838;
+                background-color: {COLORS['success']};
             }}
             QPushButton:disabled {{
                 background-color: {COLORS['border']};
@@ -677,6 +702,16 @@ class FileProcessingTab(QWidget):
         
         # Tab 1: Nội dung
         self.text_output = ClickableTextEdit()
+        self.text_output.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {COLORS['bg_input']};
+                color: {COLORS['text_primary']};
+                font-size: 14px;
+                border: none;
+                padding: 8px;
+                line-height: 1.6;
+            }}
+        """)
         self.text_output.setPlaceholderText("Kết quả văn bản sau khi bổ sung dấu sẽ hiển thị ở đây...")
         self.text_output.sentenceClicked.connect(self.seek_to_sentence)
         self.text_output.speakerLabelClicked.connect(self.on_speaker_label_clicked)
@@ -691,7 +726,7 @@ class FileProcessingTab(QWidget):
         self.text_speaker_raw_output.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 font-size: 13px;
                 border: 1px solid {COLORS['border']};
                 border-radius: 4px;
@@ -742,6 +777,7 @@ class FileProcessingTab(QWidget):
         self.slider_seek = QSlider(Qt.Orientation.Horizontal)
         self.slider_seek.setRange(0, 0)
         self.slider_seek.sliderMoved.connect(self.set_position)
+        self.slider_seek.sliderReleased.connect(self._on_slider_released)
         self.slider_seek.setStyleSheet(f"""
             QSlider::groove:horizontal {{
                 border: 1px solid {COLORS['border']};
@@ -817,6 +853,7 @@ class FileProcessingTab(QWidget):
         self.combo_speaker_model.setEnabled(is_checked)
         self.check_show_speaker_labels.setEnabled(is_checked)
         self.slider_diarization_threshold.setEnabled(is_checked)
+        self.check_merge_short_speaker.setEnabled(is_checked)
         self.btn_rerun_diarization.setEnabled(is_checked and bool(self.segments))
 
     def on_show_speaker_labels_changed(self, state):
@@ -902,6 +939,7 @@ class FileProcessingTab(QWidget):
         
         # Xóa dữ liệu tên Người nói cũ khi chọn file mới
         self.speaker_name_mapping = {}
+        self.speaker_colors = {}
         self.block_speaker_names = {}
         self.custom_speaker_names = set()
         
@@ -936,9 +974,6 @@ class FileProcessingTab(QWidget):
         if self.segments:
              self.btn_rerun_diarization.setEnabled(self.check_speaker_diarization.isChecked())
         
-        # Auto analyze audio quality
-        if self.chk_auto_analyze.isChecked():
-            self.analyze_file_quality()
 
     def _on_audio_converted(self, temp_path, original_path, thread=None):
         if thread and thread != getattr(self, '_bg_audio_thread', None):
@@ -995,6 +1030,8 @@ class FileProcessingTab(QWidget):
         self.segments = thread.result_segments
         if thread.result_speaker_mapping:
             self.speaker_name_mapping = thread.result_speaker_mapping
+        if getattr(thread, 'result_speaker_colors', None):
+            self.speaker_colors = thread.result_speaker_colors
         self.has_speaker_diarization = thread.result_has_speakers
         self.current_highlight_index = -1
         self._last_rendered_highlight = -1
@@ -1020,12 +1057,12 @@ class FileProcessingTab(QWidget):
         if getattr(self, 'has_speaker_diarization', False):
             chunks = self._build_speaker_view_chunks()
             if chunks:
-                chunks[0] = f"<p style='font-size:14px; line-height:1.6; color:{COLORS['text_dark']}; margin:0;'>" + chunks[0]
+                chunks[0] = f"<p style='font-size:14px; line-height:1.6; color:{COLORS['text_primary']}; margin:0;'>" + chunks[0]
                 chunks[-1] += "</p>"
         else:
             chunks = self._build_normal_view_chunks()
             if chunks:
-                chunks[0] = f"<p style='font-size:14px; line-height:1.3; color:{COLORS['text_dark']};'>" + chunks[0]
+                chunks[0] = f"<p style='font-size:14px; line-height:1.3; color:{COLORS['text_primary']};'>" + chunks[0]
                 chunks[-1] += "</p>"
             
         self._render_chunks = chunks
@@ -1150,15 +1187,16 @@ class FileProcessingTab(QWidget):
                 display_name = self.speaker_name_mapping[speaker_id_str]
             else:
                 display_name = current_speaker
-            
-            html_content = f"<div style='margin: 16px 0; padding: 10px; background-color: #f8f9fa; border-left: 3px solid {COLORS['accent']}; border-radius: 0 4px 4px 0;'>"
-            
+
+            spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
+            html_content = f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
+
             if self.check_show_speaker_labels.isChecked():
-                anchor_style = f"text-decoration:none; color:{COLORS['accent']}; cursor:pointer;"
-                html_content += f"<a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'><div style='font-weight:bold; margin-bottom:8px; font-size:13px;'>{display_name}:</div></a>"
-            
-            html_content += f"<div style='margin-left:4px; text-align: justify; line-height:1.6; color:{COLORS['text_dark']};'>"
-            
+                anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
+                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+
+            html_content += f"<div style='text-align: justify; line-height:1.6; color:{COLORS['text_primary']};'>"
+
             for block in current_blocks:
                 for sent in block.get('sentences', []):
                     sent_idx = sent.get('index', 0)
@@ -1192,7 +1230,7 @@ class FileProcessingTab(QWidget):
                             text, anchor_id, sent_idx, 0
                         ) + " "
             
-            html_content += "</div></div>"
+            html_content += "</div></div><div style='height:14px;'></div>"
             chunks.append(html_content)
 
         for seg in merged_segments:
@@ -1203,7 +1241,7 @@ class FileProcessingTab(QWidget):
                 current_speaker = speaker
                 current_blocks = []
             current_blocks.append(seg)
-        
+
         process_blocks()
         return chunks
 
@@ -1238,7 +1276,9 @@ class FileProcessingTab(QWidget):
             "speaker_diarization": self.check_speaker_diarization.isChecked() and DIARIZATION_AVAILABLE,
             "num_speakers": -1 if self.spin_num_speakers.currentIndex() == 0 else int(self.spin_num_speakers.currentText()),
             "speaker_model": self.combo_speaker_model.currentData(),
-            "save_ram": self.check_save_ram.isChecked()
+            "merge_short_speaker": self.check_merge_short_speaker.isChecked(),
+            "save_ram": self.check_save_ram.isChecked(),
+            "preprocess_rms_normalize": self.check_rms_normalize.isChecked(),
         }
 
     def start_transcription(self):
@@ -1247,6 +1287,7 @@ class FileProcessingTab(QWidget):
         
         # Xóa dữ liệu tên Người nói cũ khi xử lý ASR mới (có thể sinh ra speaker ID khác)
         self.speaker_name_mapping = {}
+        self.speaker_colors = {}
         self.block_speaker_names = {}
         self.custom_speaker_names = set()
 
@@ -1580,10 +1621,26 @@ class FileProcessingTab(QWidget):
             if diarization > 0.01 and self.check_speaker_diarization.isChecked():
                 details += f"\n  • Phân đoạn Người nói: {fmt_time(diarization)}"
             
-            self.stop_spinner()
-            self.progress_bar.setFormat(f"✓ Hoàn tất! ({time_str})")
-            self.progress_bar.setValue(100)
-            
+            # Lưu details + timing để dùng khi DNSMOS xong
+            self._finish_details = details
+            self._finish_time_str = time_str
+
+            # ASR confidence (tính ngay từ data có sẵn, không I/O)
+            self._finish_asr_conf = ""
+            try:
+                all_probs = []
+                for seg in self.segments:
+                    for w in seg.get("raw_words", []):
+                        p = w.get("prob")
+                        if p and 0 < p <= 1:
+                            all_probs.append(p)
+                if all_probs:
+                    avg_conf = sum(all_probs) / len(all_probs)
+                    c_icon = "🟢" if avg_conf >= 0.80 else ("🟡" if avg_conf >= 0.65 else "🔴")
+                    self._finish_asr_conf = f"\n  {c_icon} Độ tự tin ASR: {avg_conf:.0%}"
+            except Exception:
+                pass
+
             if self.selected_file and os.path.exists(self.selected_file):
                 playback_path = self._get_playback_path(self.selected_file)
                 url = QUrl.fromLocalFile(os.path.abspath(playback_path))
@@ -1594,15 +1651,74 @@ class FileProcessingTab(QWidget):
             self.toggle_inputs(True)
             self.btn_save_json.setEnabled(True)
             self.btn_copy_text.setEnabled(True)
-            
+
             if self.segments and self.selected_file:
                 self.btn_rerun_diarization.setEnabled(True)
-            
-            p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
-            QMessageBox.information(p_win, "Thành công", f"Đã chuyển đổi xong!\n\n{details}\n\nBạn có thể nghe lại và bấm vào câu để tua.")
+
+            # Chạy DNSMOS background → khi xong mới hiện message box
+            self._run_dnsmos_then_show_result()
         except Exception as e:
             import traceback
             QMessageBox.critical(self.window(), "Lỗi hiển thị", f"Lỗi UI: {e}")
+
+    def _run_dnsmos_then_show_result(self):
+        """Chạy DNSMOS background, khi xong hiện message box kết quả."""
+        from core.audio_analyzer import check_dnsmos_model_exists
+        if not self.selected_file or not check_dnsmos_model_exists():
+            # Không có DNSMOS → hiện kết quả ngay
+            self._show_finish_dialog("")
+            return
+
+        # Progress bar tiếp tục chạy
+        self.current_progress_text = "Đang đánh giá chất lượng âm thanh..."
+        self.progress_bar.setValue(95)
+        self.start_spinner()
+
+        class _DNSMOSThread(QThread):
+            done = pyqtSignal(dict)
+            def __init__(self, file_path):
+                super().__init__()
+                self.file_path = file_path
+            def run(self):
+                try:
+                    from core.audio_analyzer import AudioQualityAnalyzer
+                    import librosa
+                    audio, sr = librosa.load(self.file_path, sr=16000, mono=True, res_type='soxr_vhq')
+                    analyzer = AudioQualityAnalyzer()
+                    scores = analyzer.compute_dnsmos_average(audio, sr)
+                    self.done.emit(scores or {})
+                except Exception:
+                    self.done.emit({})
+
+        self._dnsmos_thread = _DNSMOSThread(self.selected_file)
+        self._dnsmos_thread.done.connect(self._on_dnsmos_done)
+        self._dnsmos_thread.start()
+
+    def _on_dnsmos_done(self, scores):
+        """DNSMOS xong → hiện message box đầy đủ."""
+        self.stop_spinner()
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat(f"✓ Hoàn tất! ({self._finish_time_str})")
+
+        dnsmos_str = ""
+        if scores:
+            sig, bak, ovrl = scores.get('SIG', 0), scores.get('BAK', 0), scores.get('OVRL', 0)
+            if ovrl > 0:
+                q_icon = "🟢" if ovrl >= 3.5 else ("🟡" if ovrl >= 2.5 else "🔴")
+                dnsmos_str = f"\n  {q_icon} Giọng nói: {sig:.2f}/5 | Nền: {bak:.2f}/5"
+
+        self._show_finish_dialog(dnsmos_str)
+
+    def _show_finish_dialog(self, dnsmos_str):
+        """Hiện message box kết quả cuối cùng."""
+        quality_str = ""
+        if dnsmos_str or self._finish_asr_conf:
+            quality_str = "\n\n🎙️ CHẤT LƯỢNG:" + dnsmos_str + self._finish_asr_conf
+
+        p_win = None if self.window().isMinimized() or self.window().isHidden() else self.window()
+        QMessageBox.information(p_win, "Thành công",
+            f"Đã chuyển đổi xong!\n\n{self._finish_details}{quality_str}\n\n"
+            f"Bạn có thể nghe lại và bấm vào câu để tua.")
 
     def save_asr_json(self):
         """Lưu kết quả ASR hiện tại vào file JSON"""
@@ -1632,6 +1748,7 @@ class FileProcessingTab(QWidget):
             json_data = serialize_segments(
                 self.segments,
                 speaker_name_mapping=self.speaker_name_mapping,
+                speaker_colors=self.speaker_colors,
                 model_name=model_name,
                 model_type='file',
                 duration_sec=duration_sec
@@ -1708,10 +1825,11 @@ class FileProcessingTab(QWidget):
         """Load dữ liệu ASR từ file JSON"""
         try:
             data = load_asr_json(json_path)
-            segments, speaker_mapping, has_speakers = deserialize_segments(data)
+            segments, speaker_mapping, speaker_colors, has_speakers = deserialize_segments(data)
 
             self.segments = segments
             self.speaker_name_mapping = speaker_mapping
+            self.speaker_colors = speaker_colors
             self.has_speaker_diarization = has_speakers
             self.current_highlight_index = -1
             self._last_rendered_highlight = -1
@@ -2027,30 +2145,96 @@ class FileProcessingTab(QWidget):
             self.render_debounce_timer.stop()
             self.render_debounce_timer.start(50)
 
+    def _apply_low_confidence_color(self, text, seg_idx, is_highlighted=False):
+        """Đổi màu chữ vùng nghi ngờ ASR lỗi.
+
+        Bình thường (nền tối): #DFC8B0 cam kem nhẹ, hơi ấm hơn trắng.
+        Khi highlight (nền vàng): #8B4513 nâu đỏ đậm, tương phản với nền vàng
+        và khác biệt với chữ đen bình thường.
+        """
+        if seg_idx >= len(self.segments):
+            return text
+        raw_words = self.segments[seg_idx].get('raw_words', [])
+        if not raw_words:
+            return text
+
+        suspect_color = '#888888' if is_highlighted else COLORS.get('low_confidence', '#DFC8B0')
+
+        # Tìm vị trí từ nghi ngờ
+        positions = []
+        seg_text_lower = text.lower()
+        search_pos = 0
+        for rw in raw_words:
+            word = rw.get('text', '').strip()
+            if not word:
+                continue
+            is_suspect = bool(rw.get('suspect') or rw.get('_suspect_level')
+                              or rw.get('gap_after_ms') or rw.get('gap_before_ms'))
+            idx = seg_text_lower.find(word.lower(), search_pos)
+            if idx >= 0:
+                if is_suspect:
+                    positions.append((idx, idx + len(word)))
+                search_pos = idx + len(word)
+
+        if not positions:
+            return text
+
+        # Gom từ liền kề thành vùng (chỉ space giữa → gom)
+        regions = []
+        i = 0
+        while i < len(positions):
+            rs, re = positions[i]
+            j = i + 1
+            while j < len(positions):
+                gap = text[re:positions[j][0]].strip()
+                if len(gap) == 0:
+                    re = positions[j][1]
+                    j += 1
+                else:
+                    break
+            regions.append((rs, re))
+            i = j
+
+        # Build HTML — chỉ đổi color, không background/border
+        result = []
+        last_end = 0
+        for start, end in regions:
+            if start > last_end:
+                result.append(text[last_end:start])
+            region_text = text[start:end]
+            result.append(f"<span style='color:{suspect_color};'>{region_text}</span>")
+            last_end = end
+        if last_end < len(text):
+            result.append(text[last_end:])
+
+        return ''.join(result)
+
     def _render_text_with_search_highlight(self, text, anchor_id, seg_idx, chunk_start_pos=0):
         """Render text với search highlight nếu có.
-        
+
         Args:
             text: Text cần render
             anchor_id: ID của anchor
             seg_idx: Index của segment
             chunk_start_pos: Vị trí bắt đầu của chunk này trong segment (để tính offset)
-        
+
         Returns:
             HTML string với highlight nếu cần
         """
         # Escape HTML trước
         display_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-        
+
+        is_audio_highlight = (self.current_highlight_index == anchor_id)
+
         # Kiểm tra có search matches không
         if not self.search_matches or self.current_search_index < 0:
-            # Không có search, chỉ render bình thường với audio highlight
-            is_audio_highlight = (self.current_highlight_index == anchor_id)
+            # Không có search → safe apply suspect color (không bị search cắt vỡ)
+            display_text = self._apply_low_confidence_color(display_text, seg_idx, is_highlighted=is_audio_highlight)
             if is_audio_highlight:
-                return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{display_text}</a>"
             else:
-                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none;'>{display_text}</a>"
-        
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{display_text}</a>"
+
         # Có search matches - tìm các matches trong đoạn text này
         chunk_end_pos = chunk_start_pos + len(text)
         matches_in_chunk = []
@@ -2098,9 +2282,9 @@ class FileProcessingTab(QWidget):
             # Không có match trong chunk này
             is_audio_highlight = (self.current_highlight_index == anchor_id)
             if is_audio_highlight:
-                return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{display_text}</a>"
             else:
-                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{display_text}</a>"
         
         # Có matches - cần cắt text và render từng phần
         # Sắp xếp matches theo vị trí
@@ -2120,47 +2304,51 @@ class FileProcessingTab(QWidget):
                 else:
                     merged_matches.append(match)
         
+        # Khi có search: không apply suspect color (tránh HTML lồng nhau bị vỡ khi cắt text)
+        # Search highlight đã dùng background-color riêng, đủ nổi bật
+
         # Render từng phần
         parts = []
         last_end = 0
-        
+
         for match in merged_matches:
             # Phần trước match
             if match['start'] > last_end:
                 pre_text = display_text[last_end:match['start']]
-                parts.append(f"<span style='color: {COLORS['text_dark']};'>{pre_text}</span>")
-            
+                parts.append(pre_text)
+
             # Phần match
             match_text = display_text[match['start']:match['end']]
             if match['is_current']:
                 # Match hiện tại - màu cam đậm
-                parts.append(f"<span style='background-color: #ff8c00; color: #000000; padding: 1px 2px; border-radius: 2px; font-weight: bold;'>{match_text}</span>")
+                parts.append(f"<span style='background-color: {COLORS['search_current']}; color: {COLORS['text_dark']}; padding: 1px 2px; border-radius: 2px; font-weight: bold;'>{match_text}</span>")
             else:
                 # Các matches khác - màu cam nhạt
-                parts.append(f"<span style='background-color: #ffd699; color: #000000; padding: 1px 2px; border-radius: 2px;'>{match_text}</span>")
-            
+                parts.append(f"<span style='background-color: {COLORS['search_match']}; color: {COLORS['text_dark']}; padding: 1px 2px; border-radius: 2px;'>{match_text}</span>")
+
             last_end = match['end']
-        
+
         # Phần còn lại sau match cuối
         if last_end < len(display_text):
             post_text = display_text[last_end:]
-            parts.append(f"<span style='color: {COLORS['text_dark']};'>{post_text}</span>")
-        
+            parts.append(post_text)
+
         # Audio highlight cho toàn chunk nếu cần
         is_audio_highlight = (self.current_highlight_index == anchor_id)
         if is_audio_highlight:
-            return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{''.join(parts)}</a>"
+            return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{''.join(parts)}</a>"
         else:
-            return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none;'>{''.join(parts)}</a>"
+            return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{''.join(parts)}</a>"
 
     def _do_render(self):
         if not self.segments:
             return
-        
+
         if getattr(self, 'has_speaker_diarization', False):
             self._do_render_speaker_view()
             return
-        
+
+        highlight_changed = (self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1))
         self._last_rendered_highlight = self.current_highlight_index
 
         para_boundaries = set()
@@ -2177,7 +2365,7 @@ class FileProcessingTab(QWidget):
             if total_para_sentences != len(self.segments):
                 para_boundaries = set()
 
-        html_content = f"<html><body><p style='font-size:14px; line-height:1.3; color:{COLORS['text_dark']};'>"
+        html_content = f"<html><body><p style='font-size:14px; line-height:1.3; color:{COLORS['text_primary']};'>"
         
         for i, seg in enumerate(self.segments):
             # Thêm anchor cho segment để scroll khi tìm kiếm
@@ -2226,25 +2414,21 @@ class FileProcessingTab(QWidget):
         
         scrollbar = self.text_output.verticalScrollBar()
         current_scroll = scrollbar.value()
-        
+
         # Disable updates to prevent flickering/jumping to top
         self.text_output.setUpdatesEnabled(False)
         self.text_output.setHtml(html_content)
-        
-        # Restore scrollbar asynchronously after layout is updated
-        from PyQt6.QtCore import QTimer
-        self._scroll_attempts = getattr(self, '_scroll_attempts', 0)
-        self._scroll_attempts = 0
-        
-        def restore_scroll():
-            self._scroll_attempts += 1
-            scrollbar.setValue(current_scroll)
-            if scrollbar.maximum() < current_scroll and self._scroll_attempts < 50:
-                QTimer.singleShot(10, restore_scroll)
-            else:
-                self.text_output.setUpdatesEnabled(True)
-                
+
         if current_scroll > 0:
+            # Giữ nguyên vị trí scroll — không auto-scroll khi highlight thay đổi
+            self._scroll_attempts = 0
+            def restore_scroll():
+                self._scroll_attempts += 1
+                scrollbar.setValue(current_scroll)
+                if scrollbar.maximum() < current_scroll and self._scroll_attempts < 50:
+                    QTimer.singleShot(10, restore_scroll)
+                else:
+                    self.text_output.setUpdatesEnabled(True)
             restore_scroll()
         else:
             self.text_output.setUpdatesEnabled(True)
@@ -2327,10 +2511,13 @@ class FileProcessingTab(QWidget):
         return merged
 
     def _do_render_speaker_view(self):
+        highlight_changed = (self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1))
+        self._last_rendered_highlight = self.current_highlight_index
+
         self._block_render_count = 0
         self.merged_speaker_blocks = []
-        text_dark_color = COLORS['text_dark']
-        html_content = f"<html><body style='font-size:14px; line-height:1.6; color:{text_dark_color};'>"
+        text_color = COLORS['text_primary']
+        html_content = f"<html><body style='font-size:14px; line-height:1.6; color:{text_color};'>"
         
         segments_with_idx = [{**seg, 'index': i} for i, seg in enumerate(self.segments)]
         
@@ -2371,14 +2558,15 @@ class FileProcessingTab(QWidget):
                     if DEBUG_LOGGING:
                         print(f"[RENDER DEBUG] Block {block_idx}: speaker_id={speaker_id}({type(speaker_id).__name__}), speaker_id_str='{speaker_id_str}', current_speaker='{current_speaker}', display_name='{display_name}', mapping={self.speaker_name_mapping}")
                     
-                    html_content += f"<div style='margin: 16px 0; padding: 10px; background-color: #f8f9fa; border-left: 3px solid {COLORS['accent']}; border-radius: 0 4px 4px 0;'>"
-                    
+                    spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
+                    html_content += f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
+
                     if self.check_show_speaker_labels.isChecked():
-                        anchor_style = f"text-decoration:none; color:{COLORS['accent']}; cursor:pointer;"
-                        html_content += f"<a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'><div style='font-weight:bold; margin-bottom:8px; font-size:13px;'>{display_name}:</div></a>"
-                    
-                    html_content += f"<div style='margin-left:4px; text-align: justify; line-height:1.6;'>"
-                    
+                        anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
+                        html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+
+                    html_content += f"<div style='text-align: justify; line-height:1.6;'>"
+
                     for block in current_blocks:
                         for sent in block.get('sentences', []):
                             sent_idx = sent.get('index', 0)
@@ -2419,11 +2607,11 @@ class FileProcessingTab(QWidget):
                                     text, anchor_id, sent_idx, 0
                                 ) + " "
                     
-                    html_content += "</div></div>"
-                
+                    html_content += "</div></div><div style='height:14px;'></div>"
+
                 current_speaker = speaker
                 current_blocks = []
-            
+
             current_blocks.append(seg)
         
         if current_blocks:
@@ -2450,14 +2638,15 @@ class FileProcessingTab(QWidget):
             else:
                 display_name = current_speaker
             
-            html_content += f"<div style='margin: 16px 0; padding: 10px; background-color: #f8f9fa; border-left: 3px solid {COLORS['accent']}; border-radius: 0 4px 4px 0;'>"
-            
+            spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
+            html_content += f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
+
             if self.check_show_speaker_labels.isChecked():
-                anchor_style = f"text-decoration:none; color:{COLORS['accent']}; cursor:pointer;"
-                html_content += f"<a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'><div style='font-weight:bold; margin-bottom:8px; font-size:13px;'>{display_name}:</div></a>"
-            
-            html_content += f"<div style='margin-left:4px; text-align: justify; line-height:1.6;'>"
-            
+                anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
+                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+
+            html_content += f"<div style='text-align: justify; line-height:1.6;'>"
+
             for block in current_blocks:
                 for sent in block.get('sentences', []):
                     sent_idx = sent.get('index', 0)
@@ -2504,24 +2693,21 @@ class FileProcessingTab(QWidget):
         
         scrollbar = self.text_output.verticalScrollBar()
         current_scroll = scrollbar.value()
-        
+
         # Disable updates to prevent flickering/jumping to top
         self.text_output.setUpdatesEnabled(False)
         self.text_output.setHtml(html_content)
-        
-        # Restore scrollbar asynchronously after layout is updated
-        from PyQt6.QtCore import QTimer
-        attempts = [0]
-        
-        def restore_scroll():
-            attempts[0] += 1
-            scrollbar.setValue(current_scroll)
-            if scrollbar.maximum() < current_scroll and attempts[0] < 50:
-                QTimer.singleShot(10, restore_scroll)
-            else:
-                self.text_output.setUpdatesEnabled(True)
-                
+
         if current_scroll > 0:
+            # Giữ nguyên vị trí scroll — không auto-scroll khi highlight thay đổi
+            attempts = [0]
+            def restore_scroll():
+                attempts[0] += 1
+                scrollbar.setValue(current_scroll)
+                if scrollbar.maximum() < current_scroll and attempts[0] < 50:
+                    QTimer.singleShot(10, restore_scroll)
+                else:
+                    self.text_output.setUpdatesEnabled(True)
             restore_scroll()
         else:
             self.text_output.setUpdatesEnabled(True)
@@ -2597,6 +2783,7 @@ class FileProcessingTab(QWidget):
         
         # Xóa dữ liệu tên Người nói cũ khi phân đoạn lại (speaker ID có thể thay đổi)
         self.speaker_name_mapping = {}
+        self.speaker_colors = {}
         self.block_speaker_names = {}
         self.custom_speaker_names = set()
         
@@ -2713,20 +2900,20 @@ class FileProcessingTab(QWidget):
         self.drop_label.setEnabled(enable)
         self.config_content.setEnabled(enable)
         if not enable:
-            self.drop_label.setStyleSheet(self.drop_label.styleSheet().replace("#e8f4ff", "#d0d0d0"))
+            self.drop_label.setStyleSheet(self.drop_label.styleSheet().replace(COLORS['bg_elevated'], COLORS['text_secondary']))
         else:
             self.drop_label.setStyleSheet(f"""
                 QLabel {{
                     border: 2px dashed {COLORS['border_light']};
                     border-radius: 8px;
                     background-color: {COLORS['bg_input']};
-                    color: {COLORS['text_dark']};
+                    color: {COLORS['text_primary']};
                     font-size: 13px;
                     padding: 10px;
                 }}
                 QLabel:hover {{
                     border-color: {COLORS['accent']};
-                    background-color: #e8f4ff;
+                    background-color: {COLORS['bg_elevated']};
                 }}
             """)
 
@@ -2853,6 +3040,10 @@ class FileProcessingTab(QWidget):
     def set_position(self, position):
         self.player.setPosition(position)
 
+    def _on_slider_released(self):
+        """Xử lý khi user click vào groove hoặc thả handle sau khi kéo."""
+        self.player.setPosition(self.slider_seek.value())
+
     def seek_to_sentence(self, idx):
         """Click-to-seek: hỗ trợ cả partial anchor (1000000+) và legacy index"""
         timestamp_sec = None
@@ -2898,7 +3089,7 @@ class FileProcessingTab(QWidget):
         if timestamp_sec is not None:
             import time
             self._user_clicked_timestamp = time.time() * 1000
-            
+
             self.current_highlight_index = idx
             self.player.setPosition(int(timestamp_sec * 1000))
             if DEBUG_LOGGING:
@@ -2958,9 +3149,13 @@ class FileProcessingTab(QWidget):
                 else:
                     active_speaker_names.add(seg.get('speaker', 'Người nói 1'))
                     
-        dialog = SpeakerRenameDialog(speaker_id_int, current_name, active_speaker_names, self)
+        current_color = self.speaker_colors.get(speaker_id_str)
+        dialog = SpeakerRenameDialog(speaker_id_int, current_name, active_speaker_names, self, current_color=current_color)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_name, apply_to_all = dialog.get_result()
+            new_name, apply_to_all, new_color = dialog.get_result()
+            # Lưu màu (dù có đổi tên hay không)
+            if new_color:
+                self.speaker_colors[speaker_id_str] = new_color
             if DEBUG_LOGGING:
                 print(f"[RENAME DEBUG] new_name='{new_name}', apply_to_all={apply_to_all}")
             
@@ -3050,7 +3245,10 @@ class FileProcessingTab(QWidget):
                             self.segments[i]['speaker_id'] = target_speaker_id
                 
                 self.render_text_content(immediate=True)
-    
+            else:
+                # Chỉ đổi màu, không đổi tên → re-render
+                self.render_text_content(immediate=True)
+
     def _get_speaker_id_from_segment(self, segment):
         """Lấy speaker_id từ segment, ưu tiên trướng speaker_id nếu có"""
         # Ưu tiên dùng speaker_id đã lưu trong segment
@@ -3335,7 +3533,7 @@ class FileProcessingTab(QWidget):
                 # Lấy model đang chọn từ combo, không dùng default
                 model_folder = self.combo_model.currentData()
                 if not model_folder:
-                    model_folder = "sherpa-onnx-zipformer-vi-2025-04-20"
+                    model_folder = "zipformer-30m-rnnt-6000h"
                 
                 model_path = os.path.join(BASE_DIR, "models", model_folder)
                 print(f"[FileTab] Using model for analysis: {model_folder}")
@@ -3388,9 +3586,6 @@ class FileProcessingTab(QWidget):
             print("[FileTab] Resetting analyzer for new model selection")
             self.quality_analyzer = None
             
-        # Nếu đang có file và đang bật tự động phân tích thì chạy lại ngay
-        if self.selected_file and self.chk_auto_analyze.isChecked():
-            self.analyze_file_quality()
     
     def analyze_file_quality(self):
         """Chạy phân tích chất lượng file"""
@@ -3462,15 +3657,3 @@ class FileProcessingTab(QWidget):
         dialog = QualityResultDialog(result, self)
         dialog.exec()
 
-    def on_auto_analyze_changed(self, state):
-        """Xử lý khi checkbox tự động phân tích thay đổi"""
-        # Nếu uncheck trong khi đang phân tích, dừng phân tích và enable nút xử lý
-        if not state and self.analysis_thread and self.analysis_thread.isRunning():
-            self.analysis_thread.terminate()
-            self.analysis_thread.wait()
-            self.stop_spinner()
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("Sẵn sàng")
-            # Enable nút xử lý nếu có file
-            if self.selected_file:
-                self.btn_process.setEnabled(True)

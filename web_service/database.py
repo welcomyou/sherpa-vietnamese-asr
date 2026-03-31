@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS files (
     speaker_names_json TEXT NULL,
     model_used TEXT NULL,
     config_json TEXT NULL,
+    summary_json TEXT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     completed_at TEXT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id),
@@ -143,6 +144,12 @@ class Database:
         try:
             conn.executescript(SCHEMA_SQL)
             conn.commit()
+            # Migration: thêm summary_json nếu DB cũ chưa có
+            try:
+                conn.execute("ALTER TABLE files ADD COLUMN summary_json TEXT NULL")
+                conn.commit()
+            except Exception:
+                pass  # Column đã tồn tại
         finally:
             conn.close()
 
@@ -220,15 +227,24 @@ class Database:
     def get_all_users(self) -> list:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT u.*, "
+                "SELECT u.id, u.username, u.role, u.storage_limit_gb, "
+                "u.storage_used_bytes, u.is_active, u.created_at, u.updated_at, "
                 "(SELECT COUNT(*) FROM files f WHERE f.user_id = u.id) as file_count "
                 "FROM users u ORDER BY u.created_at"
             ).fetchall()
             return [dict(r) for r in rows]
 
+    _USER_COLUMNS = {
+        "password_hash", "storage_limit_gb", "storage_used_bytes",
+        "is_active", "updated_at", "role",
+    }
+
     def update_user(self, user_id: int, **kwargs):
         if not kwargs:
             return
+        invalid = set(kwargs.keys()) - self._USER_COLUMNS
+        if invalid:
+            raise ValueError(f"Invalid column names: {invalid}")
         kwargs["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [user_id]
@@ -330,6 +346,14 @@ class Database:
             )
         self._invalidate_session_cache(session_id)
 
+    def get_active_anonymous_sessions(self) -> list:
+        """Lấy tất cả anonymous sessions chưa expired (dùng khi server restart)"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions WHERE is_anonymous = 1 AND expired_at IS NULL"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def get_expired_anonymous_sessions(self, timeout_minutes: int) -> list:
         """Lấy sessions anonymous đã quá timeout"""
         cutoff = (datetime.now() - timedelta(minutes=timeout_minutes)).isoformat()
@@ -423,9 +447,17 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    _FILE_COLUMNS = {
+        "status", "asr_result_json", "speaker_names_json",
+        "model_used", "duration_sec", "completed_at", "summary_json",
+    }
+
     def update_file(self, file_id: int, **kwargs):
         if not kwargs:
             return
+        invalid = set(kwargs.keys()) - self._FILE_COLUMNS
+        if invalid:
+            raise ValueError(f"Invalid column names: {invalid}")
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [file_id]
         with self.connect() as conn:
@@ -673,10 +705,13 @@ class Database:
     def get_user_meetings(self, user_id: int, search: str = None) -> list:
         with self.connect() as conn:
             if search:
-                pattern = f"%{search}%"
+                # Escape LIKE wildcards để tránh wildcard injection
+                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pattern = f"%{escaped}%"
                 rows = conn.execute(
                     "SELECT * FROM meetings WHERE user_id = ? "
-                    "AND (meeting_name LIKE ? OR original_filename LIKE ?) "
+                    "AND (meeting_name LIKE ? ESCAPE '\\' "
+                    "OR original_filename LIKE ? ESCAPE '\\') "
                     "ORDER BY created_at DESC",
                     (user_id, pattern, pattern),
                 ).fetchall()
@@ -687,9 +722,17 @@ class Database:
                 ).fetchall()
             return [dict(r) for r in rows]
 
+    _MEETING_COLUMNS = {
+        "meeting_name", "status", "asr_result_json",
+        "error_message", "updated_at",
+    }
+
     def update_meeting(self, meeting_id: int, **kwargs):
         if not kwargs:
             return
+        invalid = set(kwargs.keys()) - self._MEETING_COLUMNS
+        if invalid:
+            raise ValueError(f"Invalid column names: {invalid}")
         kwargs["updated_at"] = datetime.now().isoformat()
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [meeting_id]

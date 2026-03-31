@@ -13,7 +13,7 @@ from core.config import (
     CONFIG_FILE,
     COLORS,
     ALLOWED_THREADS,
-    get_allowed_cpu_count,
+    DEFAULT_THREADS,
     MODEL_DOWNLOAD_INFO,
     get_speaker_embedding_models,
     is_diarization_available,
@@ -69,25 +69,31 @@ class DragDropLabel(QLabel):
                 border: 2px dashed {COLORS['border_light']};
                 border-radius: 8px;
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 font-size: 13px;
                 padding: 10px;
             }}
             QLabel:hover {{
                 border-color: {COLORS['accent']};
-                background-color: #e8f4ff;
+                background-color: {COLORS['bg_elevated']};
             }}
         """)
         self.setAcceptDrops(True)
 
     def setDefaultText(self):
         self.has_file = False
-        self.setText("📁 Kéo thả file âm thanh/video (mp3, wav, m4a, mp4, mkv, avi...) hoặc bấm để chọn")
+        self.setText(
+            "📁 Kéo thả file âm thanh/video (mp3, wav, m4a, mp4, mkv, avi...) hoặc bấm để chọn"
+            f"<br><span style='font-size:11px;color:{COLORS['text_secondary']};'>"
+            "Kết quả chính xác nhất với tập tin ghi âm trực tiếp từ hệ thống microphone cổ ngỗng."
+            "<br>Nếu ghi âm trực tiếp tại phòng họp thì ưu tiên sử dụng thiết bị chuyên ghi âm như Sony và để sát người chủ trì."
+            "</span>"
+        )
         self.setToolTip("")
 
     def setFileText(self, filename):
         self.has_file = True
-        self.setText(f"📄 <b>{filename}</b><br><span style='font-size:11px;color:#666;'>Bấm để đổi file | Kéo thả file khác</span>")
+        self.setText(f"<b>{filename}</b><br><span style='font-size:11px;color:{COLORS['text_secondary']};'>Bấm để đổi file | Kéo thả file khác</span>")
         self.setToolTip(f"File đã chọn: {filename}\nBấm để chọn file khác")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -131,7 +137,7 @@ class SearchWidget(QWidget):
                 border-radius: 3px 0 0 3px;
                 padding: 1px 4px;
                 font-size: 11px;
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 background-color: {COLORS['bg_input']};
                 border-right: none;
                 margin: 0px;
@@ -262,6 +268,14 @@ class ClickableTextEdit(QTextEdit):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
 
+    def mouseMoveEvent(self, event):
+        anchor = self.anchorAt(event.pos())
+        if anchor and (anchor.startswith("spk_") or anchor.startswith("livespk_")):
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+        super().mouseMoveEvent(event)
+
     def mousePressEvent(self, event):
         anchor = self.anchorAt(event.pos())
 
@@ -359,13 +373,28 @@ class ClickableTextEdit(QTextEdit):
         menu.exec(self.viewport().mapToGlobal(position))
 
 
+SPEAKER_COLOR_PALETTE = [
+    '#4FC3F7',  # Xanh dương nhạt (mặc định)
+    '#81C784',  # Xanh lá
+    '#FFB74D',  # Cam
+    '#E57373',  # Đỏ nhạt
+    '#BA68C8',  # Tím
+    '#FFD54F',  # Vàng
+    '#4DD0E1',  # Cyan
+    '#F06292',  # Hồng
+    '#A1887F',  # Nâu nhạt
+    '#90A4AE',  # Xám xanh
+]
+
+
 class SpeakerRenameDialog(QDialog):
     """Dialog để đổi tên người nói"""
 
-    def __init__(self, current_speaker_id, current_name, custom_names, parent=None):
+    def __init__(self, current_speaker_id, current_name, custom_names, parent=None, current_color=None):
         super().__init__(parent)
         self.setWindowTitle("Đổi tên người nói")
-        self.setFixedSize(400, 350)
+        self.setFixedSize(400, 420)
+        self.selected_color = current_color
         self.setStyleSheet(f"""
             QDialog {{ background-color: {COLORS['bg_dark']}; }}
             QLabel {{ color: {COLORS['text_primary']}; font-size: 13px; }}
@@ -404,6 +433,26 @@ class SpeakerRenameDialog(QDialog):
         self.name_input.setPlaceholderText("Nhập tên mới...")
         layout.addWidget(self.name_input)
 
+        # Color picker
+        color_label = QLabel("Màu tên:")
+        layout.addWidget(color_label)
+        color_layout = QHBoxLayout()
+        color_layout.setSpacing(4)
+        self.color_buttons = []
+        for color in SPEAKER_COLOR_PALETTE:
+            btn = QPushButton()
+            btn.setFixedSize(28, 28)
+            is_selected = (self.selected_color == color)
+            btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {color}; border: {'3px solid white' if is_selected else f'2px solid {COLORS["border"]}'}; border-radius: 14px; }}
+                QPushButton:hover {{ border: 2px solid white; }}
+            """)
+            btn.clicked.connect(lambda checked, c=color: self.on_color_selected(c))
+            color_layout.addWidget(btn)
+            self.color_buttons.append((btn, color))
+        color_layout.addStretch()
+        layout.addLayout(color_layout)
+
         if self.custom_names:
             list_label = QLabel("Hoặc chọn từ danh sách đã có:")
             layout.addWidget(list_label)
@@ -441,10 +490,23 @@ class SpeakerRenameDialog(QDialog):
 
         self.name_input.textChanged.connect(self.on_input_changed)
 
+    def _update_buttons(self):
+        has_change = bool(self.name_input.text().strip()) or self.selected_color is not None
+        self.btn_apply_all.setEnabled(has_change)
+        self.btn_select_only.setEnabled(has_change)
+
     def on_input_changed(self, text):
-        has_text = bool(text.strip())
-        self.btn_apply_all.setEnabled(has_text)
-        self.btn_select_only.setEnabled(has_text)
+        self._update_buttons()
+
+    def on_color_selected(self, color):
+        self.selected_color = color
+        self._update_buttons()
+        for btn, c in self.color_buttons:
+            is_selected = (c == color)
+            btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {c}; border: {'3px solid white' if is_selected else f'2px solid {COLORS["border"]}'}; border-radius: 14px; }}
+                QPushButton:hover {{ border: 2px solid white; }}
+            """)
 
     def on_name_selected(self, item):
         self.name_input.setText(item.text())
@@ -460,7 +522,7 @@ class SpeakerRenameDialog(QDialog):
         self.accept()
 
     def get_result(self):
-        return self.selected_name, self.apply_to_all
+        return self.selected_name, self.apply_to_all, self.selected_color
 
 
 class SpeakerHotkeyDialog(QDialog):

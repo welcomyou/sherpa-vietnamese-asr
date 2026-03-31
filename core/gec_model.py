@@ -1,15 +1,16 @@
-"""Wrapper of Seq2Labels model. Fixes errors based on model predictions"""
+"""Wrapper of Seq2Labels model. Fixes errors based on model predictions.
+Uses ONNX Runtime for inference — no PyTorch dependency."""
 from collections import defaultdict
 from difflib import SequenceMatcher
 import logging
+import os
 import re
 from time import time
 from typing import List, Union
-import warnings
 
-import torch
+import numpy as np
+import onnxruntime as ort
 from transformers import AutoTokenizer
-from core.modeling_seq2labels import Seq2LabelsModel
 from core.vocabulary import Vocabulary
 from core.gec_utils import PAD, UNK, START_TOKEN, get_target_sent_by_edits
 
@@ -17,7 +18,22 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logger = logging.getLogger(__file__)
 
 
-class GecBERTModel(torch.nn.Module):
+def _softmax(x, axis=-1):
+    """Numerically stable softmax."""
+    e = np.exp(x - np.max(x, axis=axis, keepdims=True))
+    return e / e.sum(axis=axis, keepdims=True)
+
+
+def _pad_sequences(sequences, padding_value=0):
+    """Pad list of 1D int arrays to same length, return 2D int64 ndarray."""
+    max_len = max(len(s) for s in sequences)
+    result = np.full((len(sequences), max_len), padding_value, dtype=np.int64)
+    for i, s in enumerate(sequences):
+        result[i, :len(s)] = s
+    return result
+
+
+class GecBERTModel:
     def __init__(
         self,
         vocab_path=None,
@@ -28,7 +44,7 @@ class GecBERTModel(torch.nn.Module):
         min_len=3,
         lowercase_tokens=False,
         log=False,
-        iterations=None,  # None = auto: 1 cho CPU, 3 cho GPU
+        iterations=None,
         min_error_probability=0.0,
         confidence=0,
         resolve_cycles=False,
@@ -39,54 +55,13 @@ class GecBERTModel(torch.nn.Module):
         punc_dict={':', ".", ",", "?"},
         case_confidence=0.0,
     ):
-        r"""
-        Args:
-            vocab_path (`str`):
-                Path to vocabulary directory.
-            model_paths (`List[str]`):
-                List of model paths.
-            weights (`int`, *Optional*, defaults to None):
-                Weights of each model. Only relevant if `is_ensemble is True`.
-            device (`int`, *Optional*, defaults to None):
-                Device to load model. If not set, device will be automatically choose.
-            max_len (`int`, defaults to 64):
-                Max sentence length to be processed (all longer will be truncated).
-            min_len (`int`, defaults to 3):
-                Min sentence length to be processed (all shorted will be returned w/o changes).
-            lowercase_tokens (`bool`, defaults to False):
-                Whether to lowercase tokens.
-            log (`bool`, defaults to False):
-                Whether to enable logging.
-            iterations (`int`, defaults to 3):
-                Max iterations to run during inference.
-            special_tokens_fix (`bool`, defaults to True):
-               Whether to fix problem with [CLS], [SEP] tokens tokenization.
-            min_error_probability (`float`, defaults to `0.0`):
-                Minimum probability for each action to apply.
-            confidence (`float`, defaults to `0.0`):
-                How many probability to add to $KEEP token.
-            split_chunk (`bool`, defaults to False):
-                Whether to split long sentences to multiple segments of `chunk_size`.
-                !Warning: if `chunk_size > max_len`, each segment will be truncate to `max_len`.
-            chunk_size (`int`, defaults to 48):
-                Length of each segment (in words). Only relevant if `split_chunk is True`.
-            overlap_size (`int`, defaults to 12):
-                Overlap size (in words) between two consecutive segments. Only relevant if `split_chunk is True`.
-            min_words_cut (`int`, defaults to 6):
-                Minimun number of words to be cut while merging two consecutive segments.
-                Only relevant if `split_chunk is True`.
-            punc_dict (List[str], defaults to `{':', ".", ",", "?"}`):
-                List of punctuations.
-        """
-        super().__init__()
         if isinstance(model_paths, str):
             model_paths = [model_paths]
         self.model_weights = list(map(float, weights)) if weights else [1] * len(model_paths)
-        self.device = (
-            torch.device("cuda" if torch.cuda.is_available() else "cpu") if device is None else torch.device(device)
-        )
-        
-        # Auto-determine iterations: Force 3 cho chất lượng tốt nhất dù trên CPU
+
+        # device param giữ lại cho tương thích API, nhưng ONNX tự chọn provider
+        self.device = device
+
         if iterations is None:
             self.iterations = 3
         else:
@@ -98,7 +73,6 @@ class GecBERTModel(torch.nn.Module):
         self.vocab = Vocabulary.from_files(vocab_path)
         self.incorr_index = self.vocab.get_token_index("INCORRECT", "d_tags")
         self.log = log
-        # Note: self.iterations đã được set ở trên (line 88-92)
         self.confidence = confidence
         self.resolve_cycles = resolve_cycles
         assert (
@@ -113,7 +87,7 @@ class GecBERTModel(torch.nn.Module):
         self.case_confidence = case_confidence
         self.punc_str = '[' + ''.join([f'\\{x}' for x in punc_dict]) + ']'
         self.noop_index = self.vocab.get_token_index("$KEEP", "labels")
-        
+
         self.case_indices = []
         for i in range(self.vocab.get_vocab_size("labels")):
             token = self.vocab.get_token_from_index(i, namespace="labels")
@@ -124,66 +98,47 @@ class GecBERTModel(torch.nn.Module):
         self.append_period_index = self.vocab.get_token_index("$APPEND_.", "labels")
         self.append_comma_index = self.vocab.get_token_index("$APPEND_,", "labels")
 
-        # set training parameters and operations
-
+        # Load ONNX sessions + tokenizers
         self.indexers = []
-        self.models = []
+        self.sessions = []
         for model_path in model_paths:
-            import os
-            logger.info(f"[GecBERT] Loading model from: {model_path}")
-            try:
-                # 1. Load Config
-                from transformers import AutoConfig
-                config = AutoConfig.from_pretrained(model_path)
-                logger.info(f"[GecBERT] Config loaded: hidden_size={getattr(config, 'hidden_size', 'N/A')}, "
-                           f"load_pretrained={getattr(config, 'load_pretrained', 'N/A')}")
+            logger.info(f"[GecBERT] Loading ONNX model from: {model_path}")
 
-                # 2. Init Model
-                model = Seq2LabelsModel(config)
-                logger.info(f"[GecBERT] Model initialized")
-
-                # 3. Load Weights
-                bin_path = os.path.join(model_path, "pytorch_model.bin")
-                if not os.path.exists(bin_path):
-                     raise FileNotFoundError(f"Binary not found at {bin_path}")
-
-                logger.info(f"[GecBERT] Loading weights from {bin_path}")
-                state_dict = torch.load(bin_path, map_location="cpu")
-
-                try:
-                    model.load_state_dict(state_dict, strict=False)
-                    logger.info(f"[GecBERT] Weights loaded OK")
-                except Exception as e:
-                    logger.warning(f"[GecBERT] load_state_dict error: {e}, trying manual copy")
-                    model_dict = model.state_dict()
-                    for k, v in state_dict.items():
-                        if k in model_dict:
-                            try:
-                                model_dict[k].copy_(v)
-                            except Exception as copy_e:
-                                logger.error(f"[GecBERT] ERROR copying {k}: {copy_e}")
-
-                del state_dict
-                import gc
-                gc.collect()
-
-            except Exception as e:
-                raise RuntimeError(
-                    f"Cannot load model from {model_path}. "
-                    f"Ensure pytorch_model.bin and config.json exist in the model directory. "
-                    f"Original error: {e}"
+            # Tìm file ONNX
+            onnx_path = os.path.join(model_path, "vibert-capu.onnx")
+            if not os.path.exists(onnx_path):
+                raise FileNotFoundError(
+                    f"ONNX model not found at {onnx_path}. "
+                    f"Run temp/export_vibert_onnx.py to export first."
                 )
 
-            special_tokens_fix = config.special_tokens_fix
-            import os as _os
-            if _os.path.isdir(model_path) and _os.path.exists(_os.path.join(model_path, "vocab.txt")):
+            # Load ONNX session
+            sess_options = ort.SessionOptions()
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_options.inter_op_num_threads = 1
+            from core.config import compute_ort_threads, PHYSICAL_CORES
+            sess_options.intra_op_num_threads = compute_ort_threads(PHYSICAL_CORES)
+            session = ort.InferenceSession(
+                onnx_path, sess_options,
+                providers=["CPUExecutionProvider"]
+            )
+            self.sessions.append(session)
+            logger.info(f"[GecBERT] ONNX session loaded OK")
+
+            # Load tokenizer
+            if os.path.isdir(model_path) and os.path.exists(os.path.join(model_path, "vocab.txt")):
                 tokenizer_path = model_path
             else:
-                tokenizer_path = config.pretrained_name_or_path
+                # Fallback: đọc config.json để lấy pretrained_name_or_path
+                import json
+                config_file = os.path.join(model_path, "config.json")
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                tokenizer_path = cfg.get("pretrained_name_or_path", model_path)
+
+            # special_tokens_fix luôn True cho vibert-capu
             logger.info(f"[GecBERT] Loading tokenizer from {tokenizer_path}")
-            self.indexers.append(self._get_indexer(tokenizer_path, special_tokens_fix))
-            model.eval().to(self.device)
-            self.models.append(model)
+            self.indexers.append(self._get_indexer(tokenizer_path, special_tokens_fix=True))
             logger.info(f"[GecBERT] Model loaded OK from {model_path}")
 
     def _get_indexer(self, weights_name, special_tokens_fix):
@@ -202,9 +157,9 @@ class GecBERTModel(torch.nn.Module):
             tokenizer.add_tokens([START_TOKEN])
             tokenizer.vocab[START_TOKEN] = len(tokenizer) - 1
         return tokenizer
-    
+
     def forward(self, text: Union[str, List[str], List[List[str]]], is_split_into_words=False, progress_callback=None, pause_hints=None):
-        # Input type checking for clearer error
+        # Giữ nguyên giao diện gọi __call__ như cũ
         def _is_valid_text_input(t):
             if isinstance(t, str):
                 return True
@@ -237,14 +192,15 @@ class GecBERTModel(torch.nn.Module):
 
         if not is_batched:
             text = [text]
-            # Wrap pause_hints in batch dimension
             if pause_hints is not None:
                 pause_hints = [pause_hints]
 
         return self.handle_batch(text, progress_callback=progress_callback, pause_hints=pause_hints)
 
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
     def split_chunks(self, batch, pause_hints=None):
-        # return batch pairs of indices, and split pause_hints accordingly
         result = []
         indices = []
         hints_result = [] if pause_hints is not None else None
@@ -273,13 +229,7 @@ class GecBERTModel(torch.nn.Module):
 
         return result, indices, hints_result
 
-    def check_alnum(self, s):
-        if len(s) < 2:
-            return False
-        return not (s.isalpha() or s.isdigit())
-
     def apply_chunk_merging(self, tokens, next_tokens):
-        # Return next tokens if current tokens list is empty
         if not tokens:
             return next_tokens
 
@@ -337,47 +287,47 @@ class GecBERTModel(torch.nn.Module):
         result = " ".join(result)
         return result
 
-    def predict(self, batches, progress_callback=None, pause_hints_batch=None, orig_tokens_batch=None):
+    def predict(self, batch_inputs, progress_callback=None, pause_hints_batch=None, orig_tokens_batch=None):
+        """Run ONNX inference on preprocessed inputs."""
         t11 = time()
-        predictions = []
-        for batch, model in zip(batches, self.models):
-            batch_size = len(batch['input_ids']) if 'input_ids' in batch else 0
+        all_logits_list = []
+        all_detect_list = []
+
+        for inputs, session in zip(batch_inputs, self.sessions):
+            batch_size = inputs["input_ids"].shape[0]
             mini_batch_size = 32
 
             if batch_size > mini_batch_size:
-                all_logits = []
-                all_detect_logits = []
-                all_max_error_probability = []
-
+                logits_parts = []
+                detect_parts = []
                 for i in range(0, batch_size, mini_batch_size):
                     end_idx = min(i + mini_batch_size, batch_size)
-                    mini_batch = {k: v[i:end_idx].to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-
-                    with torch.no_grad():
-                        pred = model.forward(**mini_batch)
-                        all_logits.append(pred['logits'].cpu())
-                        all_detect_logits.append(pred['detect_logits'].cpu())
-                        all_max_error_probability.append(pred['max_error_probability'].cpu())
+                    mini = {
+                        "input_ids": inputs["input_ids"][i:end_idx],
+                        "attention_mask": inputs["attention_mask"][i:end_idx],
+                        "token_type_ids": inputs["token_type_ids"][i:end_idx],
+                        "input_offsets": inputs["input_offsets"][i:end_idx],
+                    }
+                    logits, detect_logits = session.run(None, mini)
+                    logits_parts.append(logits)
+                    detect_parts.append(detect_logits)
 
                     if progress_callback is not None:
                         progress_callback(end_idx, batch_size)
 
-                prediction = {
-                    'logits': torch.cat(all_logits, dim=0).to(self.device),
-                    'detect_logits': torch.cat(all_detect_logits, dim=0).to(self.device),
-                    'max_error_probability': torch.cat(all_max_error_probability, dim=0).to(self.device)
-                }
+                all_logits = np.concatenate(logits_parts, axis=0)
+                all_detect = np.concatenate(detect_parts, axis=0)
             else:
-                batch = {k: v.to(self.device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-                with torch.no_grad():
-                    prediction = model.forward(**batch)
+                all_logits, all_detect = session.run(None, inputs)
                 if progress_callback is not None:
                     progress_callback(batch_size, batch_size)
 
-            predictions.append(prediction)
+            all_logits_list.append(all_logits)
+            all_detect_list.append(all_detect)
 
         preds, idx, error_probs = self._convert(
-            predictions, pause_hints_batch=pause_hints_batch,
+            all_logits_list, all_detect_list,
+            pause_hints_batch=pause_hints_batch,
             orig_tokens_batch=orig_tokens_batch
         )
         t55 = time()
@@ -386,21 +336,18 @@ class GecBERTModel(torch.nn.Module):
         return preds, idx, error_probs
 
     def get_token_action(self, token, index, prob, sugg_token):
-        """Get lost of suggested actions for token."""
-        # cases when we don't need to do anything
+        """Get list of suggested actions for token."""
         if prob < self.min_error_probability or sugg_token in [UNK, PAD, '$KEEP']:
             return None
-            
+
         # CHỈ CẤP QUYỀN: Thêm dấu câu ($APPEND_. , ? !) và Viết hoa ($TRANSFORM_CASE_)
         # CẤM QUYỀN: Thay thế chữ ($REPLACE_), Xóa chữ ($DELETE), Đính chữ ($APPEND_chữ)
         if sugg_token == '$DELETE' or sugg_token.startswith('$REPLACE_'):
             return None
-        
+
         if sugg_token.startswith('$APPEND_'):
-            # Lấy ký tự/từ muốn đính kèm để kiểm tra
             added_text = sugg_token.replace('$APPEND_', '')
             if added_text not in self.punc_dict:
-                # Nếu không phải đính kèm dấu câu hợp lệ -> Bỏ qua
                 return None
             start_pos = index + 1
             end_pos = index + 1
@@ -408,7 +355,7 @@ class GecBERTModel(torch.nn.Module):
             start_pos = index
             end_pos = index + 1
         else:
-            return None # Block everything else just to be safe
+            return None
 
         if sugg_token == "$DELETE":
             sugg_token_clear = ""
@@ -420,86 +367,91 @@ class GecBERTModel(torch.nn.Module):
         return start_pos - 1, end_pos - 1, sugg_token_clear, prob
 
     def preprocess(self, token_batch):
+        """Tokenize + compute word offsets → numpy arrays cho ONNX."""
         seq_lens = [len(sequence) for sequence in token_batch if sequence]
         if not seq_lens:
             return []
         max_len = min(max(seq_lens), self.max_len)
         batches = []
         for indexer in self.indexers:
-            token_batch = [[START_TOKEN] + sequence[:max_len] for sequence in token_batch]
+            prefixed_batch = [[START_TOKEN] + sequence[:max_len] for sequence in token_batch]
             batch = indexer(
-                token_batch,
-                return_tensors="pt",
+                prefixed_batch,
+                return_tensors="np",
                 padding=True,
                 is_split_into_words=True,
                 truncation=True,
                 add_special_tokens=False,
             )
+            # Build input_offsets
             offset_batch = []
-            for i in range(len(token_batch)):
+            for i in range(len(prefixed_batch)):
                 word_ids = batch.word_ids(batch_index=i)
                 offsets = [0]
-                for i in range(1, len(word_ids)):
-                    if word_ids[i] != word_ids[i - 1]:
-                        offsets.append(i)
-                offset_batch.append(torch.LongTensor(offsets))
+                for j in range(1, len(word_ids)):
+                    if word_ids[j] != word_ids[j - 1]:
+                        offsets.append(j)
+                offset_batch.append(offsets)
 
-            batch["input_offsets"] = torch.nn.utils.rnn.pad_sequence(
-                offset_batch, batch_first=True, padding_value=0
-            ).to(torch.long)
+            padded_offsets = _pad_sequences(offset_batch, padding_value=0)
 
-            batches.append(batch)
+            batches.append({
+                "input_ids": batch["input_ids"].astype(np.int64),
+                "attention_mask": batch["attention_mask"].astype(np.int64),
+                "token_type_ids": batch["token_type_ids"].astype(np.int64),
+                "input_offsets": padded_offsets,
+            })
 
         return batches
 
-    def _convert(self, data, pause_hints_batch=None, orig_tokens_batch=None):
-        all_class_probs = torch.zeros_like(data[0]['logits'])
-        error_probs = torch.zeros_like(data[0]['max_error_probability'])
-        for output, weight in zip(data, self.model_weights):
-            class_probabilities_labels = torch.softmax(output['logits'], dim=-1)
-            all_class_probs += weight * class_probabilities_labels / sum(self.model_weights)
-            class_probabilities_d = torch.softmax(output['detect_logits'], dim=-1)
-            error_probs_d = class_probabilities_d[:, :, self.incorr_index]
-            incorr_prob = torch.max(error_probs_d, dim=-1)[0]
-            error_probs += weight * incorr_prob / sum(self.model_weights)
+    def _convert(self, logits_list, detect_list, pause_hints_batch=None, orig_tokens_batch=None):
+        """Softmax + confidence adjustment + pause nudge → predicted label indices."""
+        # Weighted average of model outputs (hỗ trợ ensemble)
+        total_weight = sum(self.model_weights)
+        all_class_probs = np.zeros_like(logits_list[0], dtype=np.float32)
+        error_probs = np.zeros(logits_list[0].shape[:1], dtype=np.float32)
+
+        for logits, detect_logits, weight in zip(logits_list, detect_list, self.model_weights):
+            class_probs = _softmax(logits, axis=-1)
+            all_class_probs += (weight / total_weight) * class_probs
+
+            class_probs_d = _softmax(detect_logits, axis=-1)
+            error_probs_d = class_probs_d[:, :, self.incorr_index]
+            incorr_prob = error_probs_d.max(axis=-1)
+            error_probs += (weight / total_weight) * incorr_prob
 
         if self.confidence != 0.0:
             all_class_probs[:, :, self.noop_index] += self.confidence
 
-        if self.case_confidence != 0.0 and hasattr(self, 'case_indices'):
+        if self.case_confidence != 0.0:
             for idx in self.case_indices:
                 all_class_probs[:, :, idx] += self.case_confidence
 
         # Pause-based nudge: chỉ can thiệp nhẹ khi model predict $KEEP tại vị trí có pause
         if pause_hints_batch is not None:
-            # Snapshot label TRƯỚC khi nudge
-            before_idx = torch.max(all_class_probs, dim=-1)[1]
+            before_idx = all_class_probs.argmax(axis=-1)
 
             for b_idx, hints in enumerate(pause_hints_batch):
                 if hints is None:
                     continue
                 for w_idx, gap in enumerate(hints):
                     t_idx = w_idx + 1  # +1 vì START_TOKEN ở vị trí 0
-                    if t_idx >= all_class_probs.size(1):
+                    if t_idx >= all_class_probs.shape[1]:
                         break
 
-                    current_label_idx = torch.argmax(all_class_probs[b_idx, t_idx]).item()
+                    current_label_idx = int(all_class_probs[b_idx, t_idx].argmax())
                     current_label = self.vocab.get_token_from_index(current_label_idx, "labels")
 
                     if gap >= 1.0:
-                        # Pause dài (>=1s): nếu model đã cho dấu chấm → giữ nguyên
-                        # Nếu model cho $KEEP → nudge nhẹ về dấu chấm
                         if current_label == "$KEEP":
                             all_class_probs[b_idx, t_idx, self.noop_index] -= 0.2
                             all_class_probs[b_idx, t_idx, self.append_period_index] += 0.2
                     elif gap >= 0.2:
-                        # Pause ngắn (0.2-1s): nếu model đã cho dấu chấm/phẩy → giữ nguyên
-                        # Nếu model cho $KEEP → chỉ boost nhẹ dấu phẩy, không giảm $KEEP
                         if current_label == "$KEEP":
                             all_class_probs[b_idx, t_idx, self.append_comma_index] += 0.2
 
-            # So sánh label SAU nudge → log chỗ nào thay đổi
-            after_idx = torch.max(all_class_probs, dim=-1)[1]
+            # Log pause changes
+            after_idx = all_class_probs.argmax(axis=-1)
             for b_idx, hints in enumerate(pause_hints_batch):
                 if hints is None:
                     continue
@@ -507,10 +459,10 @@ class GecBERTModel(torch.nn.Module):
                     if gap < 0.2:
                         continue
                     t_idx = w_idx + 1
-                    if t_idx >= all_class_probs.size(1):
+                    if t_idx >= all_class_probs.shape[1]:
                         break
-                    old_label = self.vocab.get_token_from_index(before_idx[b_idx, t_idx].item(), "labels")
-                    new_label = self.vocab.get_token_from_index(after_idx[b_idx, t_idx].item(), "labels")
+                    old_label = self.vocab.get_token_from_index(int(before_idx[b_idx, t_idx]), "labels")
+                    new_label = self.vocab.get_token_from_index(int(after_idx[b_idx, t_idx]), "labels")
                     word = ""
                     if orig_tokens_batch and b_idx < len(orig_tokens_batch) and w_idx < len(orig_tokens_batch[b_idx]):
                         word = orig_tokens_batch[b_idx][w_idx]
@@ -519,9 +471,8 @@ class GecBERTModel(torch.nn.Module):
                     else:
                         print(f"  [Pause kept]    \"{word}\" gap={gap:.2f}s: {new_label} (unchanged)")
 
-        max_vals = torch.max(all_class_probs, dim=-1)
-        probs = max_vals[0].tolist()
-        idx = max_vals[1].tolist()
+        probs = all_class_probs.max(axis=-1).tolist()
+        idx = all_class_probs.argmax(axis=-1).tolist()
         return probs, idx, error_probs.tolist()
 
     def update_final_batch(self, final_batch, pred_ids, pred_batch, prev_preds_dict):
@@ -537,7 +488,6 @@ class GecBERTModel(torch.nn.Module):
                 prev_preds_dict[orig_id].append(pred)
                 total_updated += 1
             elif orig != pred and pred in prev_preds:
-                # update final batch, but stop iterations
                 final_batch[orig_id] = pred
                 total_updated += 1
             else:
@@ -551,23 +501,19 @@ class GecBERTModel(torch.nn.Module):
             length = min(len(tokens), self.max_len)
             edits = []
 
-            # skip whole sentences if there no errors
             if max(idxs) == 0:
                 all_results.append(tokens)
                 continue
 
-            # skip whole sentence if probability of correctness is not high
             if error_prob < self.min_error_probability:
                 all_results.append(tokens)
                 continue
 
             for i in range(length + 1):
-                # because of START token
                 if i == 0:
                     token = START_TOKEN
                 else:
                     token = tokens[i - 1]
-                # skip if there is no error
                 if idxs[i] == noop_index:
                     continue
 
@@ -586,12 +532,6 @@ class GecBERTModel(torch.nn.Module):
         pause_hints: list of list of floats, mỗi phần tử là gap (giây) sau word tương ứng.
                      Dùng để boost logits thêm dấu chấm/phẩy tại vị trí có pause trong speech.
         """
-        try:
-            from debug_utils import log_memory
-            log_memory("GecBERTModel.handle_batch start")
-        except ImportError:
-            log_memory = lambda x: None
-
         if self.split_chunk:
             full_batch, indices, pause_hints_chunks = self.split_chunks(full_batch, pause_hints=pause_hints)
         else:
@@ -605,13 +545,9 @@ class GecBERTModel(torch.nn.Module):
         total_updates = 0
 
         for n_iter in range(self.iterations):
-            try:
-                log_memory(f"GecBERTModel loop iteration {n_iter} start")
-            except:
-                pass
             orig_batch = [final_batch[i] for i in pred_ids]
 
-            # Lấy pause_hints tương ứng với pred_ids (chỉ iteration đầu tiên mới dùng pause)
+            # Pause hints chỉ dùng ở iteration đầu tiên
             if n_iter == 0 and pause_hints_chunks is not None:
                 cur_pause_hints = [pause_hints_chunks[i] for i in pred_ids]
             else:
@@ -634,11 +570,6 @@ class GecBERTModel(torch.nn.Module):
             final_batch, pred_ids, cnt = self.update_final_batch(final_batch, pred_ids, pred_batch, prev_preds_dict)
             total_updates += cnt
 
-            try:
-                log_memory(f"GecBERTModel loop iteration {n_iter} end")
-            except:
-                pass
-
             if not pred_ids:
                 break
 
@@ -649,8 +580,4 @@ class GecBERTModel(torch.nn.Module):
         if merge_punc:
             final_batch = [re.sub(r'\s+(%s)' % self.punc_str, r'\1', x) for x in final_batch]
 
-        try:
-            log_memory("GecBERTModel.handle_batch end")
-        except:
-            pass
         return final_batch

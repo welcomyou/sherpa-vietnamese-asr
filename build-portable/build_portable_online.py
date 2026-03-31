@@ -20,7 +20,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from build_portable import (
     VENV_DIR, BUILD_DIR, PYTHON_EMBED_URL,
     check_venv, download_python_embedded, setup_python,
-    copy_pyd_files, copy_dlls,
+    copy_pyd_files, copy_dlls, copy_vcredist_dlls, cleanup_pyqt6, _create_stubs,
     get_venv_path, clean_build, calculate_size,
 )
 
@@ -44,33 +44,108 @@ ONLINE_SOURCE_FILES = [
 # Models KHONG copy
 EXCLUDE_MODELS_ONLINE = {
     "moonshine-base-vi",
-    "zipformer-30m-rnnt-streaming-6000h",  # Khong can streaming
+    "zipformer-30m-rnnt-streaming-6000h",
+    # Unused ASR models
+    'gipformer-65M-rnnt', 'myfinetune', 'myfinetune2', 'myfinetune3',
+    'sherpa-onnx-zipformer-vi-30M',
+    'sherpa-onnx-zipformer-vi-2025-04-20_tmp',
+    # CEM (not integrated in runtime)
+    'cem-retrain',
+    # Legacy diarization (pure ORT replaces)
+    'speaker_embedding', 'speaker_diarization',
+    # Not used
+    'gtcrn',
+    # Summary/LLM models (chưa hoàn thiện)
+    '.cache',
 }
+
+# GGUF model files (match by extension, skip tất cả)
+EXCLUDE_MODEL_EXTENSIONS = {'.gguf'}
 
 # Packages khong can cho web service (giam dung luong)
 EXCLUDE_PACKAGES_SERVICES = {
     'moonshine_voice',
-    # Desktop-only packages
+
+    # === PyTorch + ecosystem — app uses ONNX Runtime only ===
+    'torch', 'torchaudio', 'torio', 'torchmetrics', 'torchgen',
+    'torchcodec', 'torch_audiomentations', 'torch_pitch_shift',
+    'functorch', 'ml_dtypes',
+    'sympy', 'networkx', 'jinja2', 'markupsafe',
+
+    # === PyTorch Lightning ===
+    'lightning', 'lightning_fabric', 'lightning_utilities',
+    'pytorch_lightning', 'pytorch_metric_learning',
+
+    # === Pyannote — pure ORT diarization replaces it ===
+    'pyannote', 'pyannote_audio', 'pyannote_core', 'pyannote_pipeline',
+    'pyannote_database', 'pyannote_metrics', 'pyannote_onnx_extended',
+    'pyannoteai', 'pyannoteai_sdk',
+    'asteroid_filterbanks', 'julius', 'einops',
+
+    # === numba/llvmlite — librosa only uses load/resample via soxr ===
+    'numba', 'llvmlite',
+
+    # === Large unused packages ===
+    'pandas', 'pymupdf', 'fitz', 'onnx', 'ctranslate2', 'av',
+
+    # === Desktop-only packages ===
     'sounddevice', '_sounddevice_data',
-    'pyinstaller', 'pyinstaller_hooks_contrib', 'altgraph', 'pefile',
     'matplotlib', 'mpl_toolkits', 'kiwisolver', 'contourpy', 'cycler',
     'pyparsing',
-    # Not used by web service
-    'ctranslate2', 'pandas', 'llvmlite', 'numba',
-    'av', 'networkx', 'sympy', 'mpmath',
-    'adapters', 'torio', 'torchcodec', 'rapidfuzz',
-    'alembic',
-    # Build / packaging tools
+
+    # Auth: auth.py dung hashlib, khong dung passlib
+    'passlib', 'bcrypt',
+    # Database: web service dung sqlite3 truc tiep, khong can ORM
+    'sqlalchemy', 'aiosqlite', 'greenlet', 'alembic', 'mako',
+    # HTTP client: web service khong dung aiohttp/httpx
+    'aiohttp', 'aiofiles', 'aiohappyeyeballs', 'aiosignal',
+    'frozenlist', 'multidict', 'yarl', 'propcache',
+    'httpcore', 'httpx',
+
+    # === gRPC ===
+    'grpc', 'grpcio', 'grpcio_tools',
+    'google', 'googleapis_common_protos', 'protobuf',
+
+    # === Monitoring / Logging ===
+    'opentelemetry', 'opentelemetry_api', 'opentelemetry_sdk',
+    'opentelemetry_proto', 'opentelemetry_exporter_otlp',
+    'opentelemetry_exporter_otlp_proto_http',
+    'opentelemetry_exporter_otlp_proto_grpc',
+    'opentelemetry_exporter_otlp_proto_common',
+    'opentelemetry_semantic_conventions',
+    'pygments', 'rich', 'colorlog', 'colorama',
+
+    # === transformers + deps — replaced by minimal stub ===
+    'transformers',
+    'huggingface_hub', 'safetensors',
+    'regex', 'fsspec', 'tqdm',
+
+    # === Text processing / Math / Misc not used ===
+    'jiwer', 'langid', 'mosestokenizer', 'wtpsplit', 'textgrid',
+    'markdown_it', 'mdurl',
+    'optuna', 'primePy', 'mpmath', 'skops', 'prettytable',
+    'adapters', 'rapidfuzz', 'chunkformer',
+    'wespeakerruntime', 'silero_vad', 'faster_whisper',
+    'diarize', 'nara_wpe', 'kaldiio',
+    'bottleneck', 'pooch', 'flatbuffers', 'wcwidth', 'docopt',
+    'openfile', 'toolwrapper',
+
+    # === Build / packaging tools ===
     'pip', 'setuptools', 'wheel', 'pkg_resources', '_distutils_hack',
     'distutils_precedence',
+    'pyinstaller', 'pyinstaller_hooks_contrib', 'altgraph', 'pefile',
 }
 
 
 def should_exclude_services(name):
-    """Check if package or its dist-info should be excluded for service build"""
+    """Check if package or its dist-info / .libs should be excluded for service build"""
     lower = name.lower()
+    base = lower.replace('.libs', '')
     for pkg in EXCLUDE_PACKAGES_SERVICES:
-        if lower == pkg or lower.startswith(pkg + '-') or lower.startswith(pkg.replace('-', '_') + '-'):
+        pkg_under = pkg.replace('-', '_')
+        if lower == pkg or base == pkg or lower == pkg_under or base == pkg_under:
+            return True
+        if lower.startswith(pkg + '-') or lower.startswith(pkg_under + '-'):
             return True
     return False
 
@@ -118,6 +193,10 @@ def copy_venv_packages_services():
     for pth in dst_site.glob("*distutils-precedence*.pth"):
         pth.unlink()
 
+    # Create stubs (same as desktop build)
+    from build_portable import _create_stubs
+    _create_stubs(dst_site)
+
     print(f"[OK] Copied {copied} packages, skipped {skipped}")
     return True
 
@@ -132,6 +211,18 @@ def copy_source_files_online():
             shutil.copy2(src, DIST_DIR_ONLINE)
         else:
             print(f"  [WARN] Not found: {f}")
+
+    # Portable build: bind 0.0.0.0 thay vì IP cố định của máy dev
+    config_dst = DIST_DIR_ONLINE / "config.ini"
+    if config_dst.exists():
+        import configparser
+        cfg = configparser.ConfigParser()
+        cfg.read(config_dst, encoding="utf-8")
+        if cfg.has_section("ServerSettings"):
+            cfg.set("ServerSettings", "host", "0.0.0.0")
+            with open(config_dst, "w", encoding="utf-8") as f:
+                cfg.write(f)
+            print("  [OK] config.ini: host set to 0.0.0.0")
 
     # Copy core/ module
     core_src = PROJECT_ROOT / "core"
@@ -167,9 +258,46 @@ def copy_source_files_online():
     print("[OK] Online source files copied")
 
 
+def copy_server_extras():
+    """Copy ICU shim (cho Windows Server 2016), nssm.exe, bat files"""
+    print("[EXTRA] Copying server extras...")
+
+    # ICU shim DLLs (Qt6Core.dll can ICU, Windows Server 2016 khong co)
+    icu_shim_dir = SCRIPT_DIR / "icu-shim"
+    qt6_bin = DIST_DIR_ONLINE / "python" / "Lib" / "site-packages" / "PyQt6" / "Qt6" / "bin"
+    qt6_bin.mkdir(parents=True, exist_ok=True)
+    icu_copied = 0
+    for icu_name in ['icuuc.dll', 'icuuc73.dll', 'icuin73.dll', 'icudt73.dll']:
+        src = icu_shim_dir / icu_name
+        if src.exists():
+            shutil.copy2(src, qt6_bin)
+            icu_copied += 1
+    if icu_copied >= 4:
+        print("  [OK] ICU shim + ICU 73 (Windows Server compatible)")
+    else:
+        print(f"  [WARN] ICU shim khong day du ({icu_copied}/4) trong {icu_shim_dir}")
+
+    # nssm.exe (cai Windows Service)
+    nssm_src = SCRIPT_DIR / "nssm.exe"
+    if nssm_src.exists():
+        shutil.copy2(nssm_src, DIST_DIR_ONLINE)
+        print("  [OK] nssm.exe")
+    else:
+        print("  [WARN] nssm.exe khong tim thay")
+
+    # Bat files
+    for bat_name in ['start-gui.bat', 'start-server.bat', 'install-service.bat']:
+        bat_src = SCRIPT_DIR / "server-bats" / bat_name
+        if bat_src.exists():
+            shutil.copy2(bat_src, DIST_DIR_ONLINE)
+            print(f"  [OK] {bat_name}")
+
+    print("[OK] Server extras copied")
+
+
 def copy_models_online():
-    """Copy models, loai tru streaming model"""
-    print("[MODEL] Copying models (excluding streaming)...")
+    """Copy models, loai tru unused models"""
+    print("[MODEL] Copying models...")
 
     models_src = PROJECT_ROOT / "models"
     models_dst = DIST_DIR_ONLINE / "models"
@@ -178,19 +306,91 @@ def copy_models_online():
         print("  [WARN] models/ not found")
         return
 
+    # CEM root file patterns to skip
+    CEM_PATTERNS = ['cem_*.pt', 'cem_*.onnx', 'cem_*.json']
+
     models_dst.mkdir(parents=True, exist_ok=True)
 
     for item in models_src.iterdir():
         if item.name in EXCLUDE_MODELS_ONLINE:
             print(f"  [SKIP] {item.name}")
             continue
+        if any(item.match(p) for p in CEM_PATTERNS):
+            print(f"  [SKIP] {item.name}")
+            continue
+        if item.suffix.lower() in EXCLUDE_MODEL_EXTENSIONS:
+            print(f"  [SKIP] {item.name}")
+            continue
 
         dst_item = models_dst / item.name
         if item.is_dir():
-            shutil.copytree(item, dst_item)
+            shutil.copytree(item, dst_item, ignore=shutil.ignore_patterns(
+                            '.git', '.cache', '.gitattributes', '__pycache__'))
         else:
             shutil.copy2(item, dst_item)
         print(f"  [OK] {item.name}")
+
+    # Clean vibert-capu: keep only onnx + vocab + config
+    vibert_dst = models_dst / "vibert-capu"
+    if vibert_dst.exists():
+        VIBERT_KEEP = {'vibert-capu.onnx', 'vocab.txt', 'config.json'}
+        removed = 0
+        for f in list(vibert_dst.rglob('*')):
+            if f.is_file() and f.name not in VIBERT_KEEP:
+                removed += f.stat().st_size / 1024 / 1024
+                f.unlink()
+        for d in sorted(vibert_dst.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if removed > 0:
+            print(f"  [TRIM] vibert-capu: removed {removed:.0f} MB")
+
+    # Clean pyannote: keep only plda/ (remove pytorch_model.bin)
+    pyannote_dst = models_dst / "pyannote" / "speaker-diarization-community-1"
+    if pyannote_dst.exists():
+        removed = 0
+        for f in list(pyannote_dst.rglob('*.bin')):
+            removed += f.stat().st_size / 1024 / 1024
+            f.unlink()
+        for d in sorted(pyannote_dst.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if removed > 0:
+            print(f"  [TRIM] pyannote: removed {removed:.0f} MB pytorch_model.bin")
+
+    # Global cleanup: remove non-ONNX artifacts from ALL model dirs
+    JUNK_EXTS = {'.bin', '.pt', '.pth', '.pkl', '.safetensors', '.filepart',
+                 '.md', '.gitattributes'}
+    removed_total = 0
+    for f in list(models_dst.rglob('*')):
+        if f.is_file() and f.suffix.lower() in JUNK_EXTS:
+            size_mb = f.stat().st_size / 1024 / 1024
+            removed_total += size_mb
+            print(f"  [DEL] {f.relative_to(models_dst)} ({size_mb:.1f} MB)")
+            f.unlink()
+    # Remove int8 duplicates when fp32 exists
+    for model_dir in models_dst.iterdir():
+        if not model_dir.is_dir():
+            continue
+        for int8f in list(model_dir.glob('*int8*.onnx')):
+            fp32_name = int8f.name.replace('.int8', '')
+            if (model_dir / fp32_name).exists():
+                size_mb = int8f.stat().st_size / 1024 / 1024
+                removed_total += size_mb
+                print(f"  [DEL] {int8f.relative_to(models_dst)} ({size_mb:.1f} MB) — fp32 exists")
+                int8f.unlink()
+    for name in ['embedding_model.onnx', 'embedding_model_split.onnx']:
+        p = models_dst / 'pyannote-onnx' / name
+        if p.exists() and (models_dst / 'pyannote-onnx' / 'embedding_encoder.onnx').exists():
+            size_mb = p.stat().st_size / 1024 / 1024
+            removed_total += size_mb
+            print(f"  [DEL] pyannote-onnx/{name} ({size_mb:.1f} MB)")
+            p.unlink()
+    for d in sorted(models_dst.rglob('*'), reverse=True):
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+    if removed_total > 0:
+        print(f"  [TRIM] Cleaned {removed_total:.0f} MB non-ONNX artifacts")
 
     count = sum(1 for _ in models_dst.rglob("*") if _.is_file())
     print(f"[OK] Models copied: {count} files")
@@ -201,66 +401,110 @@ def create_launcher_online():
     print("[LNCH] Creating service launcher...")
 
     # Server launcher
-    bat_content = '''@echo off
-chcp 65001 >nul
-setlocal
-
-set "BASE_DIR=%~dp0"
-set "PYTHON_EXE=%BASE_DIR%python\\python.exe"
-
-if not exist "%PYTHON_EXE%" (
-    echo ERROR: Khong tim thay Python embedded
-    pause
-    exit /b 1
-)
-
-set "PYTHONHOME=%BASE_DIR%python"
-set "PYTHONDONTWRITEBYTECODE=1"
-set "PATH=%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%BASE_DIR%;%PATH%"
-
-echo ===================================
-echo  Sherpa Vietnamese ASR - Service
-echo ===================================
-echo.
-
-if "%1"=="--no-gui" (
-    echo Starting server (no GUI)...
-    "%PYTHON_EXE%" "%BASE_DIR%server_launcher.py" --no-gui %*
-) else (
-    echo Starting admin GUI...
-    "%PYTHON_EXE%" "%BASE_DIR%server_gui.py" %*
-)
-
-exit /b %errorlevel%
-'''
+    bat_content = (
+        '@echo off\n'
+        'chcp 65001 >nul\n'
+        'setlocal\n'
+        '\n'
+        'set "BASE_DIR=%~dp0"\n'
+        'set "PYTHON_EXE=%BASE_DIR%python\\python.exe"\n'
+        '\n'
+        'if not exist "%PYTHON_EXE%" (\n'
+        '    echo ERROR: Khong tim thay Python embedded\n'
+        '    pause\n'
+        '    exit /b 1\n'
+        ')\n'
+        '\n'
+        'set "PYTHONHOME=%BASE_DIR%python"\n'
+        'set "PYTHONDONTWRITEBYTECODE=1"\n'
+        'set "QT6_BIN=%BASE_DIR%python\\Lib\\site-packages\\PyQt6\\Qt6\\bin"\n'
+        'set "PATH=%QT6_BIN%;%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%BASE_DIR%;%PATH%"\n'
+        '\n'
+        'echo ===================================\n'
+        'echo  Sherpa Vietnamese ASR - Service\n'
+        'echo ===================================\n'
+        'echo.\n'
+        '\n'
+        'rem Doc port tu config.ini\n'
+        'set "PORT=8443"\n'
+        'for /f "tokens=2 delims== " %%a in (\'findstr /i "^port" "%BASE_DIR%config.ini" 2^>nul\') do set "PORT=%%a"\n'
+        '\n'
+        'if "%1"=="--no-gui" goto :headless\n'
+        '\n'
+        'rem Thu khoi dong GUI (can Windows 10 1809+ / Server 2019+)\n'
+        '"%PYTHON_EXE%" -c "from PyQt6.QtWidgets import QApplication" >nul 2>&1\n'
+        'if %errorlevel% equ 0 (\n'
+        '    echo Khoi dong Admin GUI...\n'
+        '    "%PYTHON_EXE%" "%BASE_DIR%server_gui.py" %*\n'
+        '    goto :done\n'
+        ')\n'
+        '\n'
+        'echo [Thong bao] Giao dien GUI can Windows 10 1809+ / Server 2019+\n'
+        'echo Tu dong chuyen sang che do headless...\n'
+        'echo.\n'
+        '\n'
+        ':headless\n'
+        'echo Server dang chay. Truy cap:\n'
+        'echo.\n'
+        'echo   https://localhost:%PORT%\n'
+        'echo   https://[IP-may-nay]:%PORT%\n'
+        'echo.\n'
+        'echo Dang nhap admin de quan tri he thong qua web.\n'
+        'echo Nhan Ctrl+C de dung server.\n'
+        'echo -------------------------------------------------------\n'
+        'echo.\n'
+        '"%PYTHON_EXE%" "%BASE_DIR%server_launcher.py" --no-gui\n'
+        '\n'
+        ':done\n'
+        'if %errorlevel% neq 0 (\n'
+        '    echo.\n'
+        '    echo [Loi] Chuong trinh ket thuc voi ma loi %errorlevel%\n'
+        '    pause\n'
+        ')\n'
+        '\n'
+        'exit /b %errorlevel%\n'
+    )
 
     (DIST_DIR_ONLINE / "sherpa-vietnamese-asr-service.bat").write_text(bat_content, encoding="utf-8")
+
+    # start-gui.bat
+    (DIST_DIR_ONLINE / "start-gui.bat").write_text(
+        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-gui.bat").read_text(encoding="utf-8")
+        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-gui.bat").exists()
+        else "", encoding="utf-8"
+    )
+
+    # start-server.bat
+    (DIST_DIR_ONLINE / "start-server.bat").write_text(
+        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-server.bat").read_text(encoding="utf-8")
+        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-server.bat").exists()
+        else "", encoding="utf-8"
+    )
+
+    # install-service.bat
+    (DIST_DIR_ONLINE / "install-service.bat").write_text(
+        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "install-service.bat").read_text(encoding="utf-8")
+        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "install-service.bat").exists()
+        else "", encoding="utf-8"
+    )
 
     # README
     readme = '''Sherpa Vietnamese ASR - Service
 ================================
 
-Chay: Double-click sherpa-vietnamese-asr-service.bat
-
-Cac che do chay:
-1. sherpa-vietnamese-asr-service.bat         -> Mo GUI quan tri (PyQt6)
-2. sherpa-vietnamese-asr-service.bat --no-gui -> Chay server khong co GUI
+Cac file khoi dong:
+  start-server.bat      -> Chay server headless (moi Windows)
+  start-gui.bat         -> Mo GUI quan tri (can Windows 10 1809+ / Server 2019+)
+  install-service.bat   -> Cai dat thanh Windows Service (can quyen Admin)
 
 Yeu cau:
-- Windows Server 2022 / Windows 10/11 64-bit
+- Windows 10+ / Windows Server 2016+ (64-bit)
 - Khong can cai Python
-
-Thu muc:
-- python/           : Python embedded runtime
-- models/           : AI models (khong co streaming model)
-- core/             : Core ASR pipeline (dung chung voi desktop)
-- web_service/      : FastAPI web service + frontend
-- server_gui.py     : Admin GUI (PyQt6)
-- server_launcher.py: Server entry point
 
 Sau khi chay:
 - Truy cap https://IP:8443 tren browser
 - Admin mac dinh: admin / admin (doi ngay sau khi dang nhap)
+- Dang nhap admin -> nut "Quan tri" hien ra -> quan ly phien, queue, user qua web
 - Browser se canh bao "Not Secure" vi self-signed cert, bam "Advanced" -> "Proceed"
 '''
     (DIST_DIR_ONLINE / "README.txt").write_text(readme, encoding="utf-8")
@@ -310,14 +554,25 @@ def main():
             return 1
         copy_pyd_files()
         copy_dlls()
+        copy_vcredist_dlls()  # Copy VC++ Redist DLLs for PyQt6 on target machines
+
+        # Trim unused Qt6 modules
+        cleanup_pyqt6()
 
         # Restore
         build_portable.DIST_DIR = original_dist
 
         # Copy online-specific files
         copy_source_files_online()
+        copy_server_extras()  # ICU shim, nssm.exe, bat files (SAU cleanup_pyqt6)
         copy_models_online()
         create_launcher_online()
+
+        # Trim (reuse from desktop build)
+        original_dist2 = build_portable.DIST_DIR
+        build_portable.DIST_DIR = DIST_DIR_ONLINE
+        build_portable.trim_portable()
+        build_portable.DIST_DIR = original_dist2
 
         clean_build()
 
@@ -345,6 +600,7 @@ def main():
             "web_service/session_manager.py",
             "web_service/queue_manager.py",
             "web_service/ssl_utils.py",
+            "web_service/audio_quality.py",
             "web_service/static/index.html",
             "web_service/static/js/app.js",
             "web_service/static/css/style.css",
@@ -355,7 +611,8 @@ def main():
         pkg_dir = DIST_DIR_ONLINE / "python" / "Lib" / "site-packages"
         required_pkgs = [
             "fastapi", "uvicorn", "starlette", "sherpa_onnx",
-            "torch", "numpy", "cryptography",
+            "numpy", "onnxruntime", "cryptography",
+            "jose",
         ]
         missing = []
         for f in critical:

@@ -72,13 +72,26 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
         .sign(key, hashes.SHA256())
     )
 
-    # Luu key
+    # Luu key (restrict permissions trước khi ghi)
+    import stat
+    try:
+        # Tạo file trước, set permissions restrictive (owner-only)
+        if os.path.exists(key_file):
+            os.chmod(key_file, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows không hỗ trợ đầy đủ Unix permissions
+
     with open(key_file, "wb") as f:
         f.write(key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
         ))
+
+    try:
+        os.chmod(key_file, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    except OSError:
+        pass
 
     # Luu cert
     with open(cert_file, "wb") as f:

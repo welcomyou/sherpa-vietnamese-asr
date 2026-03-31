@@ -1,8 +1,13 @@
 /* Speaker context menu - split, merge, rename (client-side editing) */
 
+const SPEAKER_COLORS = [
+    '#4FC3F7', '#81C784', '#FFB74D', '#E57373', '#BA68C8',
+    '#FFD54F', '#4DD0E1', '#F06292', '#A1887F', '#90A4AE'
+];
 let ctxSegIndex = -1;
 let ctxBlockIndex = -1;
 let ctxSpeakerId = null;
+let renameSelectedColor = null;
 
 function initContextMenu() {
     // Hide on click outside
@@ -74,7 +79,7 @@ function ctxSplitSpeaker() {
     if (ctxSegIndex < 0 || !currentASRData) return;
 
     const speakerNames = currentASRData.speaker_names || {};
-    const currentName = ctxSpeakerId ? (speakerNames[ctxSpeakerId] || `Speaker ${ctxSpeakerId}`) : '';
+    const currentName = ctxSpeakerId ? (speakerNames[ctxSpeakerId] || `Người nói ${Number(ctxSpeakerId) + 1}`) : '';
 
     document.getElementById('split-current-speaker').textContent = currentName;
     document.getElementById('split-speaker-input').value = '';
@@ -274,7 +279,8 @@ function ctxRenameSpeaker() {
     if (ctxBlockIndex < 0 || !currentASRData) return;
 
     const speakerNames = currentASRData.speaker_names || {};
-    const currentName = ctxSpeakerId ? (speakerNames[ctxSpeakerId] || `Speaker ${ctxSpeakerId}`) : '';
+    const speakerColors = currentASRData.speaker_colors || {};
+    const currentName = ctxSpeakerId ? (speakerNames[ctxSpeakerId] || `Người nói ${Number(ctxSpeakerId) + 1}`) : '';
 
     document.getElementById('rename-current').textContent = currentName;
     document.getElementById('rename-input').value = '';
@@ -283,7 +289,26 @@ function ctxRenameSpeaker() {
     const select = document.getElementById('rename-select');
     select.innerHTML = '<option value="">-- Chọn --</option>';
     for (const [id, name] of Object.entries(speakerNames)) {
-        select.innerHTML += `<option value="${name}">${name}</option>`;
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+    }
+
+    // Fill color picker
+    renameSelectedColor = ctxSpeakerId ? (speakerColors[ctxSpeakerId] || null) : null;
+    const colorsEl = document.getElementById('rename-colors');
+    colorsEl.innerHTML = '';
+    for (const c of SPEAKER_COLORS) {
+        const dot = document.createElement('div');
+        dot.className = 'color-dot' + (renameSelectedColor === c ? ' selected' : '');
+        dot.style.backgroundColor = c;
+        dot.onclick = () => {
+            renameSelectedColor = c;
+            colorsEl.querySelectorAll('.color-dot').forEach(d => d.classList.remove('selected'));
+            dot.classList.add('selected');
+        };
+        colorsEl.appendChild(dot);
     }
 
     document.getElementById('rename-modal').style.display = 'flex';
@@ -298,40 +323,48 @@ function doRenameSpeaker(applyAll) {
     if (!newName) {
         newName = document.getElementById('rename-select').value;
     }
-    if (!newName) {
-        showToast('Vui lòng nhập hoặc chọn tên', 'error');
+    if (!newName && !renameSelectedColor) {
+        showToast('Vui lòng nhập tên hoặc chọn màu', 'error');
         return;
     }
 
     hideRenameModal();
 
     const speakerNames = currentASRData.speaker_names || {};
+    if (!currentASRData.speaker_colors) currentASRData.speaker_colors = {};
+    const speakerColors = currentASRData.speaker_colors;
 
-    if (applyAll && ctxSpeakerId !== null) {
-        // Rename all occurrences of this speaker_id
-        speakerNames[ctxSpeakerId] = newName;
-    } else {
-        // Rename only this block: create new speaker_id
-        const maxId = Math.max(-1, ...Object.keys(speakerNames).map(Number)) + 1;
-        speakerNames[maxId] = newName;
-
-        // Update the speaker separator for this block
-        let blockCount = 0;
-        for (let i = 0; i < currentASRData.segments.length; i++) {
-            if (currentASRData.segments[i].type === 'speaker') {
-                if (blockCount === ctxBlockIndex) {
-                    currentASRData.segments[i].speaker_id = maxId;
-                    break;
-                }
-                blockCount++;
-            }
-        }
+    // Lưu màu
+    if (renameSelectedColor && ctxSpeakerId !== null) {
+        speakerColors[ctxSpeakerId] = renameSelectedColor;
     }
 
-    currentASRData.speaker_names = speakerNames;
+    if (newName) {
+        if (applyAll && ctxSpeakerId !== null) {
+            speakerNames[ctxSpeakerId] = newName;
+        } else {
+            const maxId = Math.max(-1, ...Object.keys(speakerNames).map(Number)) + 1;
+            speakerNames[maxId] = newName;
+            // Chuyển màu sang speaker_id mới
+            if (renameSelectedColor) speakerColors[maxId] = renameSelectedColor;
+
+            let blockCount = 0;
+            for (let i = 0; i < currentASRData.segments.length; i++) {
+                if (currentASRData.segments[i].type === 'speaker') {
+                    if (blockCount === ctxBlockIndex) {
+                        currentASRData.segments[i].speaker_id = maxId;
+                        break;
+                    }
+                    blockCount++;
+                }
+            }
+        }
+        currentASRData.speaker_names = speakerNames;
+    }
+
     renderASRResult(currentASRData);
     markDirty();
-    showToast('Đã đổi tên người nói', 'success');
+    showToast(newName ? 'Đã đổi tên người nói' : 'Đã đổi màu người nói', 'success');
 }
 
 // === COPY ===

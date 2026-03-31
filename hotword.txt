@@ -66,7 +66,6 @@ NGHỊ QUYẾT 57
 TRUNG TÂM DỮ LIỆU
 BẢO VỆ NỀN TẢNG TƯ TƯỞNG
 PHẢN BÁC QUAN ĐIỂM SAI TRÁI
-KHỐI ĐẠI ĐOÀN KẾT
 CẢI CÁCH TƯ PHÁP
 CÔNG AN THÀNH PHỐ
 VIỆN KIỂM SÁT NHÂN DÂN
@@ -210,7 +209,7 @@ Xã Đất Đỏ
 Xã Long Hải
 Xã Long Điền
 Xã Phước Hải
-Đặc khu đặc khu Côn Đảo
+Đặc khu Côn Đảo
 Phường Đông Hòa
 Phường Dĩ An
 Phường Tân Đông Hiệp
@@ -247,3 +246,21 @@ Xã Minh Thạnh
 Xã Long Hòa
 Xã Dầu Tiếng
 Xã Thanh An
+QTSC
+KHỐI ĐẢNG
+THAM MƯU
+PHIẾU CHUYỂN
+TỜ TRÌNH
+PHIẾU TRÌNH
+KINH TẾ ĐẢNG
+DIỆN RỘNG
+THÔNG BÁO KẾT LUẬN
+CHỊ TUYẾT
+ANH THÔNG
+BÁC QUANG
+ANH QUANG
+ANH ĐƯỢC
+ANH LỘC
+ANH MINH
+ANH PHONG
+

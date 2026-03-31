@@ -279,8 +279,19 @@ class Community1Diarizer:
                     pipeline_kwargs["max_speakers"] = self.max_speakers
 
             class _CancellableHook:
-                """Pyannote hook that checks cancellation via progress_callback.
-                Called at each pipeline step; raises InterruptedError to abort."""
+                """Pyannote hook with weighted step progress and cancellation support.
+                Maps pyannote internal steps to weighted overall progress:
+                  segmentation (0-15%), speaker_counting (15-25%),
+                  embeddings (25-85%), discrete_diarization (85-100%).
+                Handles both old-style (step, completed, total) and new-style
+                (step, artefact, file=, completed=, total=) calling conventions."""
+
+                STEP_WEIGHTS = {
+                    "segmentation":         (0, 15),
+                    "speaker_counting":     (15, 25),
+                    "embeddings":           (25, 85),   # Chiếm phần lớn thời gian
+                    "discrete_diarization": (85, 100),
+                }
 
                 def __init__(self, cb):
                     self.cb = cb
@@ -291,12 +302,28 @@ class Community1Diarizer:
                 def __exit__(self, *args):
                     pass
 
-                def __call__(self, step_name, completed, total):
+                def __call__(self, step_name, *args, **kwargs):
+                    # Trích completed/total linh hoạt cho mọi pyannote version
+                    completed = kwargs.get("completed")
+                    total = kwargs.get("total")
+                    # Fallback: old-style positional (step_name, completed, total)
+                    if completed is None and len(args) >= 1 and isinstance(args[0], (int, float)):
+                        completed = args[0]
+                    if total is None and len(args) >= 2 and isinstance(args[1], (int, float)):
+                        total = args[1]
+
                     if self.cb:
-                        progress = int(completed / max(1, total) * 100)
-                        ret = self.cb(progress, 100)
+                        if completed is not None and total is not None and total > 0:
+                            start_pct, end_pct = self.STEP_WEIGHTS.get(step_name, (0, 100))
+                            step_progress = completed / total
+                            overall = int(start_pct + (end_pct - start_pct) * step_progress)
+                            ret = self.cb(overall, 100)
+                        else:
+                            # Step không có thông tin tiến độ - chỉ check cancel
+                            start_pct = self.STEP_WEIGHTS.get(step_name, (0, 100))[0]
+                            ret = self.cb(start_pct, 100)
                         if ret != 0:
-                            print(f"[Community1] Cancellation at step '{step_name}' ({completed}/{total})")
+                            print(f"[Community1] Cancellation at step '{step_name}'")
                             raise InterruptedError("Cancelled by user")
 
             hook = _CancellableHook(progress_callback) if progress_callback else None

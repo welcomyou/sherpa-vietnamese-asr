@@ -108,29 +108,23 @@ base_dir = os.path.dirname(python_dir)
 if base_dir not in sys.path:
     sys.path.insert(0, base_dir)
 site_packages = os.path.join(python_dir, 'Lib', 'site-packages')
+_dll_dirs = [
+    os.path.join(site_packages, 'PyQt6', 'Qt6', 'bin'),
+    os.path.join(site_packages, 'numpy', '_core'),
+    os.path.join(site_packages, 'onnxruntime', 'capi'),
+    os.path.join(site_packages, 'sherpa_onnx', 'lib'),
+    python_dir,
+    site_packages,
+]
 if hasattr(os, 'add_dll_directory'):
-    for subpath in [
-        os.path.join(site_packages, 'numpy', '_core'),
-        os.path.join(site_packages, 'torch', 'lib'),
-        os.path.join(site_packages, 'sherpa_onnx', 'lib'),
-        python_dir,
-    ]:
+    for subpath in _dll_dirs:
         if os.path.exists(subpath):
             try:
                 os.add_dll_directory(subpath)
             except:
                 pass
 if sys.platform == 'win32':
-    paths_to_add = []
-    for subpath in [
-        os.path.join(site_packages, 'torch', 'lib'),
-        os.path.join(site_packages, 'numpy', '_core'),
-        os.path.join(site_packages, 'sherpa_onnx', 'lib'),
-        python_dir,
-        site_packages,
-    ]:
-        if os.path.exists(subpath):
-            paths_to_add.append(subpath)
+    paths_to_add = [p for p in _dll_dirs if os.path.exists(p)]
     os.environ['PATH'] = os.pathsep.join(paths_to_add + [os.environ.get('PATH', '')])
 '''
     (python_dir / "sitecustomize.py").write_text(sitecustomize, encoding='utf-8')
@@ -152,30 +146,111 @@ def copy_venv_packages():
     # Packages to exclude (desktop doesn't need web service packages or unused deps)
     EXCLUDE_PACKAGES = {
         'moonshine_voice',
-        # Web framework (not needed for desktop)
+
+        # === PyTorch + ecosystem (~1,340 MB) — app uses ONNX Runtime only ===
+        'torch', 'torchaudio', 'torio', 'torchmetrics', 'torchgen',
+        'torchcodec', 'torch_audiomentations', 'torch_pitch_shift',
+        'functorch', 'ml_dtypes',
+        # torch transitive deps
+        'sympy', 'networkx', 'jinja2', 'markupsafe',
+
+        # === PyTorch Lightning (~15 MB) ===
+        'lightning', 'lightning_fabric', 'lightning_utilities',
+        'pytorch_lightning', 'pytorch_metric_learning',
+
+        # === Pyannote (~12 MB) — pure ORT diarization replaces it ===
+        'pyannote', 'pyannote_audio', 'pyannote_core', 'pyannote_pipeline',
+        'pyannote_database', 'pyannote_metrics', 'pyannote_onnx_extended',
+        'pyannoteai', 'pyannoteai_sdk',
+        'asteroid_filterbanks', 'julius', 'einops',
+
+        # === numba/llvmlite (~133 MB) — librosa only uses load/resample via soxr ===
+        'numba', 'llvmlite',
+
+        # === Large unused packages ===
+        'pandas',           # 67 MB — not imported in app
+        'pymupdf', 'fitz',  # 51 MB — PDF processing, not used
+        'onnx',             # 45 MB — model builder, only onnxruntime needed
+        'ctranslate2',      # 61 MB — not used
+        'av',               # 79 MB (with .libs) — video processing
+
+        # === Web framework (not needed for desktop) ===
         'fastapi', 'uvicorn', 'starlette', 'httptools', 'websockets',
-        'python_multipart', 'python_jose', 'passlib', 'bcrypt',
+        'python_multipart', 'multipart',
+        'python_jose', 'jose', 'passlib', 'bcrypt',
         'h11', 'httpcore', 'httpx', 'anyio', 'sniffio',
         'watchfiles', 'uvloop',
-        # Database / ORM (desktop uses no DB)
-        'sqlalchemy', 'alembic', 'aiosqlite', 'greenlet',
-        # Not used by desktop app
-        'ctranslate2', 'pandas', 'grpc', 'grpcio', 'grpcio_tools',
-        'llvmlite', 'numba', 'av', 'networkx', 'sympy', 'mpmath',
-        'aiohttp', 'aiofiles', 'aiohappyeyeballs', 'aiosignal', 'frozenlist', 'multidict', 'yarl',
-        'adapters', 'torio', 'torchcodec', 'rapidfuzz',
-        # Build / packaging tools (not needed at runtime)
+        'pydantic', 'pydantic_core',  # FastAPI dep, desktop doesn't need
+        'ecdsa', 'rsa', 'pyasn1',    # JWT/crypto deps
+
+        # === Crypto / SSL (desktop doesn't use SSL or JWT) ===
+        'cryptography', 'cffi', 'pycparser',
+
+        # === Database / ORM (desktop uses no DB) ===
+        'sqlalchemy', 'alembic', 'aiosqlite', 'greenlet', 'mako',
+
+        # === gRPC (~17 MB) ===
+        'grpc', 'grpcio', 'grpcio_tools',
+        'google', 'googleapis_common_protos', 'protobuf',
+
+        # === Async HTTP (not needed) ===
+        'aiohttp', 'aiofiles', 'aiohappyeyeballs', 'aiosignal',
+        'frozenlist', 'multidict', 'yarl', 'propcache',
+
+        # === Monitoring / Logging / Terminal UI ===
+        'opentelemetry', 'opentelemetry_api', 'opentelemetry_sdk',
+        'opentelemetry_proto', 'opentelemetry_exporter_otlp',
+        'opentelemetry_exporter_otlp_proto_http',
+        'opentelemetry_exporter_otlp_proto_grpc',
+        'opentelemetry_exporter_otlp_proto_common',
+        'opentelemetry_semantic_conventions',
+        'pygments', 'rich', 'colorlog', 'colorama',
+        'coloredlogs', 'humanfriendly',
+
+        # === Text processing not used ===
+        'jiwer', 'langid', 'mosestokenizer', 'wtpsplit', 'textgrid',
+        'markdown_it', 'mdurl',
+
+        # === Math / Utils not used ===
+        'optuna', 'primePy', 'mpmath', 'skops', 'prettytable',
+
+        # === Audio/ML extras not used ===
+        'adapters', 'rapidfuzz', 'chunkformer',
+        'wespeakerruntime', 'silero_vad', 'faster_whisper',
+        'diarize', 'nara_wpe', 'kaldiio',
+
+        # === transformers + deps (~60 MB) — replaced by minimal stub ===
+        'transformers',
+        'huggingface_hub', 'safetensors',
+        'regex', 'requests', 'urllib3', 'certifi', 'charset_normalizer', 'idna',
+        'fsspec', 'tqdm',
+
+        # === Misc not needed at runtime ===
+        'bottleneck',       # optional pandas dep
+        'pooch',            # librosa dataset downloader
+        'flatbuffers',      # onnx dep
+        'wcwidth',          # terminal width
+        'docopt',           # CLI parser
+        'openfile',         # file opener
+        'toolwrapper',      # CLI wrapper
+
+        # === Build / packaging tools ===
         'pip', 'setuptools', 'wheel', 'pkg_resources', '_distutils_hack',
         'distutils_precedence',
-        # Not used
         'pyinstaller', 'pyinstaller_hooks_contrib', 'altgraph', 'pefile',
     }
 
     def should_exclude(name):
-        """Check if package or its dist-info should be excluded"""
+        """Check if package or its dist-info / .libs should be excluded"""
         lower = name.lower()
+        # Strip .libs suffix (e.g. "av.libs" -> "av")
+        base = lower.replace('.libs', '')
         for pkg in EXCLUDE_PACKAGES:
-            if lower == pkg or lower.startswith(pkg + '-') or lower.startswith(pkg.replace('-', '_') + '-'):
+            pkg_under = pkg.replace('-', '_')
+            if lower == pkg or base == pkg or lower == pkg_under or base == pkg_under:
+                return True
+            # Match dist-info: e.g. "torch-2.8.0.dist-info"
+            if lower.startswith(pkg + '-') or lower.startswith(pkg_under + '-'):
                 return True
         return False
 
@@ -209,50 +284,200 @@ def copy_venv_packages():
     for pth in dst_site.glob("*distutils-precedence*.pth"):
         pth.unlink()
     
+    _create_stubs(dst_site)
+
     print(f"[OK] Copied {copied} packages")
     return True
 
 
+def _create_stubs(dst_site):
+    """Create stub packages for excluded dependencies (numba, pooch, transformers)."""
+    numba_stub = dst_site / "numba"
+    numba_stub.mkdir(exist_ok=True)
+    (numba_stub / "__init__.py").write_text(
+        '"""Stub: numba excluded from portable build."""\n'
+        '__version__ = "0.0.0"\n'
+        '_nop = lambda *a, **kw: (lambda f: f)\n'
+        'jit = generated_jit = vectorize = guvectorize = stencil = _nop\n',
+        encoding='utf-8')
+
+    pooch_stub = dst_site / "pooch"
+    pooch_stub.mkdir(exist_ok=True)
+    (pooch_stub / "__init__.py").write_text('''\
+"""Stub: pooch excluded from portable build (only used for downloading example audio)."""
+import os as _os, tempfile as _tmp
+
+def os_cache(name):
+    return _os.path.join(_tmp.gettempdir(), name)
+
+class _Pooch:
+    def __init__(self):
+        self.registry = {}
+        self.urls = {}
+        self.path = ""
+        self.base_url = ""
+    def fetch(self, *a, **kw): return ""
+    def load_registry(self, *a, **kw): pass
+    def load_registry_from_doi(self, *a, **kw): pass
+
+def create(*a, **kw):
+    p = _Pooch()
+    for k, v in kw.items():
+        if hasattr(p, k):
+            setattr(p, k, v if v is not None else getattr(p, k))
+    return p
+
+def retrieve(*a, **kw): return ""
+''', encoding='utf-8')
+
+    # Create transformers stub (uses tokenizers lib directly, saves ~60 MB)
+    tf_stub = dst_site / "transformers"
+    tf_stub.mkdir(exist_ok=True)
+    (tf_stub / "__init__.py").write_text(
+        '"""Minimal transformers stub — only AutoTokenizer for local BERT models."""\n'
+        'from transformers._auto_tokenizer import AutoTokenizer\n'
+        '__version__ = "stub"\n',
+        encoding='utf-8')
+    (tf_stub / "_auto_tokenizer.py").write_text('''\
+"""Minimal AutoTokenizer using tokenizers library (no HuggingFace download)."""
+import os
+import numpy as np
+
+class _BatchEncoding:
+    def __init__(self, input_ids, attention_mask, token_type_ids, word_ids_list):
+        self.data = {"input_ids": input_ids, "attention_mask": attention_mask,
+                     "token_type_ids": token_type_ids}
+        self._word_ids = word_ids_list
+    def __getitem__(self, key):
+        return self.data[key]
+    def word_ids(self, batch_index=0):
+        return self._word_ids[batch_index]
+
+class _BertTokenizerCompat:
+    def __init__(self, vocab_file, do_lower_case=False, model_max_length=1024, **kw):
+        from tokenizers import BertWordPieceTokenizer
+        self.tokenizer = BertWordPieceTokenizer(vocab_file, lowercase=do_lower_case)
+        self.model_max_length = model_max_length
+        self.vocab = dict(self.tokenizer.get_vocab())
+        self.encoder = self.vocab
+        self._pad_id = self.vocab.get("[PAD]", 0)
+    def tokenize(self, text):
+        return self.tokenizer.encode(text).tokens[1:-1]
+    def encode(self, text, add_special_tokens=True, max_length=None, truncation=False, **kw):
+        enc = self.tokenizer.encode(text)
+        ids = enc.ids
+        if not add_special_tokens: ids = ids[1:-1]
+        if max_length and truncation: ids = ids[:max_length]
+        return ids
+    def convert_tokens_to_ids(self, tokens):
+        if isinstance(tokens, str): tokens = [tokens]
+        return [self.vocab.get(t, 0) for t in tokens]
+    def add_tokens(self, tokens):
+        for t in tokens:
+            if t not in self.vocab:
+                self.vocab[t] = max(self.vocab.values()) + 1 if self.vocab else 0
+                self.tokenizer.add_special_tokens([t])
+    def __len__(self):
+        return self.tokenizer.get_vocab_size()
+    def __call__(self, texts, return_tensors=None, padding=False,
+                 is_split_into_words=False, truncation=False,
+                 add_special_tokens=True, max_length=None, **kw):
+        all_ids, all_word_ids = [], []
+        for text in texts:
+            if is_split_into_words:
+                ids, wids = [], []
+                for wi, word in enumerate(text):
+                    enc = self.tokenizer.encode(word, add_special_tokens=False)
+                    ids.extend(enc.ids); wids.extend([wi] * len(enc.ids))
+            else:
+                enc = self.tokenizer.encode(text)
+                ids = enc.ids if add_special_tokens else enc.ids[1:-1]
+                wids = list(range(len(ids)))
+            if truncation:
+                lim = max_length or self.model_max_length
+                ids, wids = ids[:lim], wids[:lim]
+            all_ids.append(ids); all_word_ids.append(wids)
+        if padding:
+            ml = max(len(x) for x in all_ids)
+            attn = []
+            for i in range(len(all_ids)):
+                pl = ml - len(all_ids[i])
+                attn.append([1]*len(all_ids[i]) + [0]*pl)
+                all_word_ids[i] += [None]*pl
+                all_ids[i] += [self._pad_id]*pl
+        else:
+            attn = [[1]*len(x) for x in all_ids]
+        if return_tensors == "np":
+            ids_arr = np.array(all_ids, dtype=np.int64)
+            attn_arr = np.array(attn, dtype=np.int64)
+            type_ids = np.zeros_like(ids_arr)
+        else:
+            ids_arr, attn_arr = all_ids, attn
+            type_ids = [[0]*len(x) for x in all_ids]
+        return _BatchEncoding(ids_arr, attn_arr, type_ids, all_word_ids)
+
+class AutoTokenizer:
+    @staticmethod
+    def from_pretrained(path, do_basic_tokenize=False, do_lower_case=False,
+                       model_max_length=512, **kw):
+        if os.path.isdir(path):
+            vocab_file = os.path.join(path, "vocab.txt")
+            if os.path.exists(vocab_file):
+                return _BertTokenizerCompat(vocab_file, do_lower_case=do_lower_case,
+                                            model_max_length=model_max_length)
+        raise FileNotFoundError(f"Cannot load tokenizer from {path}")
+''', encoding='utf-8')
+
+    print("[OK] Created stubs (numba, pooch, transformers)")
+
+
 def copy_pyd_files():
-    """Copy .pyd C extension files from venv"""
+    """Copy .pyd C extension files from venv (only for packages already copied)"""
     print("[EXT] Copying C extensions (.pyd)...")
-    
+
     venv_site = get_venv_path()
     dst_site = DIST_DIR / "python" / "Lib" / "site-packages"
-    
+
     copied = 0
+    skipped = 0
     for pyd in venv_site.rglob("*.pyd"):
-        # Preserve directory structure
         rel_path = pyd.relative_to(venv_site)
+        # Skip .pyd from excluded packages: check if top-level dir exists in dst
+        top_dir = rel_path.parts[0] if len(rel_path.parts) > 1 else None
+        if top_dir and not (dst_site / top_dir).exists():
+            skipped += 1
+            continue
         dst = dst_site / rel_path
         dst.parent.mkdir(parents=True, exist_ok=True)
         if not dst.exists() or pyd.stat().st_size != dst.stat().st_size:
             shutil.copy2(pyd, dst)
             copied += 1
-    
+
+    if skipped:
+        print(f"  [SKIP] {skipped} .pyd from excluded packages")
     print(f"[OK] Copied {copied} C extensions")
 
 
 def copy_dlls():
     """Copy DLLs from venv packages"""
     print("[DLL] Copying DLLs...")
-    
+
     venv_site = get_venv_path()
     dst_python = DIST_DIR / "python"
     dst_site = dst_python / "Lib" / "site-packages"
-    
-    # Copy .libs folders
+
+    # Copy .libs folders (skip those belonging to excluded packages)
     for libs_dir in venv_site.rglob("*.libs"):
+        # e.g. av.libs -> check "av" against exclude list
+        pkg_name = libs_dir.name.replace('.libs', '')
+        # Skip if the .libs parent package was excluded (not in dst)
+        if not (dst_site / pkg_name).exists():
+            print(f"  [SKIP] {libs_dir.name} (excluded package)")
+            continue
         dst_libs = dst_site / libs_dir.relative_to(venv_site)
         if dst_libs.exists():
             shutil.rmtree(dst_libs)
         shutil.copytree(libs_dir, dst_libs)
-    
-    # Copy torch DLLs
-    torch_lib = venv_site / "torch" / "lib"
-    if torch_lib.exists():
-        for dll in torch_lib.glob("*.dll"):
-            shutil.copy2(dll, dst_python)
     
     # Copy numpy DLLs
     numpy_libs = venv_site / "numpy.libs"
@@ -260,13 +485,187 @@ def copy_dlls():
         for dll in numpy_libs.glob("*.dll"):
             shutil.copy2(dll, dst_python)
     
-    # Copy sherpa-onnx DLLs
+    # Copy sherpa-onnx DLLs (skip onnxruntime.dll — dùng bản từ pip onnxruntime)
     sherpa_lib = venv_site / "sherpa_onnx" / "lib"
     if sherpa_lib.exists():
         for dll in sherpa_lib.glob("*.dll"):
+            if dll.name.lower() == "onnxruntime.dll":
+                continue  # Tránh ghi đè ORT 1.24 bằng ORT 1.23 của sherpa
             shutil.copy2(dll, dst_python)
-    
+
+    # Copy onnxruntime.dll từ pip package (phiên bản mới nhất, đồng bộ với .pyd)
+    ort_capi = venv_site / "onnxruntime" / "capi"
+    if ort_capi.exists():
+        ort_dll = ort_capi / "onnxruntime.dll"
+        if ort_dll.exists():
+            shutil.copy2(ort_dll, dst_python)
+            print(f"  [OK] onnxruntime.dll from pip ({ort_dll.stat().st_size/1024/1024:.1f} MB)")
+        ort_shared = ort_capi / "onnxruntime_providers_shared.dll"
+        if ort_shared.exists():
+            shutil.copy2(ort_shared, dst_python)
+
+    # Đồng bộ: cập nhật sherpa_onnx/lib/onnxruntime.dll = pip version (tránh conflict)
+    dst_sherpa_ort = dst_site / "sherpa_onnx" / "lib" / "onnxruntime.dll"
+    dst_ort_capi = dst_site / "onnxruntime" / "capi" / "onnxruntime.dll"
+    if dst_ort_capi.exists() and dst_sherpa_ort.exists():
+        shutil.copy2(dst_ort_capi, dst_sherpa_ort)
+        print("  [OK] Synced sherpa_onnx ORT = pip ORT (avoid version mismatch)")
+
     print("[OK] DLLs copied")
+
+
+def copy_vcredist_dlls():
+    """Copy VC++ Redistributable DLLs from PyQt6 to python/ for portable deployment.
+    
+    These DLLs are required for PyQt6 to run on machines without VC++ Redist installed.
+    PyQt6 includes these DLLs in its Qt6/bin folder (Microsoft Universal C Runtime).
+    """
+    print("[VCREDIST] Copying VC++ Redistributable DLLs...")
+    
+    venv_site = get_venv_path()
+    dst_python = DIST_DIR / "python"
+    
+    # PyQt6 includes VC++ runtime DLLs in Qt6/bin
+    pyqt6_bin = venv_site / "PyQt6" / "Qt6" / "bin"
+    
+    VCREDIST_DLLS = [
+        'msvcp140.dll',
+        'msvcp140_1.dll',
+        'msvcp140_2.dll',
+        'vcruntime140.dll',
+        'vcruntime140_1.dll',
+        'concrt140.dll',
+    ]
+
+    # Uu tien System32 (phien ban moi nhat, tuong thich ORT 1.24+)
+    # Fallback sang PyQt6/Qt6/bin neu System32 khong co
+    system32 = Path(os.environ.get('SYSTEMROOT', r'C:\Windows')) / 'System32'
+    sources = [system32, pyqt6_bin] if system32.exists() else [pyqt6_bin]
+
+    copied = 0
+    for dll_name in VCREDIST_DLLS:
+        for src_dir in sources:
+            src = src_dir / dll_name
+            if src.exists():
+                shutil.copy2(src, dst_python)
+                # Cung copy vao PyQt6/Qt6/bin (de PyQt6 cung dung ban moi)
+                qt6_bin_dst = dst_python / "Lib" / "site-packages" / "PyQt6" / "Qt6" / "bin"
+                if qt6_bin_dst.exists():
+                    shutil.copy2(src, qt6_bin_dst)
+                copied += 1
+                break
+        else:
+            print(f"  [WARN] {dll_name} not found")
+
+    if copied > 0:
+        print(f"[OK] Copied {copied} VC++ Redistributable DLLs (from System32)")
+    else:
+        print("[WARN] No VC++ Redistributable DLLs copied")
+
+    # NOTE: Desktop app chay tren Windows 10/11 (co system ICU san)
+    # Khong can ship ICU DLLs. Webapp build (build_portable_online.py) tu xu ly ICU shim.
+
+
+def cleanup_pyqt6():
+    """Remove unused Qt6 modules to save ~400 MB (WebEngine, QML, Quick3D, etc.)"""
+    print("[QT6] Cleaning up unused Qt6 modules...")
+
+    qt6_dir = DIST_DIR / "python" / "Lib" / "site-packages" / "PyQt6" / "Qt6"
+    if not qt6_dir.exists():
+        print("  [SKIP] PyQt6/Qt6 not found")
+        return
+
+    saved = 0
+
+    # App only uses: QtWidgets, QtCore, QtGui, QtMultimedia
+    # Keep these DLLs + their dependencies
+    KEEP_DLLS = {
+        # Core Qt modules used by app
+        'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Multimedia.dll',
+        'Qt6Network.dll',     # needed by Multimedia
+        'Qt6Svg.dll',         # SVG icon support
+        'Qt6OpenGL.dll',      # GPU rendering
+        'Qt6OpenGLWidgets.dll',
+        'Qt6MultimediaWidgets.dll',
+        # MSVC runtime (required)
+        'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+        'vcruntime140.dll', 'vcruntime140_1.dll', 'concrt140.dll',
+        # DirectX / OpenGL fallback
+        'd3dcompiler_47.dll', 'opengl32sw.dll',
+        # ICU: desktop khong can (system ICU co san tren Win 10/11)
+        # Webapp build tu them ICU shim rieng
+    }
+
+    bin_dir = qt6_dir / "bin"
+    if bin_dir.exists():
+        for dll in bin_dir.glob("*.dll"):
+            if dll.name not in KEEP_DLLS:
+                size = dll.stat().st_size
+                dll.unlink()
+                saved += size
+
+    # Remove WebEngine resources entirely
+    resources_dir = qt6_dir / "resources"
+    if resources_dir.exists():
+        for f in resources_dir.rglob('*'):
+            if f.is_file():
+                saved += f.stat().st_size
+        shutil.rmtree(resources_dir)
+
+    # Remove translations (52 MB) — keep only Vietnamese + English
+    translations_dir = qt6_dir / "translations"
+    if translations_dir.exists():
+        for f in list(translations_dir.iterdir()):
+            name = f.name.lower()
+            if name.startswith('qtbase_vi') or name.startswith('qtbase_en') \
+                    or name == 'qt_vi.qm' or name == 'qt_en.qm':
+                continue
+            if f.is_dir():
+                for sub in f.rglob('*'):
+                    if sub.is_file():
+                        saved += sub.stat().st_size
+                shutil.rmtree(f)
+            else:
+                saved += f.stat().st_size
+                f.unlink()
+
+    # Remove QML directory (18 MB) — app uses QtWidgets, not QML
+    qml_dir = qt6_dir / "qml"
+    if qml_dir.exists():
+        for f in qml_dir.rglob('*'):
+            if f.is_file():
+                saved += f.stat().st_size
+        shutil.rmtree(qml_dir)
+
+    # Remove unused plugins
+    plugins_dir = qt6_dir / "plugins"
+    KEEP_PLUGINS = {'platforms', 'styles', 'imageformats', 'multimedia', 'iconengines'}
+    if plugins_dir.exists():
+        for d in list(plugins_dir.iterdir()):
+            if d.is_dir() and d.name not in KEEP_PLUGINS:
+                for f in d.rglob('*'):
+                    if f.is_file():
+                        saved += f.stat().st_size
+                shutil.rmtree(d)
+
+    # Remove PyQt6-WebEngine .pyd bindings
+    pyqt6_dir = DIST_DIR / "python" / "Lib" / "site-packages" / "PyQt6"
+    for pattern in ['QtWebEngine*', 'QtQml*', 'QtQuick*', 'QtDesigner*',
+                    'QtPdf*', 'QtRemoteObjects*', 'QtBluetooth*',
+                    'QtNfc*', 'QtSensors*', 'QtSerialPort*',
+                    'QtPositioning*', 'QtTest*', 'QtHelp*',
+                    'QtSpatialAudio*', 'QtTextToSpeech*']:
+        for f in pyqt6_dir.glob(pattern):
+            if f.is_file():
+                saved += f.stat().st_size
+                f.unlink()
+            elif f.is_dir():
+                for sub in f.rglob('*'):
+                    if sub.is_file():
+                        saved += sub.stat().st_size
+                shutil.rmtree(f)
+
+    print(f"[OK] Cleaned PyQt6: saved {saved / 1024**2:.0f} MB")
 
 
 def copy_source_files():
@@ -298,27 +697,58 @@ def copy_source_files():
 def copy_data():
     """Copy data directories (models, vocabulary)"""
     print("[DATA] Copying data directories...")
-    
-    # Models to exclude
-    EXCLUDE_MODELS = {'moonshine-base-vi'}
-    
+
+    # Model dirs/files to EXCLUDE entirely (unused at runtime)
+    EXCLUDE_MODELS = {
+        'moonshine-base-vi',
+        # Unused ASR models
+        'gipformer-65M-rnnt',
+        'myfinetune', 'myfinetune2', 'myfinetune3',
+        'sherpa-onnx-zipformer-vi-30M',
+        'sherpa-onnx-zipformer-vi-2025-04-20_tmp',
+        # NOTE: zipformer-30m-rnnt-streaming-6000h is KEPT (used by tab_live.py)
+        # CEM models (not integrated in runtime)
+        'cem-retrain',
+        # Legacy diarization (replaced by pure ORT)
+        'speaker_embedding',           # nemo titanet — not needed for pure ORT
+        'speaker_diarization',         # sherpa-onnx segmentation — not needed for pure ORT
+        # Audio enhancement not used
+        'gtcrn',
+        # Summary/LLM models (chưa hoàn thiện)
+        '.cache',
+    }
+    # Skip LLM model files by extension
+    EXCLUDE_MODEL_EXTENSIONS = {'.gguf'}
+
+    # CEM root files to exclude (glob patterns checked separately)
+    CEM_PATTERNS = ['cem_*.pt', 'cem_*.onnx', 'cem_*.json']
+
     for dir_name in DATA_DIRS:
         src = PROJECT_ROOT / dir_name
         if src.exists():
             dst = DIST_DIR / dir_name
             if dst.exists():
                 shutil.rmtree(dst)
-            
+
             if dir_name == 'models':
-                # Copy models but exclude unused ones
                 dst.mkdir(parents=True, exist_ok=True)
                 for item in src.iterdir():
+                    # Skip excluded dirs
                     if item.name in EXCLUDE_MODELS:
-                        print(f"  [SKIP] model: {item.name}")
+                        print(f"  [SKIP] {item.name}")
+                        continue
+                    # Skip CEM root files
+                    if any(item.match(p) for p in CEM_PATTERNS):
+                        print(f"  [SKIP] {item.name}")
+                        continue
+                    # Skip LLM model files
+                    if item.suffix.lower() in EXCLUDE_MODEL_EXTENSIONS:
+                        print(f"  [SKIP] {item.name}")
                         continue
                     dst_item = dst / item.name
                     if item.is_dir():
-                        shutil.copytree(item, dst_item)
+                        shutil.copytree(item, dst_item, ignore=shutil.ignore_patterns(
+                            '.git', '.cache', '.gitattributes', '__pycache__'))
                     else:
                         shutil.copy2(item, dst_item)
             else:
@@ -328,7 +758,84 @@ def copy_data():
             print(f"  [OK] {dir_name}: {count} files")
         else:
             print(f"  [WARN] Not found: {dir_name}")
-    
+
+    # Clean vibert-capu: keep only onnx + vocab + config
+    vibert_dst = DIST_DIR / "models" / "vibert-capu"
+    if vibert_dst.exists():
+        VIBERT_KEEP = {'vibert-capu.onnx', 'vocab.txt', 'config.json'}
+        removed = 0
+        for f in list(vibert_dst.rglob('*')):
+            if f.is_file() and f.name not in VIBERT_KEEP:
+                size_mb = f.stat().st_size / 1024 / 1024
+                f.unlink()
+                removed += size_mb
+        # Remove empty subdirs
+        for d in sorted(vibert_dst.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if removed > 0:
+            print(f"  [TRIM] vibert-capu: removed {removed:.0f} MB (kept .onnx, vocab.txt, config.json)")
+
+    # Clean pyannote PyTorch dir: keep only plda/ data (needed by pure ORT)
+    pyannote_dst = DIST_DIR / "models" / "pyannote" / "speaker-diarization-community-1"
+    if pyannote_dst.exists():
+        removed = 0
+        for f in list(pyannote_dst.rglob('*')):
+            if f.is_file() and f.suffix == '.bin':
+                size_mb = f.stat().st_size / 1024 / 1024
+                f.unlink()
+                removed += size_mb
+        # Remove empty dirs
+        for d in sorted(pyannote_dst.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if removed > 0:
+            print(f"  [TRIM] pyannote: removed {removed:.0f} MB pytorch_model.bin (kept plda/)")
+
+    # Global cleanup: remove non-ONNX artifacts from ALL model dirs
+    models_dst = DIST_DIR / "models"
+    if models_dst.exists():
+        # Extensions that are NOT needed at runtime
+        JUNK_EXTS = {'.bin', '.pt', '.pth', '.pkl', '.safetensors', '.filepart',
+                     '.md', '.gitattributes'}
+        removed_total = 0
+        for f in list(models_dst.rglob('*')):
+            if f.is_file() and f.suffix.lower() in JUNK_EXTS:
+                size_mb = f.stat().st_size / 1024 / 1024
+                removed_total += size_mb
+                print(f"  [DEL] {f.relative_to(models_dst)} ({size_mb:.1f} MB)")
+                f.unlink()
+
+        # Remove int8 ONNX duplicates when fp32 exists (code prefers fp32)
+        for model_dir in models_dst.iterdir():
+            if not model_dir.is_dir():
+                continue
+            int8_files = list(model_dir.glob('*int8*.onnx'))
+            for int8f in int8_files:
+                fp32_name = int8f.name.replace('.int8', '')
+                fp32_path = model_dir / fp32_name
+                if fp32_path.exists():
+                    size_mb = int8f.stat().st_size / 1024 / 1024
+                    removed_total += size_mb
+                    print(f"  [DEL] {int8f.relative_to(models_dst)} ({size_mb:.1f} MB) — fp32 exists")
+                    int8f.unlink()
+
+        # Remove pyannote-onnx fallback embedding models (pure ORT uses embedding_encoder.onnx)
+        for name in ['embedding_model.onnx', 'embedding_model_split.onnx']:
+            p = models_dst / 'pyannote-onnx' / name
+            if p.exists() and (models_dst / 'pyannote-onnx' / 'embedding_encoder.onnx').exists():
+                size_mb = p.stat().st_size / 1024 / 1024
+                removed_total += size_mb
+                print(f"  [DEL] pyannote-onnx/{name} ({size_mb:.1f} MB) — encoder exists")
+                p.unlink()
+
+        # Remove empty dirs
+        for d in sorted(models_dst.rglob('*'), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if removed_total > 0:
+            print(f"  [TRIM] Cleaned {removed_total:.0f} MB non-ONNX artifacts from models/")
+
     print("[OK] Data copied")
 
 
@@ -352,9 +859,16 @@ if not exist "%PYTHON_EXE%" (
 
 set "PYTHONHOME=%BASE_DIR%python"
 set "PYTHONDONTWRITEBYTECODE=1"
-set "PATH=%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%PATH%"
+set "QT6_BIN=%BASE_DIR%python\\Lib\\site-packages\\PyQt6\\Qt6\\bin"
+set "PATH=%QT6_BIN%;%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%PATH%"
 
 "%PYTHON_EXE%" "%APP_SCRIPT%" %*
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [Loi] Chuong trinh ket thuc voi ma loi %errorlevel%
+    pause
+)
 exit /b %errorlevel%
 '''
     
@@ -381,6 +895,52 @@ Folder structure:
     (DIST_DIR / "README.txt").write_text(readme, encoding='utf-8')
     
     print(f"[OK] Launcher created: sherpa-vietnamese-asr.bat")
+
+
+def trim_portable():
+    """Remove unnecessary files from build to reduce size"""
+    site = DIST_DIR / "python" / "Lib" / "site-packages"
+    if not site.exists():
+        return
+
+    removed = 0
+    # Remove __pycache__
+    for d in list(site.rglob("__pycache__")):
+        if d.is_dir():
+            for f in d.rglob("*"):
+                if f.is_file():
+                    removed += f.stat().st_size
+            shutil.rmtree(d, ignore_errors=True)
+
+    # Remove .dist-info (pip metadata, not needed at runtime)
+    for d in site.glob("*.dist-info"):
+        if d.is_dir():
+            for f in d.rglob("*"):
+                if f.is_file():
+                    removed += f.stat().st_size
+            shutil.rmtree(d, ignore_errors=True)
+
+    # Remove test dirs
+    for d in list(site.rglob("tests")):
+        if d.is_dir() and d.parent.parent == site:
+            for f in d.rglob("*"):
+                if f.is_file():
+                    removed += f.stat().st_size
+            shutil.rmtree(d, ignore_errors=True)
+
+    # Remove .pyi stubs (EXCEPT packages using lazy_loader: librosa, scipy, sklearn)
+    keep_pyi = {'librosa', 'scipy', 'sklearn'}
+    for f in site.rglob("*.pyi"):
+        if f.is_file():
+            # Check if this .pyi is in a package that needs it
+            rel = f.relative_to(site)
+            pkg = rel.parts[0] if rel.parts else ""
+            if pkg not in keep_pyi:
+                removed += f.stat().st_size
+                f.unlink()
+
+    if removed > 0:
+        print(f"[OK] Trimmed {removed / 1024 / 1024:.0f} MB (pycache, dist-info, tests, stubs)")
 
 
 def clean_build():
@@ -425,14 +985,21 @@ def main():
             return 1
         copy_pyd_files()
         copy_dlls()
-        
+        copy_vcredist_dlls()  # Copy VC++ Redist DLLs for PyQt6 on target machines
+
+        # Trim unused Qt6 modules (WebEngine, QML, Quick3D, etc.)
+        cleanup_pyqt6()
+
         # Copy source and data
         copy_source_files()
         copy_data()
-        
+
         # Create launcher
         create_launcher()
-        
+
+        # Trim unnecessary files
+        trim_portable()
+
         # Cleanup
         clean_build()
         

@@ -6,8 +6,9 @@ import os
 from datetime import datetime
 
 
-def serialize_segments(segments, speaker_name_mapping=None, model_name='unknown',
-                       model_type='file', duration_sec=0.0, timing=None):
+def serialize_segments(segments, speaker_name_mapping=None, speaker_colors=None,
+                       model_name='unknown', model_type='file',
+                       duration_sec=0.0, timing=None):
     """
     Chuyển đổi segments nội bộ thành cấu trúc JSON chuẩn.
 
@@ -23,6 +24,8 @@ def serialize_segments(segments, speaker_name_mapping=None, model_name='unknown'
     """
     if speaker_name_mapping is None:
         speaker_name_mapping = {}
+    if speaker_colors is None:
+        speaker_colors = {}
 
     json_segments = []
     current_speaker = None
@@ -63,13 +66,31 @@ def serialize_segments(segments, speaker_name_mapping=None, model_name='unknown'
                 'timestamp': seg_end
             })
 
-        json_segments.append({
+        # Serialize raw_words (word-level prob cho low-confidence highlighting)
+        raw_words_data = None
+        if seg.get('raw_words'):
+            raw_words_data = []
+            for w in seg['raw_words']:
+                wd = {'text': w.get('text', ''), 'prob': round(w.get('prob', 1.0), 3)}
+                if w.get('gap_after_ms'):
+                    wd['gap_after_ms'] = w['gap_after_ms']
+                if w.get('gap_before_ms'):
+                    wd['gap_before_ms'] = w['gap_before_ms']
+                if w.get('_suspect_level'):
+                    wd['suspect'] = w['_suspect_level']
+                raw_words_data.append(wd)
+
+        text_seg = {
             'type': 'text',
             'text': seg.get('text', ''),
             'start_time': seg.get('start', seg.get('start_time', 0)),
             'segment_id': i,
             'partials': clean_partials
-        })
+        }
+        if raw_words_data:
+            text_seg['raw_words'] = raw_words_data
+
+        json_segments.append(text_seg)
 
     json_data = {
         'version': 1,
@@ -79,6 +100,7 @@ def serialize_segments(segments, speaker_name_mapping=None, model_name='unknown'
         'duration_sec': round(duration_sec, 2),
         'timing': timing or {},
         'speaker_names': dict(speaker_name_mapping) if speaker_name_mapping else {},
+        'speaker_colors': dict(speaker_colors) if speaker_colors else {},
         'segments': json_segments
     }
 
@@ -103,6 +125,7 @@ def deserialize_segments(data):
 
     json_segments = data['segments']
     speaker_mapping = data.get('speaker_names', {})
+    speaker_colors = data.get('speaker_colors', {})
 
     segments = []
     current_speaker = ''
@@ -153,7 +176,7 @@ def deserialize_segments(data):
             segments.append(internal_seg)
             seg_counter += 1
 
-    return segments, speaker_mapping, has_speakers
+    return segments, speaker_mapping, speaker_colors, has_speakers
 
 
 def load_asr_json(json_path):

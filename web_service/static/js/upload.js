@@ -134,12 +134,7 @@ async function uploadFile() {
     const formData = new FormData();
     formData.append('file', uploadedFile);
 
-    const progressContainer = document.getElementById('upload-progress');
-    const progressBar = document.getElementById('upload-bar');
-    const progressPercent = document.getElementById('upload-percent');
-
-    progressContainer.style.display = 'flex';
-    progressBar.style.width = '0%';
+    showProcessProgress('Đang tải file lên...', 0, '');
 
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -147,26 +142,28 @@ async function uploadFile() {
         xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {
                 const pct = Math.round((e.loaded / e.total) * 100);
-                progressBar.style.width = pct + '%';
-                progressPercent.textContent = pct + '%';
+                showProcessProgress('Đang tải file lên...', pct, '');
             }
         };
 
         xhr.onload = () => {
-            progressContainer.style.display = 'none';
             if (xhr.status === 200) {
                 const data = JSON.parse(xhr.responseText);
                 currentFileId = data.file_id;
                 resolve(data);
             } else {
                 let msg = 'Upload thất bại';
-                try { msg = JSON.parse(xhr.responseText).detail || msg; } catch (e) { }
+                try {
+                    const resp = JSON.parse(xhr.responseText);
+                    msg = resp.detail || resp.message || msg;
+                    if (Array.isArray(msg)) msg = 'Upload thất bại';
+                } catch (e) { }
+                console.error('[Upload] Failed:', xhr.status, xhr.responseText);
                 reject(new Error(msg));
             }
         };
 
         xhr.onerror = () => {
-            progressContainer.style.display = 'none';
             reject(new Error('Lỗi kết nối'));
         };
 

@@ -73,13 +73,17 @@ def start_server(host=None, port=None, no_gui=False):
     actual_host = server_config.host
     actual_port = server_config.port
 
-    # SSL certs
-    cert_file, key_file = ensure_ssl_certs()
+    # SSL certs (skip if HTTP mode)
+    use_http = server_config.http_mode
+    cert_file, key_file = (None, None) if use_http else ensure_ssl_certs()
 
-    # Log file
+    # Log file (with rotation: 10MB x 5 files)
+    from logging.handlers import RotatingFileHandler
     from web_service.config import LOG_DIR
     log_file = os.path.join(LOG_DIR, "server.log")
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
     file_handler.setFormatter(logging.Formatter(
         "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -95,8 +99,10 @@ def start_server(host=None, port=None, no_gui=False):
                 root_logger.removeHandler(h)
 
     logger = logging.getLogger("asr.launcher")
-    logger.info(f"Starting server on https://{actual_host}:{actual_port}")
-    logger.info(f"SSL cert: {cert_file}")
+    protocol = "http" if use_http else "https"
+    logger.info(f"Starting server on {protocol}://{actual_host}:{actual_port}")
+    if not use_http:
+        logger.info(f"SSL cert: {cert_file}")
 
     # Set CPU threads
     cpu_threads = str(server_config.cpu_threads)
@@ -109,17 +115,17 @@ def start_server(host=None, port=None, no_gui=False):
     os.environ["HF_HUB_OFFLINE"] = "1"
 
     import uvicorn
-    uvicorn.run(
-        "web_service.server:app",
+    uvicorn_kwargs = dict(
+        app="web_service.server:app",
         host=actual_host,
         port=actual_port,
-        ssl_certfile=cert_file,
-        ssl_keyfile=key_file,
         log_level="info",
         access_log=True,
-        # Use default event loop (proactor on Windows).
-        # ConnectionResetError is suppressed by logging filter in _SuppressConnectionReset.
     )
+    if not use_http:
+        uvicorn_kwargs["ssl_certfile"] = cert_file
+        uvicorn_kwargs["ssl_keyfile"] = key_file
+    uvicorn.run(**uvicorn_kwargs)
 
 
 def main():

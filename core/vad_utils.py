@@ -11,6 +11,7 @@ from core.config import BASE_DIR
 # =============================================================================
 
 _vad_session = None
+_last_vad_probs = None  # Cache VAD probabilities từ lần chạy gần nhất (numpy array)
 
 
 def _get_vad_session():
@@ -38,11 +39,19 @@ def _get_vad_session():
 
 def unload_vad_model():
     """Giải phóng VAD model khỏi RAM."""
-    global _vad_session
+    global _vad_session, _last_vad_probs
     if _vad_session is not None:
         del _vad_session
         _vad_session = None
         print("[VAD] Model unloaded")
+    _last_vad_probs = None
+
+
+def get_cached_vad_probs():
+    """Lấy VAD probabilities đã cache từ lần chạy gần nhất.
+    Returns: numpy array float32 (prob per 512-sample window) hoặc None.
+    """
+    return _last_vad_probs
 
 
 # =============================================================================
@@ -50,7 +59,8 @@ def unload_vad_model():
 # =============================================================================
 
 def _run_vad_inference(audio, sample_rate=16000, threshold=0.5,
-                       min_silence_ms=300, min_speech_ms=250):
+                       min_silence_ms=300, min_speech_ms=250,
+                       progress_callback=None):
     """
     Chạy Silero VAD ONNX inference trên audio.
 
@@ -60,9 +70,11 @@ def _run_vad_inference(audio, sample_rate=16000, threshold=0.5,
         threshold: ngưỡng speech probability
         min_silence_ms: khoảng lặng tối thiểu để tách segment (ms)
         min_speech_ms: speech tối thiểu để giữ segment (ms)
+        progress_callback: callable(str) nhận thông báo tiến trình format PHASE:...
 
     Returns:
         list of (start_window, end_window) — index theo window
+        Nếu return_probs=True (set qua kwarg), trả về tuple (segments, probabilities_array)
     """
     session = _get_vad_session()
     window_size = 512
@@ -80,6 +92,7 @@ def _run_vad_inference(audio, sample_rate=16000, threshold=0.5,
 
     # Chạy VAD trên từng window
     probabilities = []
+    last_reported_pct = -1
     for i in range(num_windows):
         chunk = audio[i * window_size: (i + 1) * window_size]
         input_data = np.concatenate([context, chunk]).reshape(1, -1).astype(np.float32)
@@ -89,8 +102,19 @@ def _run_vad_inference(audio, sample_rate=16000, threshold=0.5,
         probabilities.append(float(out[0][0]))
         context = chunk[-context_size:]
 
+        # Report progress mỗi 2% (tránh flood)
+        if progress_callback and num_windows > 100:
+            pct = (i + 1) * 100 // num_windows
+            if pct >= last_reported_pct + 2:
+                last_reported_pct = pct
+                progress_callback(f"PHASE:VAD|Đang phân tích audio|{pct}")
+
     if not probabilities:
         return []
+
+    # Lưu probabilities vào cache để gap_detect tái sử dụng
+    global _last_vad_probs
+    _last_vad_probs = np.array(probabilities, dtype=np.float32)
 
     # Chuyển probabilities → speech segments (window index)
     min_silence_windows = int(min_silence_ms * sample_rate / 1000 / window_size)
@@ -131,31 +155,32 @@ def _run_vad_inference(audio, sample_rate=16000, threshold=0.5,
 # =============================================================================
 
 def get_vad_segments(audio, sample_rate=16000,
-                     threshold=0.3,
-                     min_silence_ms=300,
+                     threshold=0.2,
+                     min_silence_ms=100,
                      min_speech_ms=250,
-                     padding_ms=300,
-                     merge_gap_ms=500,
+                     padding_ms=1000,
+                     merge_gap_ms=250,
                      auto_boost=True,
                      fallback_full=True,
                      progress_callback=None):
     """
     Dùng Silero VAD (ONNX) để phát hiện các đoạn có tiếng nói trong audio.
 
-    Retry logic:
-    1. Chạy với threshold mặc định (0.3) — giữ tốt đầu/đuôi câu
-    2. Nếu không tìm thấy speech, retry với threshold=0.2
-    3. Nếu vẫn không và auto_boost=True, boost amplitude rồi retry
+    Pipeline:
+    1. Normalize-boost audio nhỏ TRƯỚC khi chạy VAD (chỉ bản copy, không đụng gốc)
+    2. Chạy VAD với threshold mặc định (0.5 — Silero default)
+    3. Nếu không tìm thấy speech, retry với threshold=0.3
+    4. Nếu vẫn không → fallback toàn bộ audio
 
     Args:
         audio: numpy array float32, mono, 16kHz
         sample_rate: 16000
-        threshold: ngưỡng speech probability (default 0.3)
+        threshold: ngưỡng speech probability (default 0.5 — Silero default)
         min_silence_ms: khoảng lặng tối thiểu để tách segment (ms)
         min_speech_ms: speech tối thiểu để giữ segment (ms)
         padding_ms: padding thêm trước/sau mỗi segment (ms)
         merge_gap_ms: merge segments có gap nhỏ hơn giá trị này (ms)
-        auto_boost: tự động boost amplitude nếu audio quá nhỏ
+        auto_boost: normalize-boost audio nhỏ trước VAD (chỉ boost, không attenuate)
         fallback_full: True = trả về toàn bộ audio nếu không tìm thấy speech
                        False = trả về list rỗng
         progress_callback: callable(str) nhận thông báo tiến trình
@@ -169,31 +194,35 @@ def get_vad_segments(audio, sample_rate=16000,
     if total_samples < window_size:
         return [(0, total_samples)] if fallback_full else []
 
-    # --- Lần 1: threshold mặc định ---
+    # --- Normalize-boost TRƯỚC VAD (chỉ boost, không attenuate) ---
+    # Silero VAD nhạy với amplitude — audio quá nhỏ → prob thấp → miss speech.
+    # Boost bản copy lên -23 dBFS (peak ~0.071) nếu audio nhỏ hơn mức này.
+    # Không attenuate audio đã đủ to → không bao giờ làm tệ hơn.
+    # Bản copy chỉ dùng cho VAD, ASR vẫn dùng audio gốc.
+    _VAD_BOOST_TARGET = 0.071  # -23 dBFS
+    audio_for_vad = audio
+    if auto_boost:
+        max_amp = np.max(np.abs(audio))
+        if max_amp > 1e-6 and max_amp < _VAD_BOOST_TARGET:
+            audio_for_vad = (audio * (_VAD_BOOST_TARGET / max_amp)).astype(np.float32)
+            print(f"[VAD] Audio peak low ({max_amp:.4f}), "
+                  f"boosted to {_VAD_BOOST_TARGET:.3f} for VAD")
+
+    # --- Lần 1: threshold mặc định (có progress) ---
     speech_segments = _run_vad_inference(
-        audio, sample_rate, threshold, min_silence_ms, min_speech_ms
+        audio_for_vad, sample_rate, threshold, min_silence_ms, min_speech_ms,
+        progress_callback=progress_callback,
     )
 
     # --- Lần 2: retry với threshold thấp hơn ---
     if not speech_segments:
-        print("[VAD] No speech found, retrying with threshold=0.2...")
+        print("[VAD] No speech found, retrying with threshold=0.3...")
+        if progress_callback:
+            progress_callback("PHASE:VAD|Đang thử lại (threshold thấp hơn)...|95")
         speech_segments = _run_vad_inference(
-            audio, sample_rate, threshold=0.2,
-            min_silence_ms=200, min_speech_ms=150
+            audio_for_vad, sample_rate, threshold=0.3,
+            min_silence_ms=100, min_speech_ms=150,
         )
-
-    # --- Lần 3: boost amplitude rồi retry ---
-    if not speech_segments and auto_boost:
-        max_amp = np.max(np.abs(audio))
-        if max_amp > 1e-6 and max_amp < 0.5:
-            print(f"[VAD] Audio amplitude low (max={max_amp:.4f}), boosting and retrying...")
-            boosted = (audio / max_amp * 0.95).astype(np.float32)
-            speech_segments = _run_vad_inference(
-                boosted, sample_rate, threshold=0.2,
-                min_silence_ms=200, min_speech_ms=150
-            )
-            if speech_segments:
-                print(f"[VAD] Found {len(speech_segments)} segments after boosting")
 
     # --- Fallback ---
     if not speech_segments:

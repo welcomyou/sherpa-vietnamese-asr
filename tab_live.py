@@ -247,7 +247,7 @@ class LiveProcessingTab(QWidget):
         self.btn_open_hotkey.setStyleSheet(f"""
             QPushButton {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 4px;
                 padding: 4px 8px;
@@ -256,13 +256,27 @@ class LiveProcessingTab(QWidget):
             }}
             QPushButton:hover {{
                 background-color: {COLORS['accent']};
-                color: white;
+                color: {COLORS['text_primary']};
             }}
         """)
         self.btn_open_hotkey.clicked.connect(self.open_hotkey_dialog)
         form_config.addRow("người nói:", self.btn_open_hotkey)
         
         config_layout.addWidget(self.config_content)
+
+        # Disable scroll wheel trên config widgets (tránh thay đổi nhầm)
+        from PyQt6.QtCore import QEvent, QObject
+        class _NoScrollFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Wheel:
+                    event.ignore()
+                    return True
+                return False
+        self._no_scroll = _NoScrollFilter(self)
+        for w in self.config_content.findChildren((QSlider, QComboBox)):
+            w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            w.installEventFilter(self._no_scroll)
+
         layout.addWidget(self.config_container)
 
         # 2. Microphone Selection + Volume Meter
@@ -287,7 +301,7 @@ class LiveProcessingTab(QWidget):
         self.combo_microphone.setStyleSheet(f"""
             QComboBox {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 4px;
                 padding: 4px 8px;
@@ -298,7 +312,7 @@ class LiveProcessingTab(QWidget):
             }}
             QComboBox QAbstractItemView {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 selection-background-color: {COLORS['accent']};
             }}
         """)
@@ -312,7 +326,7 @@ class LiveProcessingTab(QWidget):
         self.btn_refresh_mic.setStyleSheet(f"""
             QPushButton {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 border: 1px solid {COLORS['border']};
                 border-radius: 4px;
                 font-size: 12px;
@@ -331,20 +345,20 @@ class LiveProcessingTab(QWidget):
         self.btn_test_mic.setToolTip("Đánh giá chất lượng microphone (5 giây)")
         self.btn_test_mic.setStyleSheet(f"""
             QPushButton {{
-                background-color: #17a2b8;
+                background-color: {COLORS['accent']};
                 color: white;
-                border: 1px solid #17a2b8;
+                border: 1px solid {COLORS['accent']};
                 border-radius: 4px;
                 font-size: 11px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
-                background-color: #138496;
-                border-color: #138496;
+                background-color: {COLORS['accent_hover']};
+                border-color: {COLORS['accent_hover']};
             }}
             QPushButton:disabled {{
-                background-color: #6c757d;
-                border-color: #6c757d;
+                background-color: {COLORS['border']};
+                border-color: {COLORS['border']};
             }}
         """)
         self.btn_test_mic.clicked.connect(self.test_microphone_quality)
@@ -371,9 +385,9 @@ class LiveProcessingTab(QWidget):
             }}
             QProgressBar::chunk {{
                 background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #28a745,
-                    stop:0.5 #ffc107,
-                    stop:1 #dc3545);
+                    stop:0 {COLORS['success']},
+                    stop:0.5 {COLORS['warning']},
+                    stop:1 {COLORS['danger']});
                 border-radius: 5px;
             }}
         """)
@@ -402,7 +416,7 @@ class LiveProcessingTab(QWidget):
                 min-width: 120px;
             }}
             QPushButton:hover {{
-                background-color: #218838;
+                background-color: {COLORS['success']};
             }}
             QPushButton:disabled {{
                 background-color: {COLORS['border']};
@@ -426,7 +440,7 @@ class LiveProcessingTab(QWidget):
                 min-width: 120px;
             }}
             QPushButton:hover {{
-                background-color: #e0a800;
+                background-color: {COLORS['warning']};
             }}
             QPushButton:disabled {{
                 background-color: {COLORS['border']};
@@ -499,7 +513,7 @@ class LiveProcessingTab(QWidget):
         self.input_manual_speaker = QLineEdit()
         self.input_manual_speaker.setPlaceholderText("Nhập tên người nói...")
         self.input_manual_speaker.setFixedWidth(200)
-        self.input_manual_speaker.setStyleSheet(f"background-color: {COLORS['bg_input']}; color: {COLORS['text_dark']}; border: 1px solid {COLORS['border']}; border-radius: 4px; padding: 4px;")
+        self.input_manual_speaker.setStyleSheet(f"background-color: {COLORS['bg_input']}; color: {COLORS['text_primary']}; border: 1px solid {COLORS['border']}; border-radius: 4px; padding: 4px;")
         self.input_manual_speaker.returnPressed.connect(self.on_manual_speaker_insert)
         
         btn_add_spk = QPushButton("Chèn")
@@ -529,7 +543,7 @@ class LiveProcessingTab(QWidget):
         self.text_output.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {COLORS['bg_input']};
-                color: {COLORS['text_dark']};
+                color: {COLORS['text_primary']};
                 font-size: 14px;
                 border: 1px solid {COLORS['border']};
                 border-radius: 4px;
@@ -748,10 +762,10 @@ class LiveProcessingTab(QWidget):
             # Không có search, chỉ render bình thường với audio highlight
             is_audio_highlight = (getattr(self, 'current_highlight_segment', -1) == anchor_id)
             if is_audio_highlight:
-                return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{display_text}</a>"
             else:
-                return f"<a href='s_{anchor_id}' style='color: black; text-decoration: none;'>{display_text}</a>"
-        
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{display_text}</a>"
+
         # Có search matches - tìm các matches trong đoạn text này
         chunk_end_pos = chunk_start_pos + len(text)
         matches_in_chunk = []
@@ -793,9 +807,9 @@ class LiveProcessingTab(QWidget):
             # Không có match trong chunk này
             is_audio_highlight = (getattr(self, 'current_highlight_segment', -1) == anchor_id)
             if is_audio_highlight:
-                return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{display_text}</a>"
             else:
-                return f"<a href='s_{anchor_id}' style='color: black; text-decoration: none;'>{display_text}</a>"
+                return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{display_text}</a>"
         
         # Có matches - cần cắt text và render từng phần
         # Sắp xếp matches theo vị trí
@@ -823,30 +837,30 @@ class LiveProcessingTab(QWidget):
             # Phần trước match
             if match['start'] > last_end:
                 pre_text = display_text[last_end:match['start']]
-                parts.append(f"<span style='color: black;'>{pre_text}</span>")
+                parts.append(f"<span>{pre_text}</span>")
             
             # Phần match
             match_text = display_text[match['start']:match['end']]
             if match['is_current']:
                 # Match hiện tại - màu cam đậm
-                parts.append(f"<span style='background-color: #ff8c00; color: #000000; padding: 1px 2px; border-radius: 2px; font-weight: bold;'>{match_text}</span>")
+                parts.append(f"<span style='background-color: {COLORS['search_current']}; color: {COLORS['text_dark']}; padding: 1px 2px; border-radius: 2px; font-weight: bold;'>{match_text}</span>")
             else:
                 # Các matches khác - màu cam nhạt
-                parts.append(f"<span style='background-color: #ffd699; color: #000000; padding: 1px 2px; border-radius: 2px;'>{match_text}</span>")
+                parts.append(f"<span style='background-color: {COLORS['search_match']}; color: {COLORS['text_dark']}; padding: 1px 2px; border-radius: 2px;'>{match_text}</span>")
             
             last_end = match['end']
         
         # Phần còn lại sau match cuối
         if last_end < len(display_text):
             post_text = display_text[last_end:]
-            parts.append(f"<span style='color: black;'>{post_text}</span>")
-        
+            parts.append(f"<span>{post_text}</span>")
+
         # Audio highlight cho toàn chunk nếu cần
         is_audio_highlight = (getattr(self, 'current_highlight_segment', -1) == anchor_id)
         if is_audio_highlight:
-            return f"<a href='s_{anchor_id}' style='color: #222222; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid #daa520;'>{''.join(parts)}</a>"
+            return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{''.join(parts)}</a>"
         else:
-            return f"<a href='s_{anchor_id}' style='color: black; text-decoration: none;'>{''.join(parts)}</a>"
+            return f"<a href='s_{anchor_id}' style='color: {COLORS['text_primary']}; text-decoration: none;'>{''.join(parts)}</a>"
     
     def _update_display_with_timestamps(self):
         """Refreshes the text output with clickable partial chunks"""
@@ -1300,7 +1314,7 @@ class LiveProcessingTab(QWidget):
                 min-width: 120px;
             }}
             QPushButton:hover {{
-                background-color: #e0a800;
+                background-color: {COLORS['warning']};
             }}
         """)
         self.btn_stop.setEnabled(True)
@@ -1337,7 +1351,7 @@ class LiveProcessingTab(QWidget):
                 min-width: 120px;
             }}
             QPushButton:hover {{
-                background-color: #218838;
+                background-color: {COLORS['success']};
             }}
         """)
         self.status_label.setText("⏸️ Đã tạm dừng ghi âm. Bấm 'Ghi âm' để tiếp tục hoặc 'Kết thúc' để dừng.")
@@ -1379,7 +1393,7 @@ class LiveProcessingTab(QWidget):
                 min-width: 120px;
             }}
             QPushButton:hover {{
-                background-color: #218838;
+                background-color: {COLORS['success']};
             }}
         """)
         self.btn_stop.setEnabled(False)

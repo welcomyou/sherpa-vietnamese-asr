@@ -28,16 +28,23 @@ class ServerConfig:
         "port": "8443",
         "cpu_threads": str(min(4, ALLOWED_THREADS)),
         "max_upload_mb": "500",
-        "anonymous_timeout_minutes": "10",
+        "anonymous_timeout_minutes": "45",
         "storage_per_user_gb": "5",
         "max_sessions": "100",
         "default_asr_model": "zipformer-30m-rnnt-6000h",
-        "default_speaker_model": "community1_onnx",
-        "default_punctuation_confidence": "6",
+        "default_speaker_model": "community1_pure_ort",
+        "default_punctuation_confidence": "7",
         "default_case_confidence": "6",
         "default_diarization_threshold": "70",
         "jwt_expire_minutes": "1440",
+        "http_mode": "0",
         "admin_password_hash": "",
+        "offline_download_url": "",
+        "summarizer_model_path": "",
+        "summarizer_ollama_model": "qwen3.5:4b",
+        "summarizer_threads": "16",
+        "summarizer_context_size": "32768",
+        "summarizer_enabled": "0",
     }
 
     def __init__(self):
@@ -111,6 +118,10 @@ class ServerConfig:
     @property
     def jwt_expire_minutes(self) -> int:
         return self.get_int("jwt_expire_minutes")
+
+    @property
+    def http_mode(self) -> bool:
+        return self.get("http_mode") == "1"
 
     @property
     def admin_password_hash(self) -> str:

@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QPushButton, QLineEdit, QTextEdit,
     QPlainTextEdit, QTableWidget, QTableWidgetItem, QComboBox, QSpinBox,
     QGroupBox, QFormLayout, QCheckBox, QMessageBox, QHeaderView,
-    QDialog, QDialogButtonBox, QProgressBar, QDoubleSpinBox,
+    QDialog, QDialogButtonBox, QProgressBar, QDoubleSpinBox, QFileDialog,
 )
 from PyQt6.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QTextCharFormat, QTextCursor
@@ -136,6 +136,69 @@ class ServerProcess:
         return f"{hours} giờ {mins} phút"
 
 
+class CollapsibleSection(QWidget):
+    """Section bấm tiêu đề (▶/▼) để bung/thu nội dung."""
+
+    def __init__(self, title: str, collapsed: bool = True):
+        super().__init__()
+        self._title = title
+        self._collapsed = collapsed
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Header — flat button với tam giác
+        self._btn = QPushButton()
+        self._btn.setFlat(True)
+        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn.setFixedHeight(32)
+        self._btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 6px 12px; font-weight: bold;"
+            f"  background-color: {COLORS['bg_card']}; color: {COLORS['text_primary']};"
+            f"  border: 1px solid {COLORS['border']}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ background-color: {COLORS['bg_elevated']}; }}"
+        )
+        self._btn.clicked.connect(self.toggle)
+        outer.addWidget(self._btn)
+
+        # Content area
+        self._content = QWidget()
+        self._content.setStyleSheet(
+            f"QWidget {{ background-color: {COLORS['bg_dark']}; margin-left: 4px; }}"
+        )
+        outer.addWidget(self._content)
+
+        self._update()
+
+    def setLayout(self, layout):
+        """Redirect layout vào content area (không phải self)."""
+        self._content.setLayout(layout)
+
+    def toggle(self):
+        self._collapsed = not self._collapsed
+        self._update()
+
+    def _update(self):
+        arrow = "▾" if not self._collapsed else "▸"
+        self._btn.setText(f"  {arrow}   {self._title}")
+        self._content.setVisible(not self._collapsed)
+        # Resize main window height to fit content
+        def _resize():
+            QApplication.processEvents()
+            main_win = self.window()
+            if not isinstance(main_win, QMainWindow):
+                return
+            current_w = main_win.width()
+            central = main_win.centralWidget()
+            if central and central.layout():
+                needed_h = central.layout().minimumSize().height()
+                frame_extra = main_win.frameGeometry().height() - main_win.height()
+                new_h = min(needed_h + frame_extra + 8, 900)
+                main_win.resize(current_w, new_h)
+        QTimer.singleShot(10, _resize)
+
+
 class BaseTab(QWidget):
     """Base class cho tat ca tabs."""
 
@@ -199,7 +262,7 @@ class StatusTab(BaseTab):
         sg = QFormLayout()
 
         self.lbl_status = QLabel("Đang dừng")
-        self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #dc3545;")
+        self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['danger']};")
         sg.addRow("Trạng thái:", self.lbl_status)
 
         self.lbl_uptime = QLabel("")
@@ -211,11 +274,11 @@ class StatusTab(BaseTab):
         # Controls
         btn_layout = QHBoxLayout()
         self.btn_start = QPushButton("Bắt đầu Server")
-        self.btn_start.setStyleSheet("background: #28a745; color: white; padding: 8px 16px;")
+        self.btn_start.setStyleSheet(f"background: {COLORS['success']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         self.btn_start.clicked.connect(self.start_server)
 
         self.btn_stop = QPushButton("Dừng Server")
-        self.btn_stop.setStyleSheet("background: #dc3545; color: white; padding: 8px 16px;")
+        self.btn_stop.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         self.btn_stop.clicked.connect(self.stop_server)
 
         self.btn_restart = QPushButton("Khởi động lại")
@@ -263,11 +326,11 @@ class StatusTab(BaseTab):
         ]:
             card = QVBoxLayout()
             v = QLabel("0")
-            v.setStyleSheet("font-size: 24px; font-weight: bold; color: #007bff;")
+            v.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {COLORS['accent']};")
             v.setAlignment(Qt.AlignmentFlag.AlignCenter)
             t = QLabel(f"{title}")
             t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            t.setStyleSheet("color: #999;")
+            t.setStyleSheet(f"color: {COLORS['text_secondary']};")
             card.addWidget(v)
             card.addWidget(t)
             stats_layout.addLayout(card)
@@ -307,13 +370,13 @@ class StatusTab(BaseTab):
         running = self.main_window.server.is_running()
         if running:
             self.lbl_status.setText("Đang chạy")
-            self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #28a745;")
+            self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['success']};")
             self.lbl_uptime.setText(self.main_window.server.uptime())
             # Fetch stats in background thread (không block GUI)
             self._fetch_stats()
         else:
             self.lbl_status.setText("Đang dừng")
-            self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #dc3545;")
+            self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['danger']};")
             self.lbl_uptime.setText("")
 
     def _fetch_stats(self):
@@ -364,7 +427,7 @@ class SessionsTab(BaseTab):
         btn_layout.addWidget(self.chk_select_all)
 
         btn_kill = QPushButton("Ngắt phiên đã chọn")
-        btn_kill.setStyleSheet("background: #dc3545; color: white;")
+        btn_kill.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']};")
         btn_kill.clicked.connect(self.kill_selected)
         btn_layout.addWidget(btn_kill)
 
@@ -426,11 +489,11 @@ class SessionsTab(BaseTab):
             expired_at = s.get("expired_at")
             last_hb_str = s.get("last_heartbeat", "")
             status_text = "Hoạt động"
-            status_color = "#28a745"
+            status_color = COLORS['success']
 
             if expired_at:
                 status_text = "Hết hạn"
-                status_color = "#dc3545"
+                status_color = COLORS['danger']
             elif last_hb_str:
                 try:
                     last_hb = datetime.fromisoformat(last_hb_str)
@@ -441,18 +504,18 @@ class SessionsTab(BaseTab):
 
                     if idle_minutes > timeout_threshold:
                         status_text = f"Mất kết nối ({int(idle_minutes)} phút)"
-                        status_color = "#dc3545"
+                        status_color = COLORS['danger']
                     elif idle_minutes > (timeout_threshold / 2):
                         status_text = f"Chậm ({int(idle_minutes)} phút)"
-                        status_color = "#ffc107"
+                        status_color = COLORS['warning']
                     else:
                         status_text = f"Hoạt động ({int(idle_minutes)} phút)"
-                        status_color = "#28a745"
+                        status_color = COLORS['success']
                 except Exception:
                     status_text = "Hoạt động"
             else:
                 status_text = "Không xác định"
-                status_color = "#6c757d"
+                status_color = COLORS['text_secondary']
 
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(QColor(status_color))
@@ -526,7 +589,7 @@ class QueueTab(BaseTab):
         btn_layout.addWidget(btn_resume)
 
         btn_cancel = QPushButton("Hủy mục đã chọn")
-        btn_cancel.setStyleSheet("background: #dc3545; color: white;")
+        btn_cancel.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']};")
         btn_cancel.clicked.connect(self.cancel_selected)
         btn_layout.addWidget(btn_cancel)
         btn_layout.addStretch()
@@ -614,7 +677,7 @@ class UsersTab(BaseTab):
         toolbar.addWidget(btn_refresh)
 
         btn_add = QPushButton("Tạo Người dùng")
-        btn_add.setStyleSheet("background: #28a745; color: white;")
+        btn_add.setStyleSheet(f"background: {COLORS['success']}; color: {COLORS['text_primary']};")
         btn_add.clicked.connect(self.create_user_dialog)
         toolbar.addWidget(btn_add)
         layout.addLayout(toolbar)
@@ -639,9 +702,15 @@ class UsersTab(BaseTab):
         btn_layout.addWidget(btn_reset)
 
         btn_delete = QPushButton("Xóa người dùng")
-        btn_delete.setStyleSheet("background: #dc3545; color: white;")
+        btn_delete.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']};")
         btn_delete.clicked.connect(self.delete_selected)
         btn_layout.addWidget(btn_delete)
+
+        btn_unlock = QPushButton("🔓 Xóa khóa đăng nhập")
+        btn_unlock.setToolTip("Xóa tất cả IP bị khóa do đăng nhập sai nhiều lần")
+        btn_unlock.clicked.connect(self.clear_rate_limits)
+        btn_layout.addWidget(btn_unlock)
+
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
@@ -865,19 +934,46 @@ class UsersTab(BaseTab):
         except Exception as e:
             QMessageBox.critical(self, "Lỗi", str(e))
 
+    def clear_rate_limits(self):
+        """Xóa tất cả IP bị khóa đăng nhập."""
+        if not self.main_window.server.is_running():
+            QMessageBox.warning(self, "Chú ý", "Server chưa chạy.")
+            return
+        try:
+            api = self.main_window.local_api
+            locked = api.get("/api/local/rate-limits")
+            if not locked:
+                QMessageBox.information(self, "Thông báo", "Không có IP nào đang bị khóa.")
+                return
+            info = "\n".join(f"  • {x['ip']} ({x['attempts']} lần sai, mở khóa sau {x['unlock_in_seconds']}s)"
+                             for x in locked)
+            reply = QMessageBox.question(
+                self, "Xác nhận",
+                f"Có {len(locked)} IP đang bị khóa:\n{info}\n\nXóa khóa tất cả?"
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            api.post("/api/local/rate-limits/clear")
+            QMessageBox.information(self, "OK", f"Đã mở khóa {len(locked)} IP.")
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", str(e))
+
 
 class ConfigTab(BaseTab):
     """Tab 1: Config & Status (gộp)"""
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # ===== TRẠNG THÁI SERVER (từ StatusTab) =====
         status_group = QGroupBox("Trạng thái Server")
         sg = QFormLayout()
 
         self.lbl_status = QLabel("Đang dừng")
-        self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #dc3545;")
+        self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['danger']};")
         sg.addRow("Trạng thái:", self.lbl_status)
 
         self.lbl_uptime = QLabel("")
@@ -889,11 +985,11 @@ class ConfigTab(BaseTab):
         # Server control buttons
         btn_layout = QHBoxLayout()
         self.btn_start = QPushButton("Bắt đầu Server")
-        self.btn_start.setStyleSheet("background: #28a745; color: white; padding: 8px 16px;")
+        self.btn_start.setStyleSheet(f"background: {COLORS['success']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         self.btn_start.clicked.connect(self.start_server)
 
         self.btn_stop = QPushButton("Dừng Server")
-        self.btn_stop.setStyleSheet("background: #dc3545; color: white; padding: 8px 16px;")
+        self.btn_stop.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         self.btn_stop.clicked.connect(self.stop_server)
 
         self.btn_restart = QPushButton("Khởi động lại")
@@ -907,9 +1003,9 @@ class ConfigTab(BaseTab):
         # Stats inline cùng hàng với buttons
         btn_layout.addStretch()
         self.lbl_sessions = QLabel("0")
-        self.lbl_sessions.setStyleSheet("font-size: 18px; font-weight: bold; color: #007bff;")
+        self.lbl_sessions.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {COLORS['accent']};")
         lbl_sessions_title = QLabel("Phiên hoạt động")
-        lbl_sessions_title.setStyleSheet("color: #999; font-size: 11px;")
+        lbl_sessions_title.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
         stats_card1 = QVBoxLayout()
         stats_card1.addWidget(self.lbl_sessions, alignment=Qt.AlignmentFlag.AlignCenter)
         stats_card1.addWidget(lbl_sessions_title, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -918,9 +1014,9 @@ class ConfigTab(BaseTab):
         btn_layout.addSpacing(24)
 
         self.lbl_queue = QLabel("0")
-        self.lbl_queue.setStyleSheet("font-size: 18px; font-weight: bold; color: #007bff;")
+        self.lbl_queue.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {COLORS['accent']};")
         lbl_queue_title = QLabel("Tập tin đang chờ")
-        lbl_queue_title.setStyleSheet("color: #999; font-size: 11px;")
+        lbl_queue_title.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
         stats_card2 = QVBoxLayout()
         stats_card2.addWidget(self.lbl_queue, alignment=Qt.AlignmentFlag.AlignCenter)
         stats_card2.addWidget(lbl_queue_title, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -943,21 +1039,142 @@ class ConfigTab(BaseTab):
         cg.addRow("Cổng (Port):", self.edit_port)
 
         self.spin_cpu = QSpinBox()
-        self.spin_cpu.setRange(1, ALLOWED_THREADS)
+        self.spin_cpu.setRange(1, 128)
         self.spin_cpu.setValue(min(4, ALLOWED_THREADS))
-        cg.addRow("Số luồng CPU:", self.spin_cpu)
+        self.lbl_cpu_warn = QLabel()
+        self.lbl_cpu_warn.setStyleSheet(f"color: {COLORS['warning']}; font-size: 11px;")
+        self.lbl_cpu_warn.hide()
+        self.spin_cpu.valueChanged.connect(self._on_cpu_changed)
+        cpu_layout = QVBoxLayout()
+        cpu_layout.setSpacing(2)
+        cpu_layout.addWidget(self.spin_cpu)
+        cpu_layout.addWidget(self.lbl_cpu_warn)
+        cg.addRow("Số luồng CPU:", cpu_layout)
 
-        # Nút tạo cert SSL
-        btn_cert = QPushButton("Tạo cert SSL")
-        btn_cert.setStyleSheet("background: #007bff; color: white; padding: 6px 16px;")
-        btn_cert.clicked.connect(self._generate_ssl_cert)
-        cg.addRow("", btn_cert)
+        self.edit_offline_url = QLineEdit()
+        self.edit_offline_url.setPlaceholderText("https://drive.google.com/... (để trống nếu chưa có)")
+        cg.addRow("Link tải bản cài offline:", self.edit_offline_url)
 
         config_group.setLayout(cg)
         layout.addWidget(config_group)
 
+        # === Summarizer (Tóm tắt cuộc họp) ===
+        summ_group = CollapsibleSection("📝 Tóm tắt cuộc họp (LLM)", collapsed=True)
+        sg = QFormLayout()
+        sg.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.chk_summarizer_enabled = QCheckBox("Bật chức năng tóm tắt cuộc họp")
+        self.chk_summarizer_enabled.setToolTip(
+            "Khi bật, tab 'Tóm tắt' sẽ hiện trên web client.\n"
+            "Cần có model GGUF local hoặc Ollama server."
+        )
+        self.chk_summarizer_enabled.toggled.connect(self._on_summarizer_toggled)
+        sg.addRow("", self.chk_summarizer_enabled)
+
+        self.lbl_summarizer_status = QLabel("")
+        self.lbl_summarizer_status.setWordWrap(True)
+        sg.addRow("", self.lbl_summarizer_status)
+
+        self.edit_summarizer_url = QLineEdit()
+        self.edit_summarizer_url.setPlaceholderText("models/Qwen3.5-4B-Q4_K_M.gguf hoặc http://localhost:11434")
+        self.edit_summarizer_url.setToolTip(
+            "Đường dẫn file GGUF (ưu tiên, dùng llama.cpp trực tiếp)\n"
+            "hoặc URL Ollama server (fallback)"
+        )
+        sg.addRow("Model path / Ollama URL:", self.edit_summarizer_url)
+
+        self.edit_summarizer_model = QLineEdit()
+        self.edit_summarizer_model.setPlaceholderText("qwen3.5:4b")
+        self.edit_summarizer_model.setToolTip("Tên model Ollama (chỉ dùng khi trỏ tới Ollama URL)")
+        sg.addRow("Tên model (Ollama):", self.edit_summarizer_model)
+
+        self.btn_download_model = QPushButton("📥 Tải model Qwen3.5-4B (~2.7 GB)")
+        self.btn_download_model.setToolTip("Tải model GGUF từ HuggingFace vào thư mục models/")
+        self.btn_download_model.clicked.connect(self._download_summarizer_model)
+        sg.addRow("", self.btn_download_model)
+
+        summ_group.setLayout(sg)
+        layout.addWidget(summ_group)
+
+        # === SSL Certificate ===
+        ssl_group = CollapsibleSection("Chứng chỉ SSL", collapsed=True)
+        ssl_layout = QVBoxLayout()
+
+        # HTTP mode checkbox
+        self.chk_http_mode = QCheckBox("Không chạy HTTPS, chạy HTTP thôi (WAF sẽ dùng SSL Offloading)")
+        self.chk_http_mode.setStyleSheet(f"color: {COLORS['warning']}; font-weight: bold; padding: 4px 0;")
+        self.chk_http_mode.toggled.connect(self._on_http_mode_toggled)
+        ssl_layout.addWidget(self.chk_http_mode)
+
+        # Container cho tất cả SSL widgets (ẩn khi HTTP mode)
+        self.ssl_widgets_container = QWidget()
+        ssl_inner = QVBoxLayout()
+        ssl_inner.setContentsMargins(0, 0, 0, 0)
+
+        # Trạng thái cert hiện tại
+        self.lbl_cert_status = QLabel("Đang kiểm tra...")
+        self.lbl_cert_status.setWordWrap(True)
+        ssl_inner.addWidget(self.lbl_cert_status)
+
+        # Self-signed
+        btn_cert = QPushButton("Tạo cert Self-signed")
+        btn_cert.setStyleSheet(f"background: {COLORS['accent']}; color: {COLORS['text_primary']}; padding: 6px 16px;")
+        btn_cert.clicked.connect(self._generate_ssl_cert)
+        cert_btn_row = QHBoxLayout()
+        cert_btn_row.addWidget(btn_cert)
+        cert_btn_row.addStretch()
+        ssl_inner.addLayout(cert_btn_row)
+
+        # Import custom cert
+        import_group = QGroupBox("Import chứng chỉ (Let's Encrypt, v.v.)")
+        ig = QFormLayout()
+
+        self.edit_cert_file = QLineEdit()
+        self.edit_cert_file.setPlaceholderText("fullchain.pem hoặc certificate.crt")
+        self.edit_cert_file.setReadOnly(True)
+        btn_browse_cert = QPushButton("Chọn...")
+        btn_browse_cert.clicked.connect(lambda: self._browse_cert_file(self.edit_cert_file))
+        cert_row = QHBoxLayout()
+        cert_row.addWidget(self.edit_cert_file, 1)
+        cert_row.addWidget(btn_browse_cert)
+        ig.addRow("Cert file:", cert_row)
+
+        self.edit_key_file = QLineEdit()
+        self.edit_key_file.setPlaceholderText("privkey.pem hoặc private.key")
+        self.edit_key_file.setReadOnly(True)
+        btn_browse_key = QPushButton("Chọn...")
+        btn_browse_key.clicked.connect(lambda: self._browse_cert_file(self.edit_key_file))
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.edit_key_file, 1)
+        key_row.addWidget(btn_browse_key)
+        ig.addRow("Key file:", key_row)
+
+        import_group.setLayout(ig)
+        ssl_inner.addWidget(import_group)
+
+        # Buttons: Import + Xóa
+        ssl_btn_layout = QHBoxLayout()
+        btn_import = QPushButton("Import chứng chỉ")
+        btn_import.setStyleSheet(f"background: {COLORS['success']}; color: {COLORS['text_primary']}; padding: 6px 16px;")
+        btn_import.clicked.connect(self._import_custom_cert)
+        ssl_btn_layout.addWidget(btn_import)
+
+        btn_remove = QPushButton("Xóa cert custom")
+        btn_remove.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']}; padding: 6px 16px;")
+        btn_remove.clicked.connect(self._remove_custom_cert)
+        ssl_btn_layout.addWidget(btn_remove)
+
+        ssl_btn_layout.addStretch()
+        ssl_inner.addLayout(ssl_btn_layout)
+
+        self.ssl_widgets_container.setLayout(ssl_inner)
+        ssl_layout.addWidget(self.ssl_widgets_container)
+
+        ssl_group.setLayout(ssl_layout)
+        layout.addWidget(ssl_group)
+
         # Limits
-        limits_group = QGroupBox("Giới hạn")
+        limits_group = CollapsibleSection("Giới hạn", collapsed=True)
         lg = QFormLayout()
 
         self.spin_max_upload = QSpinBox()
@@ -987,7 +1204,7 @@ class ConfigTab(BaseTab):
         layout.addWidget(limits_group)
 
         # Security
-        security_group = QGroupBox("Bảo mật")
+        security_group = CollapsibleSection("Bảo mật", collapsed=True)
         sec = QFormLayout()
 
         btn_change_pw = QPushButton("Đổi mật khẩu Admin")
@@ -1005,11 +1222,13 @@ class ConfigTab(BaseTab):
 
         # Save button
         btn_save = QPushButton("Áp dụng")
-        btn_save.setStyleSheet("background: #007bff; color: white; padding: 8px 20px;")
+        btn_save.setStyleSheet(f"background: {COLORS['accent']}; color: {COLORS['text_primary']}; padding: 8px 20px;")
         btn_save.clicked.connect(self.save_config)
-        layout.addWidget(btn_save)
-
-        layout.addStretch()
+        save_btn_row = QHBoxLayout()
+        save_btn_row.addStretch()
+        save_btn_row.addWidget(btn_save)
+        save_btn_row.addStretch()
+        layout.addLayout(save_btn_row)
 
         # Load saved config values
         self._load_config()
@@ -1034,12 +1253,132 @@ class ConfigTab(BaseTab):
             self.spin_storage.setValue(server_config.get_float("storage_per_user_gb"))
             self.spin_max_sessions.setValue(server_config.max_sessions)
             self.spin_jwt.setValue(server_config.jwt_expire_minutes)
+            self.edit_offline_url.setText(server_config.get("offline_download_url"))
+
+            # Summarizer
+            self.edit_summarizer_url.setText(server_config.get("summarizer_model_path") or "")
+            self.edit_summarizer_model.setText(server_config.get("summarizer_ollama_model") or "qwen3.5:4b")
+            self.chk_summarizer_enabled.setChecked(server_config.get("summarizer_enabled") == "1")
+            self._check_summarizer_status()
+
+            # HTTP mode
+            self.chk_http_mode.setChecked(server_config.http_mode)
 
             # Cập nhật local_api port + host
             self.main_window.local_api.port = server_config.port
             self.main_window.local_api.host = server_config.get("host")
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
+
+        self._on_cpu_changed(self.spin_cpu.value())
+        self._refresh_cert_status()
+
+    def _on_summarizer_toggled(self, checked):
+        """Khi toggle summarizer — check model có sẵn không."""
+        self._check_summarizer_status()
+
+    def _check_summarizer_status(self):
+        """Kiểm tra model summarizer có sẵn không và cập nhật UI."""
+        import os
+        path = self.edit_summarizer_url.text().strip()
+        lbl = self.lbl_summarizer_status
+
+        if not self.chk_summarizer_enabled.isChecked():
+            lbl.setText("")
+            lbl.setStyleSheet("")
+            return
+
+        if not path:
+            # Kiểm tra model mặc định
+            try:
+                from web_service.summarizer import get_default_model_path
+                default = get_default_model_path()
+                if os.path.isfile(default):
+                    self.edit_summarizer_url.setText(default)
+                    lbl.setText(f"✅ Model tìm thấy: {os.path.basename(default)}")
+                    lbl.setStyleSheet(f"color: {COLORS['success']}")
+                    return
+            except Exception:
+                pass
+            lbl.setText("⚠ Chưa cấu hình model. Nhấn 'Tải model' hoặc nhập đường dẫn.")
+            lbl.setStyleSheet(f"color: {COLORS['warning']}")
+            return
+
+        if os.path.isfile(path):
+            size_mb = os.path.getsize(path) / 1e6
+            lbl.setText(f"✅ Model GGUF: {os.path.basename(path)} ({size_mb:.0f} MB)")
+            lbl.setStyleSheet(f"color: {COLORS['success']}")
+        elif path.startswith("http"):
+            lbl.setText(f"🔗 Sẽ dùng Ollama tại {path}")
+            lbl.setStyleSheet(f"color: {COLORS['accent']}")
+        else:
+            lbl.setText(f"❌ Không tìm thấy: {path}")
+            lbl.setStyleSheet(f"color: {COLORS['danger']}")
+
+    def _download_summarizer_model(self):
+        """Tải model GGUF trong background thread."""
+        self.btn_download_model.setEnabled(False)
+        self.btn_download_model.setText("⏳ Đang tải...")
+        self.lbl_summarizer_status.setText("Đang tải model từ HuggingFace (~2.7 GB)...")
+        self.lbl_summarizer_status.setStyleSheet(f"color: {COLORS['warning']}")
+
+        import threading
+
+        def _do_download():
+            try:
+                from web_service.summarizer import download_model
+                path = download_model(progress_cb=lambda msg, pct: None)
+                # Update UI từ main thread
+                from PyQt6.QtCore import QMetaObject, Qt as QtCore_Qt, Q_ARG
+                QMetaObject.invokeMethod(
+                    self.btn_download_model, "setText",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, "✅ Đã tải xong"),
+                )
+                QMetaObject.invokeMethod(
+                    self.edit_summarizer_url, "setText",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, path),
+                )
+                QMetaObject.invokeMethod(
+                    self.lbl_summarizer_status, "setText",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, f"✅ Model tải thành công: {path}"),
+                )
+            except Exception as e:
+                QMetaObject.invokeMethod(
+                    self.btn_download_model, "setText",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, "❌ Lỗi tải - Thử lại"),
+                )
+                QMetaObject.invokeMethod(
+                    self.lbl_summarizer_status, "setText",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, f"❌ Lỗi: {str(e)[:100]}"),
+                )
+            finally:
+                QMetaObject.invokeMethod(
+                    self.btn_download_model, "setEnabled",
+                    QtCore_Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(bool, True),
+                )
+
+        threading.Thread(target=_do_download, daemon=True).start()
+
+    def _on_http_mode_toggled(self, checked):
+        """Ẩn/hiện SSL widgets khi toggle HTTP mode."""
+        self.ssl_widgets_container.setVisible(not checked)
+
+    def _on_cpu_changed(self, value):
+        """Cảnh báo khi số luồng CPU > số core vật lý."""
+        if value > ALLOWED_THREADS:
+            self.lbl_cpu_warn.setText(
+                f"⚠ Vượt quá số core vật lý ({ALLOWED_THREADS}). "
+                f"Có thể giảm hiệu suất do context switching."
+            )
+            self.lbl_cpu_warn.show()
+        else:
+            self.lbl_cpu_warn.hide()
 
     def start_server(self):
         host = self.edit_host.currentText()
@@ -1065,16 +1404,23 @@ class ConfigTab(BaseTab):
         running = self.main_window.server.is_running()
         if running:
             self.lbl_status.setText("Đang chạy")
-            self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #28a745;")
-            self.lbl_uptime.setText(self.main_window.server.uptime())
+            self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['success']};")
+            uptime = self.main_window.server.uptime()
+            self.lbl_uptime.setText(uptime)
+            self.main_window.statusBar().showMessage(
+                f"Server: Running ({uptime}) | Max CPU: {ALLOWED_THREADS}"
+            )
             # Fetch stats in background thread (không block GUI)
             self._fetch_stats()
         else:
             self.lbl_status.setText("Đang dừng")
-            self.lbl_status.setStyleSheet("font-size: 16px; font-weight: bold; color: #dc3545;")
+            self.lbl_status.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {COLORS['danger']};")
             self.lbl_uptime.setText("")
             self.lbl_sessions.setText("0")
             self.lbl_queue.setText("0")
+            self.main_window.statusBar().showMessage(
+                f"Server: Stopped | Max CPU: {ALLOWED_THREADS}"
+            )
 
     def _fetch_stats(self):
         """Fetch stats từ API trong background thread."""
@@ -1245,6 +1591,210 @@ class ConfigTab(BaseTab):
             f"Đã tạo chứng chỉ SSL thành công!\n\n"
             f"SAN: {ip_list}\n\n"
             f"Vui lòng khởi động lại server để áp dụng.")
+        self._refresh_cert_status()
+
+    def _browse_cert_file(self, target_edit: QLineEdit):
+        """Mở dialog chọn file cert/key."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn file chứng chỉ", "",
+            "PEM / CRT files (*.pem *.crt *.key *.cer);;All files (*)",
+        )
+        if path:
+            target_edit.setText(path)
+
+    def _refresh_cert_status(self):
+        """Hiển thị thông tin cert đang được server sử dụng."""
+        cert_dir = os.path.join(BASE_DIR, "web_service", "certs")
+        custom_cert = os.path.join(cert_dir, "custom.crt")
+        self_signed = os.path.join(cert_dir, "server.crt")
+
+        # Xác định cert đang dùng
+        if os.path.exists(custom_cert):
+            cert_path = custom_cert
+            cert_type = "Custom (import)"
+        elif os.path.exists(self_signed):
+            cert_path = self_signed
+            cert_type = "Self-signed"
+        else:
+            self.lbl_cert_status.setText("Chưa có chứng chỉ SSL")
+            self.lbl_cert_status.setStyleSheet(f"color: {COLORS['danger']};")
+            return
+
+        try:
+            from cryptography import x509
+            with open(cert_path, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+
+            # CN
+            cn = ""
+            for attr in cert.subject:
+                if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                    cn = attr.value
+                    break
+
+            # SAN domains/IPs
+            san_names = []
+            try:
+                san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+                san_names.extend(san.value.get_values_for_type(x509.DNSName))
+                san_names.extend(str(ip) for ip in san.value.get_values_for_type(x509.IPAddress))
+            except x509.ExtensionNotFound:
+                pass
+
+            # Expiry
+            import datetime
+            expiry = cert.not_valid_after_utc
+            now = datetime.datetime.now(datetime.timezone.utc)
+            days_left = (expiry - now).days
+            expiry_str = expiry.strftime("%Y-%m-%d")
+
+            if days_left < 0:
+                expiry_color = COLORS['danger']
+                expiry_text = f"ĐÃ HẾT HẠN ({expiry_str})"
+            elif days_left < 30:
+                expiry_color = COLORS['warning']
+                expiry_text = f"{expiry_str} (còn {days_left} ngày)"
+            else:
+                expiry_color = COLORS['success']
+                expiry_text = f"{expiry_str} (còn {days_left} ngày)"
+
+            san_str = ", ".join(san_names[:5])
+            if len(san_names) > 5:
+                san_str += f" (+{len(san_names) - 5})"
+
+            self.lbl_cert_status.setText(
+                f"Loại: {cert_type}  |  CN: {cn}\n"
+                f"SAN: {san_str}\n"
+                f"Hết hạn: {expiry_text}"
+            )
+            self.lbl_cert_status.setStyleSheet(f"color: {expiry_color};")
+        except Exception as e:
+            self.lbl_cert_status.setText(f"Lỗi đọc cert: {e}")
+            self.lbl_cert_status.setStyleSheet(f"color: {COLORS['danger']};")
+
+    def _import_custom_cert(self):
+        """Validate và import cert + key custom vào certs/custom.crt + custom.key."""
+        cert_path = self.edit_cert_file.text().strip()
+        key_path = self.edit_key_file.text().strip()
+
+        if not cert_path or not key_path:
+            QMessageBox.warning(self, "Thiếu file", "Vui lòng chọn cả file Cert và Key.")
+            return
+
+        if not os.path.exists(cert_path):
+            QMessageBox.warning(self, "Lỗi", f"File cert không tồn tại:\n{cert_path}")
+            return
+        if not os.path.exists(key_path):
+            QMessageBox.warning(self, "Lỗi", f"File key không tồn tại:\n{key_path}")
+            return
+
+        # Validate cert + key
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+            with open(cert_path, "rb") as f:
+                cert_data = f.read()
+            with open(key_path, "rb") as f:
+                key_data = f.read()
+
+            cert = x509.load_pem_x509_certificate(cert_data)
+            key = load_pem_private_key(key_data, password=None)
+
+            # Kiểm tra key khớp cert
+            from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+            cert_pubkey = cert.public_key().public_bytes(
+                encoding=Encoding.PEM, format=PublicFormat.SubjectPublicKeyInfo,
+            )
+            key_pubkey = key.public_key().public_bytes(
+                encoding=Encoding.PEM, format=PublicFormat.SubjectPublicKeyInfo,
+            )
+            if cert_pubkey != key_pubkey:
+                QMessageBox.critical(self, "Lỗi", "Private key không khớp với certificate!")
+                return
+
+            # Lấy thông tin cert để hiển thị xác nhận
+            cn = ""
+            for attr in cert.subject:
+                if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                    cn = attr.value
+                    break
+
+            san_names = []
+            try:
+                san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+                san_names.extend(san.value.get_values_for_type(x509.DNSName))
+                san_names.extend(str(ip) for ip in san.value.get_values_for_type(x509.IPAddress))
+            except x509.ExtensionNotFound:
+                pass
+
+            import datetime
+            expiry = cert.not_valid_after_utc
+            now = datetime.datetime.now(datetime.timezone.utc)
+            days_left = (expiry - now).days
+
+            if days_left < 0:
+                QMessageBox.critical(self, "Lỗi", f"Chứng chỉ đã hết hạn! ({expiry.strftime('%Y-%m-%d')})")
+                return
+
+            # Xác nhận import
+            san_str = ", ".join(san_names) if san_names else "(không có)"
+            reply = QMessageBox.question(
+                self, "Xác nhận import",
+                f"CN: {cn}\n"
+                f"SAN: {san_str}\n"
+                f"Hết hạn: {expiry.strftime('%Y-%m-%d')} (còn {days_left} ngày)\n\n"
+                f"Import chứng chỉ này?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # Copy vào certs/
+            import shutil
+            cert_dir = os.path.join(BASE_DIR, "web_service", "certs")
+            os.makedirs(cert_dir, exist_ok=True)
+            shutil.copy2(cert_path, os.path.join(cert_dir, "custom.crt"))
+            shutil.copy2(key_path, os.path.join(cert_dir, "custom.key"))
+
+            self._refresh_cert_status()
+            QMessageBox.information(self, "Thành công",
+                "Đã import chứng chỉ SSL!\n"
+                "Vui lòng khởi động lại server để áp dụng.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"Không thể import chứng chỉ:\n{e}")
+
+    def _remove_custom_cert(self):
+        """Xóa custom cert, server quay lại dùng self-signed."""
+        cert_dir = os.path.join(BASE_DIR, "web_service", "certs")
+        custom_cert = os.path.join(cert_dir, "custom.crt")
+        custom_key = os.path.join(cert_dir, "custom.key")
+
+        if not os.path.exists(custom_cert):
+            QMessageBox.information(self, "Thông báo", "Không có cert custom nào để xóa.")
+            return
+
+        reply = QMessageBox.question(
+            self, "Xác nhận xóa",
+            "Xóa chứng chỉ custom?\n"
+            "Server sẽ quay lại dùng cert self-signed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            if os.path.exists(custom_cert):
+                os.remove(custom_cert)
+            if os.path.exists(custom_key):
+                os.remove(custom_key)
+            self._refresh_cert_status()
+            QMessageBox.information(self, "Thành công",
+                "Đã xóa cert custom.\n"
+                "Vui lòng khởi động lại server để áp dụng.")
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"Không thể xóa: {e}")
 
     def _check_cert_covers_host(self, host: str) -> bool:
         """Kiểm tra cert SSL hiện tại có SAN chứa host không."""
@@ -1284,15 +1834,23 @@ class ConfigTab(BaseTab):
             server_config.set("host", new_host)
             server_config.set("port", str(self.edit_port.value()))
             server_config.set("cpu_threads", str(self.spin_cpu.value()))
+            server_config.set("http_mode", "1" if self.chk_http_mode.isChecked() else "0")
             server_config.set("max_upload_mb", str(self.spin_max_upload.value()))
             server_config.set("anonymous_timeout_minutes", str(self.spin_timeout.value()))
             server_config.set("storage_per_user_gb", str(self.spin_storage.value()))
             server_config.set("max_sessions", str(self.spin_max_sessions.value()))
             server_config.set("jwt_expire_minutes", str(self.spin_jwt.value()))
+            server_config.set("offline_download_url", self.edit_offline_url.text().strip())
+
+            # Summarizer
+            server_config.set("summarizer_enabled", "1" if self.chk_summarizer_enabled.isChecked() else "0")
+            server_config.set("summarizer_model_path", self.edit_summarizer_url.text().strip())
+            server_config.set("summarizer_ollama_model", self.edit_summarizer_model.text().strip())
+
             server_config.save()
 
-            # Kiểm tra cert có cover host mới không
-            if not self._check_cert_covers_host(new_host):
+            # Kiểm tra cert có cover host mới không (bỏ qua nếu HTTP mode)
+            if not self.chk_http_mode.isChecked() and not self._check_cert_covers_host(new_host):
                 regen = QMessageBox.question(
                     self, "Chứng chỉ SSL",
                     f"Chứng chỉ SSL hiện tại không chứa IP '{new_host}'.\n"
@@ -1343,7 +1901,7 @@ class LogsTab(BaseTab):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Consolas", 10))
-        self.log_view.setStyleSheet("background: #1e1e1e; color: #d4d4d4; border: 1px solid #555;")
+        self.log_view.setStyleSheet(f"background: {COLORS['bg_dark']}; color: {COLORS['text_secondary']}; border: 1px solid {COLORS['border']};")
         self.log_view.setMaximumBlockCount(self.MAX_LOG_LINES)
         layout.addWidget(self.log_view)
 
@@ -1418,12 +1976,12 @@ class ServiceTab(BaseTab):
         btn_layout = QHBoxLayout()
 
         btn_install = QPushButton("Cài đặt Service")
-        btn_install.setStyleSheet("background: #007bff; color: white; padding: 8px 16px;")
+        btn_install.setStyleSheet(f"background: {COLORS['accent']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         btn_install.clicked.connect(self.install_service)
         btn_layout.addWidget(btn_install)
 
         btn_uninstall = QPushButton("Gỡ bỏ Service")
-        btn_uninstall.setStyleSheet("background: #dc3545; color: white; padding: 8px 16px;")
+        btn_uninstall.setStyleSheet(f"background: {COLORS['danger']}; color: {COLORS['text_primary']}; padding: 8px 16px;")
         btn_uninstall.clicked.connect(self.uninstall_service)
         btn_layout.addWidget(btn_uninstall)
 
@@ -1479,13 +2037,13 @@ class ServiceTab(BaseTab):
         code, output = self._run_sc(["query", self.SERVICE_NAME])
         if code != 0 or "does not exist" in output.lower() or "1060" in output:
             self.lbl_service_status.setText("Chưa cài đặt")
-            self.lbl_service_status.setStyleSheet("color: #999;")
+            self.lbl_service_status.setStyleSheet(f"color: {COLORS['text_secondary']};")
         elif "RUNNING" in output:
             self.lbl_service_status.setText("Đang chạy")
-            self.lbl_service_status.setStyleSheet("color: #28a745; font-weight: bold;")
+            self.lbl_service_status.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold;")
         elif "STOPPED" in output:
             self.lbl_service_status.setText("Đã dừng")
-            self.lbl_service_status.setStyleSheet("color: #dc3545;")
+            self.lbl_service_status.setStyleSheet(f"color: {COLORS['danger']};")
         else:
             self.lbl_service_status.setText(output.strip()[:50])
 
@@ -1528,6 +2086,158 @@ class ServerGUI(QMainWindow):
         self.setWindowTitle("Sherpa Vietnamese ASR - Server Admin")
         self.resize(1000, 750)
 
+        # Chặn scroll wheel trên spinbox/combobox
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+        # ── Global dark-theme stylesheet ──
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background-color: {COLORS['bg_dark']};
+                color: {COLORS['text_primary']};
+            }}
+            QTabWidget::pane {{
+                border: none;
+                background-color: {COLORS['bg_dark']};
+            }}
+            QTabBar::tab {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_secondary']};
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                font-size: 13px;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {COLORS['accent']};
+                color: {COLORS['text_primary']};
+                font-weight: bold;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: {COLORS['border']};
+                color: {COLORS['text_primary']};
+            }}
+            QGroupBox {{
+                border: 1px solid {COLORS['border']};
+                border-radius: 6px;
+                margin-top: 8px;
+                padding-top: 12px;
+                font-weight: bold;
+                color: {COLORS['text_primary']};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: {COLORS['text_secondary']};
+            }}
+            QLabel {{
+                color: {COLORS['text_primary']};
+            }}
+            QPushButton {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['border']};
+            }}
+            QPushButton:disabled {{
+                opacity: 0.4;
+                color: {COLORS['text_secondary']};
+            }}
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+                background-color: {COLORS['bg_input']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 20px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {COLORS['bg_input']};
+                color: {COLORS['text_primary']};
+                selection-background-color: {COLORS['accent']};
+            }}
+            QTextEdit, QPlainTextEdit {{
+                background-color: {COLORS['bg_dark']};
+                color: {COLORS['text_secondary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QTableWidget {{
+                background-color: {COLORS['bg_dark']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                gridline-color: {COLORS['border']};
+                selection-background-color: {COLORS['accent']};
+            }}
+            QTableWidget QHeaderView::section {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                padding: 4px 8px;
+                font-weight: bold;
+            }}
+            QCheckBox {{
+                color: {COLORS['text_primary']};
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+            }}
+            QProgressBar {{
+                background-color: {COLORS['bg_dark']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                text-align: center;
+                color: {COLORS['text_primary']};
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['accent']};
+                border-radius: 3px;
+            }}
+            QStatusBar {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_secondary']};
+                border-top: 1px solid {COLORS['border']};
+            }}
+            QScrollBar:vertical {{
+                background: {COLORS['bg_dark']};
+                width: 8px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {COLORS['border']};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {COLORS['border_light']};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar:horizontal {{
+                height: 0px;
+            }}
+            QSpinBox::up-button, QSpinBox::down-button,
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+                width: 0px;
+                height: 0px;
+                border: none;
+            }}
+        """)
+
         self.server = ServerProcess()
         self.local_api = _LocalAPI(port=8443)
         # host + port sẽ được cập nhật từ config trong ConfigTab._load_config()
@@ -1540,6 +2250,14 @@ class ServerGUI(QMainWindow):
         self.init_ui()
         self.init_timers()
         self.center_on_screen()
+
+    def eventFilter(self, obj, event):
+        """Chặn scroll wheel trên SpinBox/ComboBox."""
+        if event.type() == event.Type.Wheel:
+            if isinstance(obj, (QSpinBox, QDoubleSpinBox, QComboBox)):
+                event.ignore()
+                return True
+        return super().eventFilter(obj, event)
 
     def init_ui(self):
         central = QWidget()
@@ -1569,7 +2287,7 @@ class ServerGUI(QMainWindow):
 
         layout.addWidget(self.tabs)
 
-        self.statusBar().showMessage(f"Ready | Server: Stopped | Max CPU: {ALLOWED_THREADS}")
+        self.statusBar().showMessage(f"Server: Stopped | Max CPU: {ALLOWED_THREADS}")
 
     def _on_tab_changed(self, index):
         """Tự động refresh tab khi được chọn."""

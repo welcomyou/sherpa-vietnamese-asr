@@ -3,12 +3,16 @@ FastAPI server chính - routes, WebSocket, static files.
 """
 
 import os
+import re
 import json
 import uuid
+import time
 import asyncio
 import logging
 from typing import Optional
 from datetime import datetime
+from collections import defaultdict
+from urllib.parse import quote, urlparse
 
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form,
@@ -29,6 +33,47 @@ from web_service.queue_manager import queue_manager
 
 logger = logging.getLogger("asr.server")
 
+# === Login rate limiting (in-memory) ===
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 300  # 5 phút
+
+
+def _check_login_rate(ip: str):
+    """Kiểm tra rate limit login. Raise 429 nếu quá giới hạn."""
+    now = time.time()
+    _login_attempts[ip] = [t for t in _login_attempts[ip]
+                           if now - t < _LOGIN_WINDOW_SECONDS]
+    if len(_login_attempts[ip]) >= _LOGIN_MAX_ATTEMPTS:
+        oldest = min(_login_attempts[ip])
+        remain = int(_LOGIN_WINDOW_SECONDS - (now - oldest)) + 1
+        raise HTTPException(429, f"Quá nhiều lần thử. Vui lòng đợi {remain} giây.")
+
+
+def _record_failed_login(ip: str):
+    _login_attempts[ip].append(time.time())
+
+
+def _clear_login_rate(ip: str = None):
+    """Xóa rate limit. ip=None xóa tất cả."""
+    if ip:
+        _login_attempts.pop(ip, None)
+    else:
+        _login_attempts.clear()
+
+
+def _get_locked_ips() -> list:
+    """Trả về danh sách IP đang bị khóa login."""
+    now = time.time()
+    result = []
+    for ip, attempts in list(_login_attempts.items()):
+        valid = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
+        if len(valid) >= _LOGIN_MAX_ATTEMPTS:
+            oldest = min(valid)
+            remain = int(_LOGIN_WINDOW_SECONDS - (now - oldest)) + 1
+            result.append({"ip": ip, "attempts": len(valid), "unlock_in_seconds": remain})
+    return result
+
 # === FastAPI App ===
 
 app = FastAPI(title="Sherpa Vietnamese ASR", docs_url="/api/docs")
@@ -37,6 +82,42 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 
 # === Middleware ===
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    """Security headers + CSRF Origin check."""
+
+    async def dispatch(self, request: Request, call_next):
+        # CSRF: kiểm tra Origin header trên state-changing methods
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            origin = request.headers.get("origin", "")
+            if origin:
+                origin_host = urlparse(origin).netloc
+                request_host = request.headers.get("host", "")
+                if origin_host and request_host and origin_host != request_host:
+                    return JSONResponse(
+                        {"detail": "Origin không hợp lệ"}, status_code=403
+                    )
+
+        response = await call_next(request)
+
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "img-src 'self' data:; "
+            "connect-src 'self' wss: ws:; "
+            "media-src 'self' blob:; "
+            "font-src 'self' https://fonts.gstatic.com"
+        )
+        if not server_config.http_mode:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+
+        return response
+
 
 class SessionMiddleware(BaseHTTPMiddleware):
     """Read-only middleware: chỉ đọc session cookie, KHÔNG tự động tạo.
@@ -54,7 +135,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# Middleware thêm theo thứ tự ngược (middleware cuối chạy trước)
 app.add_middleware(SessionMiddleware)
+app.add_middleware(SecurityMiddleware)
 
 
 # === Dependencies ===
@@ -64,7 +147,7 @@ def get_session_id(request: Request) -> str:
 
 
 def get_current_user(request: Request) -> Optional[dict]:
-    """Lấy user từ JWT token (nếu có). Trả về None nếu anonymous."""
+    """Lấy user từ JWT token (nếu có). Trả về None nếu anonymous hoặc deactivated."""
     auth = request.headers.get("authorization", "")
     if not auth.startswith("Bearer "):
         return None
@@ -73,6 +156,8 @@ def get_current_user(request: Request) -> Optional[dict]:
     if not payload:
         return None
     user = db.get_user_by_id(int(payload["sub"]))
+    if not user or not user.get("is_active", True):
+        return None
     return user
 
 
@@ -138,6 +223,8 @@ async def startup():
     stale = db.cleanup_stale_queue()
     if stale:
         logger.info(f"Cleaned up {len(stale)} stale queue items (file_ids: {stale})")
+    # Startup: xóa mọi anonymous session cũ + files vật lý
+    session_manager.cleanup_on_startup(kill_processes_callback=queue_manager.cancel)
     # Start cleanup loop
     asyncio.create_task(
         session_manager.start_cleanup_loop(
@@ -146,7 +233,24 @@ async def startup():
     )
     # Resume queue neu co items dang doi
     queue_manager.process_next()
+    # Warm-up: pre-import heavy modules (librosa, soundfile, pydub, speaker_diarization)
+    # trong thread riêng để không block event loop, giúp /api/config/models respond nhanh
+    asyncio.create_task(_warmup_heavy_imports())
     logger.info("Server started")
+
+
+async def _warmup_heavy_imports():
+    """Pre-import heavy modules in background thread so first API call is fast."""
+    def _do_imports():
+        try:
+            from core.config import get_speaker_embedding_models, is_diarization_available
+            is_diarization_available()
+            get_speaker_embedding_models()
+            logger.info("Warmup: speaker diarization modules loaded")
+        except Exception as e:
+            logger.warning(f"Warmup: speaker diarization not available: {e}")
+
+    await asyncio.to_thread(_do_imports)
 
 
 # === Config API (public) ===
@@ -154,26 +258,30 @@ async def startup():
 @app.get("/api/config/models")
 async def get_models():
     """Danh sách models ASR và speaker có sẵn (chỉ trả về models đã tải)"""
+    # Chạy trong thread riêng vì các import/file check có thể block event loop
+    return await asyncio.to_thread(_get_models_sync)
+
+
+def _get_models_sync():
+    """Synchronous helper - chạy trong thread để không block event loop."""
     from core.config import BASE_DIR, get_speaker_embedding_models, is_diarization_available
 
     models_dir = os.path.join(BASE_DIR, "models")
     asr_models = []
-    for name in ["zipformer-30m-rnnt-6000h", "sherpa-onnx-zipformer-vi-2025-04-20"]:
-        path = os.path.join(models_dir, name)
-        if os.path.isdir(path):
-            asr_models.append({"id": name, "name": name})
-
-    # ROVER option: chỉ hiện khi cả 2 model đều có
+    # Chỉ 2 model: Zipformer 6000h (chính) và ROVER (6000h + 2025)
     from core.asr_engine import ROVER_MODEL_ID, ROVER_MODEL_IDS
+    primary_path = os.path.join(models_dir, ROVER_MODEL_IDS[0])
+    if os.path.isdir(primary_path):
+        asr_models.append({"id": ROVER_MODEL_IDS[0], "name": "hynt/Zipformer-30M (nhanh)"})
+
     rover_available = all(
         os.path.isdir(os.path.join(models_dir, mid)) for mid in ROVER_MODEL_IDS
     )
     if rover_available:
-        asr_models.append({"id": ROVER_MODEL_ID, "name": "ROVER - Voting (chính xác hơn)"})
+        asr_models.append({"id": ROVER_MODEL_ID, "name": "ROVER (chậm, chính xác)"})
 
     speaker_models = []
     if is_diarization_available():
-        # Chỉ trả về models đã tải/có sẵn, KHÔNG trả về tất cả trong registry
         from core.speaker_diarization import get_available_models, SpeakerDiarizer
         available = get_available_models(BASE_DIR)
         all_models = get_speaker_embedding_models()
@@ -201,7 +309,9 @@ async def get_defaults():
         "punctuation_confidence": int(server_config.get("default_punctuation_confidence")),
         "case_confidence": int(server_config.get("default_case_confidence")),
         "diarization_threshold": int(server_config.get("default_diarization_threshold")),
+        "merge_short_speaker": True,
         "max_upload_mb": int(server_config.get("max_upload_mb")),
+        "offline_download_url": server_config.get("offline_download_url"),
     }
 
 
@@ -249,7 +359,8 @@ async def create_session(request: Request):
     })
     response.set_cookie(
         "session_id", session_id,
-        httponly=True, samesite="lax", max_age=86400 * 30,
+        httponly=True, samesite="lax", max_age=86400,
+        secure=not server_config.http_mode,
     )
     return response
 
@@ -298,6 +409,10 @@ async def upload_file(
     session_id: str = Depends(get_session_id),
     user: Optional[dict] = Depends(get_current_user),
 ):
+    # Anonymous user phải có session hợp lệ
+    if not session_id and not user:
+        raise HTTPException(400, "Session hết hạn. Vui lòng tải lại trang.")
+
     # Validate extension
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
@@ -315,14 +430,25 @@ async def upload_file(
         if user["storage_used_bytes"] + len(content) > limit:
             raise HTTPException(400, "Vượt quá giới hạn lưu trữ")
 
+    # Anonymous: xóa file cũ trước khi upload mới (chỉ giữ 1 file)
+    user_id = user["id"] if user else None
+    if not user_id and session_id:
+        old_files = db.delete_session_files(session_id)
+        for fname in old_files:
+            import glob as _glob
+            for f_path in _glob.glob(os.path.join(UPLOAD_DIR, f"{fname}*")):
+                try:
+                    os.remove(f_path)
+                except OSError:
+                    pass
+        if old_files:
+            logger.info(f"Cleaned {len(old_files)} old file(s) for anonymous session {session_id[:8]}")
+
     # Lưu file
     stored_name = f"{uuid.uuid4().hex}_{file.filename}"
     stored_path = os.path.join(UPLOAD_DIR, stored_name)
     with open(stored_path, "wb") as f:
         f.write(content)
-
-    # Tạo record DB
-    user_id = user["id"] if user else None
     file_id = db.create_file(
         session_id=session_id,
         original_filename=file.filename,
@@ -407,6 +533,9 @@ async def process_file(
                                     int(server_config.get("default_case_confidence"))),
         "diarization_threshold": body.get("diarization_threshold",
                                           int(server_config.get("default_diarization_threshold"))),
+        "merge_short_speaker": body.get("merge_short_speaker", True),
+
+        "rms_normalize": body.get("rms_normalize", False),
     }
 
     # Tạo meeting record cho user đã login (skip nếu đã có)
@@ -478,6 +607,64 @@ async def file_result(
         raise HTTPException(404, "Chưa có kết quả ASR")
 
     return json.loads(file_record["asr_result_json"])
+
+
+# === Summarization API ===
+
+@app.post("/api/files/{file_id}/summarize")
+async def summarize_file(
+    file_id: int,
+    session_id: str = Depends(get_session_id),
+    user: Optional[dict] = Depends(get_current_user),
+):
+    """Trigger tóm tắt cho file đã có ASR result. Đưa vào queue chung."""
+    file_record = db.get_file(file_id)
+    check_file_access(file_record, session_id, user)
+
+    if not file_record.get("asr_result_json"):
+        raise HTTPException(400, "Chưa có kết quả ASR để tóm tắt")
+
+    # Kiểm tra summarizer có sẵn không
+    if server_config.get("summarizer_enabled") != "1":
+        raise HTTPException(404, "Chức năng tóm tắt chưa được bật")
+
+    from web_service.summarizer import is_summarizer_available
+    if not is_summarizer_available():
+        raise HTTPException(404, "Model tóm tắt chưa được cấu hình hoặc không tồn tại")
+
+    result = queue_manager.add_summarize_to_queue(file_id, session_id)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    return result
+
+
+@app.get("/api/files/{file_id}/summary")
+async def get_summary(
+    file_id: int,
+    session_id: str = Depends(get_session_id),
+    user: Optional[dict] = Depends(get_current_user),
+):
+    """Lấy kết quả tóm tắt đã có."""
+    file_record = db.get_file(file_id)
+    check_file_access(file_record, session_id, user)
+
+    if not file_record.get("summary_json"):
+        raise HTTPException(404, "Chưa có tóm tắt")
+
+    return json.loads(file_record["summary_json"])
+
+
+@app.get("/api/summarizer/status")
+async def summarizer_status():
+    """Kiểm tra summarizer có sẵn không (cho frontend show/hide nút)."""
+    enabled = server_config.get("summarizer_enabled") == "1"
+    if not enabled:
+        return {"available": False}
+
+    from web_service.summarizer import is_summarizer_available
+    available = is_summarizer_available()
+    return {"available": available and enabled}
 
 
 @app.post("/api/files/{file_id}/save-result")
@@ -554,10 +741,12 @@ async def download_json(
         raise HTTPException(404, "Chưa có kết quả ASR")
 
     original_name = file_record["original_filename"].rsplit(".", 1)[0]
+    # RFC 5987: URL-encode filename để tránh header injection
+    safe_filename = quote(f"{original_name}.asr.json")
     return Response(
         content=file_record["asr_result_json"],
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{original_name}.asr.json"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{safe_filename}"},
     )
 
 
@@ -815,27 +1004,47 @@ async def merge_speaker(
 
 @app.post("/api/auth/login")
 async def login(request: Request, session_id: str = Depends(get_session_id)):
+    ip = request.client.host if request.client else ""
+    _check_login_rate(ip)
+
     body = await request.json()
     username = body.get("username", "")
     password = body.get("password", "")
 
     user = authenticate_user(username, password)
     if not user:
+        _record_failed_login(ip)
+        logger.warning(f"Failed login from {ip} for user '{username}'")
         raise HTTPException(401, "Sai tên đăng nhập hoặc mật khẩu")
 
     token = create_token(user["id"], user["username"], user["role"])
+    logger.info(f"User '{username}' logged in from {ip}")
 
-    # Liên kết session hiện tại với user
-    db.link_session_to_user(session_id, user["id"])
+    # Session fixation prevention: tạo session mới thay vì giữ session cũ
+    ua = request.headers.get("user-agent", "")
+    new_session_id = session_manager.create_session(
+        ip_address=ip, user_agent=ua, user_id=user["id"]
+    )
+    # Expire session anonymous cũ
+    if session_id:
+        old_session = db.get_session(session_id)
+        if old_session and old_session["is_anonymous"]:
+            db.expire_session(session_id)
 
-    return {
+    response = JSONResponse({
         "token": token,
         "user": {
             "id": user["id"],
             "username": user["username"],
             "role": user["role"],
         },
-    }
+    })
+    response.set_cookie(
+        "session_id", new_session_id,
+        httponly=True, samesite="lax", max_age=86400,
+        secure=not server_config.http_mode,
+    )
+    return response
 
 
 @app.get("/api/auth/me")
@@ -887,7 +1096,8 @@ async def auth_logout(request: Request):
     })
     response.set_cookie(
         "session_id", new_session_id,
-        httponly=True, samesite="lax", max_age=86400 * 30,
+        httponly=True, samesite="lax", max_age=86400,
+        secure=not server_config.http_mode,
     )
     return response
 
@@ -1074,13 +1284,12 @@ async def server_stats(request: Request):
 
 
 def _require_localhost(request: Request):
-    """Chỉ cho phép truy cập từ localhost hoặc từ chính server IP (dành cho GUI admin)."""
+    """Chỉ cho phép từ localhost hoặc từ chính server bind IP (GUI admin cùng máy).
+    Khi server bind vào 192.168.x.x, GUI kết nối qua IP đó → client_ip = bind IP."""
     client_ip = request.client.host if request.client else ""
     allowed = {"127.0.0.1", "::1", "localhost"}
-    # Khi server bind vào IP cụ thể (vd: 192.168.x.x), GUI admin kết nối
-    # từ cùng máy sẽ có client_ip = server IP → cần cho phép
     bind_host = server_config.get("host")
-    if bind_host and bind_host != "0.0.0.0":
+    if bind_host and bind_host not in ("0.0.0.0", "", "::"):
         allowed.add(bind_host)
     if client_ip not in allowed:
         raise HTTPException(403, "Only accessible from localhost")
@@ -1106,6 +1315,20 @@ async def local_cleanup_sessions(request: Request):
     _require_localhost(request)
     cleaned = await session_manager.cleanup_expired(kill_processes_callback=queue_manager.cancel)
     return {"success": True, "cleaned_count": cleaned}
+
+
+@app.get("/api/local/rate-limits")
+async def local_rate_limits(request: Request):
+    _require_localhost(request)
+    return _get_locked_ips()
+
+
+@app.post("/api/local/rate-limits/clear")
+async def local_clear_rate_limits(request: Request):
+    """Xóa tất cả IP bị khóa login."""
+    _require_localhost(request)
+    _clear_login_rate()
+    return {"success": True}
 
 
 @app.get("/api/local/queue")
@@ -1301,19 +1524,76 @@ async def admin_delete_user(user_id: int, admin=Depends(require_admin)):
     return {"success": True}
 
 
+@app.get("/api/admin/rate-limits")
+async def admin_rate_limits(admin=Depends(require_admin)):
+    return _get_locked_ips()
+
+
+@app.post("/api/admin/rate-limits/clear")
+async def admin_clear_rate_limits(admin=Depends(require_admin)):
+    _clear_login_rate()
+    return {"success": True}
+
+
 @app.get("/api/admin/config")
 async def admin_get_config(admin=Depends(require_admin)):
     return server_config.to_dict()
+
+
+_CONFIG_VALIDATORS = {
+    "port": lambda v: 1 <= int(v) <= 65535,
+    "cpu_threads": lambda v: 1 <= int(v) <= 128,
+    "max_upload_mb": lambda v: 1 <= int(v) <= 10000,
+    "anonymous_timeout_minutes": lambda v: 1 <= int(v) <= 1440,
+    "storage_per_user_gb": lambda v: 0 <= float(v) <= 1000,
+    "max_sessions": lambda v: 1 <= int(v) <= 10000,
+    "jwt_expire_minutes": lambda v: 5 <= int(v) <= 43200,
+    "summarizer_threads": lambda v: 1 <= int(v) <= 128,
+    "summarizer_context_size": lambda v: 1024 <= int(v) <= 262144,
+    "summarizer_enabled": lambda v: v in ("0", "1"),
+}
+_CONFIG_READONLY = {"admin_password_hash", "host"}
 
 
 @app.put("/api/admin/config")
 async def admin_update_config(request: Request, admin=Depends(require_admin)):
     body = await request.json()
     for key, value in body.items():
-        if key in server_config.DEFAULTS and key != "admin_password_hash":
-            server_config.set(key, value)
+        if key not in server_config.DEFAULTS or key in _CONFIG_READONLY:
+            continue
+        validator = _CONFIG_VALIDATORS.get(key)
+        if validator:
+            try:
+                if not validator(value):
+                    raise HTTPException(400, f"Giá trị không hợp lệ cho {key}")
+            except (ValueError, TypeError):
+                raise HTTPException(400, f"Giá trị không hợp lệ cho {key}")
+        server_config.set(key, value)
     server_config.save()
     return {"success": True}
+
+
+@app.post("/api/admin/download-summarizer-model")
+async def admin_download_model(admin=Depends(require_admin)):
+    """Tải model summarizer GGUF từ HuggingFace (chạy background)."""
+    import asyncio
+    from web_service.summarizer import download_model, get_default_model_path
+
+    # Kiểm tra đã có chưa
+    default_path = get_default_model_path()
+    if os.path.isfile(default_path):
+        return {"success": True, "path": default_path, "message": "Model đã tồn tại"}
+
+    # Chạy download trong thread pool
+    loop = asyncio.get_event_loop()
+    try:
+        path = await loop.run_in_executor(None, download_model)
+        # Auto-set config
+        server_config.set("summarizer_model_path", path)
+        server_config.save()
+        return {"success": True, "path": path}
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi tải model: {str(e)}")
 
 
 # === WebSocket ===

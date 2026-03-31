@@ -4,6 +4,7 @@ Hàng đợi xử lý ASR - FIFO, 1 file tại 1 thời điểm.
 
 import os
 import json
+import time
 import threading
 import logging
 import subprocess
@@ -16,10 +17,14 @@ from web_service.session_manager import ws_manager
 logger = logging.getLogger("asr.queue")
 
 
-def convert_to_wav(input_path: str) -> str:
+def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], None]] = None) -> str:
     """Convert audio/video sang WAV bằng ffmpeg (giữ nguyên sample rate gốc).
     Việc resample sang 16kHz mono sẽ do librosa xử lý trong load_audio()
-    để đảm bảo chất lượng resampling cao (soxr_vhq), giống pipeline desktop."""
+    để đảm bảo chất lượng resampling cao (soxr_vhq), giống pipeline desktop.
+
+    Args:
+        progress_callback: Optional callback(percent: int) nhận % tiến độ 0-99
+    """
     if input_path.lower().endswith(".wav"):
         return input_path
 
@@ -32,15 +37,66 @@ def convert_to_wav(input_path: str) -> str:
     setup_ffmpeg_path()
 
     try:
-        cmd = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-acodec", "pcm_s16le",
-            output_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
-        if result.returncode != 0:
-            logger.error(f"ffmpeg error: {result.stderr.decode(errors='replace')[:500]}")
-            raise RuntimeError(f"ffmpeg failed with code {result.returncode}")
+        # Lấy duration bằng ffprobe để tính % tiến độ
+        total_duration = 0
+        if progress_callback:
+            try:
+                probe_cmd = [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    input_path,
+                ]
+                probe_result = subprocess.run(
+                    probe_cmd, capture_output=True, text=True, timeout=30
+                )
+                if probe_result.returncode == 0 and probe_result.stdout.strip():
+                    total_duration = float(probe_result.stdout.strip())
+            except Exception:
+                pass
+
+        if progress_callback and total_duration > 0:
+            # Dùng Popen + -progress pipe:1 để parse tiến độ realtime
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-acodec", "pcm_s16le",
+                "-progress", "pipe:1",
+                output_path,
+            ]
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+
+            last_pct = -1
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        current_us = int(line.split("=")[1])
+                        pct = min(99, int(current_us / (total_duration * 1_000_000) * 100))
+                        if pct > last_pct:
+                            last_pct = pct
+                            progress_callback(pct)
+                    except (ValueError, ZeroDivisionError):
+                        pass
+
+            proc.wait(timeout=300)
+            if proc.returncode != 0:
+                stderr_text = proc.stderr.read() if proc.stderr else ""
+                logger.error(f"ffmpeg error: {stderr_text[:500]}")
+                raise RuntimeError(f"ffmpeg failed with code {proc.returncode}")
+        else:
+            # Fallback: blocking call không có progress (file WAV hoặc không cần)
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-acodec", "pcm_s16le",
+                output_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode != 0:
+                logger.error(f"ffmpeg error: {result.stderr.decode(errors='replace')[:500]}")
+                raise RuntimeError(f"ffmpeg failed with code {result.returncode}")
+
         logger.info(f"Converted to WAV: {output_path}")
         return output_path
     except FileNotFoundError:
@@ -59,6 +115,8 @@ class QueueManager:
         self._worker_thread: Optional[threading.Thread] = None
         self._paused = False
         self._event_loop = None  # Reference toi asyncio event loop chinh
+        self._last_progress_time = 0
+        self._last_progress_msg = ''
 
     @property
     def is_processing(self) -> bool:
@@ -91,12 +149,9 @@ class QueueManager:
                 pass
 
         # Throttle: chi gui update moi 1 giay hoac khi phase thay doi
-        import time
         now = time.monotonic()
-        last = getattr(self, '_last_progress_time', 0)
-        last_msg = getattr(self, '_last_progress_msg', '')
-        phase_changed = message != last_msg
-        if not phase_changed and (now - last) < 1.0:
+        phase_changed = message != self._last_progress_msg
+        if not phase_changed and (now - self._last_progress_time) < 1.0:
             return
         self._last_progress_time = now
         self._last_progress_msg = message
@@ -104,8 +159,8 @@ class QueueManager:
         # Cap nhat DB
         try:
             db.update_queue_progress(self.current_file_id, percent, message)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"DB progress update failed: {e}")
 
         # Gui WebSocket (thread-safe)
         if self.current_session_id:
@@ -140,6 +195,11 @@ class QueueManager:
         # Tu dong trigger worker
         self.process_next()
 
+        # Nếu file được pick lên xử lý ngay (queue trống) → position=0
+        # Tránh flicker "đang ở vị trí #1" rồi biến mất ngay
+        if self.current_file_id == file_id:
+            return {"success": True, "position": 0, "total": 0}
+
         position = db.get_queue_position(file_id)
         total = db.get_queue_total_waiting()
 
@@ -172,11 +232,18 @@ class QueueManager:
         self._worker_thread.start()
 
     def _process_item(self, item: dict):
-        """Xử lý 1 file ASR (chạy trong worker thread)"""
+        """Xử lý 1 item trong queue (ASR hoặc Summarization)."""
         file_id = item["file_id"]
         session_id = item["session_id"]
         config = json.loads(item["config_json"]) if item["config_json"] else {}
 
+        job_type = config.get("job_type", "asr")
+
+        if job_type == "summarize":
+            self._process_summarize(item, config)
+            return
+
+        # --- ASR job (code gốc) ---
         logger.info(f"Processing file_id={file_id} session={session_id}")
 
         db.set_queue_processing(file_id)
@@ -197,9 +264,13 @@ class QueueManager:
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
 
-            # 2. Convert sang WAV
-            self.progress_callback("PHASE:Convert|Đang chuyển định dạng audio...|5")
-            wav_path = convert_to_wav(file_path)
+            # 2. Convert sang WAV (với progress bar realtime từ ffmpeg)
+            self.progress_callback("PHASE:Convert|Đang chuyển định dạng audio...|0")
+
+            def _convert_progress(pct):
+                self.progress_callback(f"PHASE:Convert|Đang chuyển định dạng audio ({pct}%)|{pct}")
+
+            wav_path = convert_to_wav(file_path, progress_callback=_convert_progress)
 
             if self._cancelled:
                 raise InterruptedError("Cancelled by user")
@@ -218,10 +289,10 @@ class QueueManager:
             else:
                 model_path = os.path.join(BASE_DIR, "models", model_name)
 
-            punct_slider = int(config.get("punctuation_confidence",
-                                          server_config.get("default_punctuation_confidence")))
-            case_slider = int(config.get("case_confidence",
-                                         server_config.get("default_case_confidence")))
+            punct_slider = max(1, min(10, int(config.get("punctuation_confidence",
+                                          server_config.get("default_punctuation_confidence")))))
+            case_slider = max(1, min(10, int(config.get("case_confidence",
+                                         server_config.get("default_case_confidence")))))
 
             # Convert slider (1-10) to float confidence
             # confidence > 0: cong vao $KEEP → bao thu. confidence < 0: tru $KEEP → manh me
@@ -279,6 +350,8 @@ class QueueManager:
                 "diarization_threshold": diarization_threshold,
                 "save_ram": False,  # Server giữ model trong RAM để phục vụ request tiếp nhanh hơn
                 "rover_mode": is_rover,
+
+                "preprocess_rms_normalize": config.get("rms_normalize", False),
             }
 
             logger.info(f"Pipeline config: {pipeline_config}")
@@ -392,6 +465,75 @@ class QueueManager:
             # Xử lý file tiếp theo
             self.process_next()
 
+    def _process_summarize(self, item: dict, config: dict):
+        """Xử lý summarization job (chạy trong worker thread)."""
+        file_id = item["file_id"]
+        session_id = item["session_id"]
+
+        logger.info(f"Summarization job: file_id={file_id} session={session_id}")
+
+        db.set_queue_processing(file_id)
+
+        # Thông báo bắt đầu
+        self._send_ws(session_id, {
+            "type": "summary_started", "file_id": file_id,
+        })
+
+        try:
+            from web_service.summarizer import run_summarization
+            run_summarization(
+                file_id=file_id,
+                session_id=session_id,
+                send_ws=self._send_ws,
+                progress_cb=self.progress_callback,
+            )
+            db.set_queue_completed(file_id)
+
+        except InterruptedError:
+            db.set_queue_cancelled(file_id)
+            logger.info(f"Summarization cancelled: file_id={file_id}")
+            self._send_ws(session_id, {
+                "type": "summary_error", "file_id": file_id,
+                "error": "Đã hủy bởi người dùng",
+            })
+
+        except Exception as e:
+            error_msg = str(e)
+            db.set_queue_error(file_id, error_msg)
+            logger.error(f"Summarization error: file_id={file_id}: {error_msg}", exc_info=True)
+            self._send_ws(session_id, {
+                "type": "summary_error", "file_id": file_id,
+                "error": error_msg,
+            })
+
+        finally:
+            with self._lock:
+                self.current_file_id = None
+                self.current_session_id = None
+                self._cancelled = False
+
+            self.broadcast_queue_positions()
+            self.process_next()
+
+    def add_summarize_to_queue(self, file_id: int, session_id: str) -> dict:
+        """Thêm summarization job vào queue chung (cùng priority với ASR)."""
+        if db.has_session_in_queue(session_id):
+            return {"error": "Bạn đã có 1 tác vụ đang chờ xử lý. Vui lòng đợi."}
+
+        config = {"job_type": "summarize"}
+        db.add_to_queue(file_id, session_id, config)
+
+        self.process_next()
+
+        if self.current_file_id == file_id:
+            return {"success": True, "position": 0, "total": 0}
+
+        position = db.get_queue_position(file_id)
+        total = db.get_queue_total_waiting()
+        self.broadcast_queue_positions()
+
+        return {"success": True, "position": position, "total": total}
+
     def cancel(self, file_id: int) -> bool:
         """Huy xu ly file. Tra ve True neu thanh cong."""
         with self._lock:
@@ -429,21 +571,27 @@ class QueueManager:
 
     def _send_ws(self, session_id: str, data: dict):
         """Helper gui WebSocket tu worker thread (thread-safe)."""
-        import asyncio
-        loop = self._event_loop
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                ws_manager.send_to_session(session_id, data), loop
-            )
+        try:
+            import asyncio
+            loop = self._event_loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    ws_manager.send_to_session(session_id, data), loop
+                )
+        except Exception as e:
+            logger.debug(f"WebSocket send failed: {e}")
 
     def _send_ws_broadcast(self, data: dict):
         """Helper broadcast WebSocket tu worker thread (thread-safe)."""
-        import asyncio
-        loop = self._event_loop
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                ws_manager.broadcast(data), loop
-            )
+        try:
+            import asyncio
+            loop = self._event_loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    ws_manager.broadcast(data), loop
+                )
+        except Exception as e:
+            logger.debug(f"WebSocket broadcast failed: {e}")
 
 
 # Singleton

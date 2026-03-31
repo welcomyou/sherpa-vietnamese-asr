@@ -16,10 +16,14 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.ini")
 
 # === Color Scheme (framework-independent) ===
+# Source of Truth — mọi UI surface (Desktop, Web, Admin) phải dùng dict này.
+# Web CSS vars (:root) trong static/css/style.css phải mirror chính xác.
+# KHÔNG hardcode hex — luôn dùng COLORS['key'] hoặc var(--key).
 COLORS = {
     'bg_dark': '#2b2b2b',
     'bg_card': '#3a3a3a',
-    'bg_input': '#f5f5f5',
+    'bg_elevated': '#464646',
+    'bg_input': '#464646',
     'text_primary': '#ffffff',
     'text_secondary': '#cccccc',
     'text_dark': '#222222',
@@ -30,39 +34,104 @@ COLORS = {
     'highlight': '#ffd700',
     'success': '#28a745',
     'warning': '#ffc107',
+    'danger': '#dc3545',
     'search_match': '#00ced1',
     'search_current': '#ff4500',
+    'low_confidence': '#DFC8B0',
 }
 
 
 # === CPU Detection ===
-def get_allowed_cpu_count():
+def _detect_cpu_topology():
     """
-    Detects the number of physical CPU cores (not hyperthreads).
-    For CPU-bound workloads (ONNX, PyTorch, MKL), physical cores give best performance.
+    Phát hiện CPU topology: physical cores, logical threads, VM/vCPU.
+
+    Trả về: (physical_cores, logical_threads, is_vm)
+
+    Quy tắc:
+    - Máy thật có HT: physical < logical (vd: 6 cores, 12 threads)
+    - VM/vCPU: physical == logical (mỗi vCPU = 1 core = 1 thread, không HT)
+    - Nếu không detect được physical → giả sử logical // 2
     """
-    physical = psutil.cpu_count(logical=False)
+    logical = None
+    physical = None
+    is_vm = False
 
     try:
-        p = psutil.Process(os.getpid())
-        affinity = p.cpu_affinity()
-        if affinity and physical:
-            return min(len(affinity), physical)
-        if affinity:
-            return len(affinity) // 2 or 1
-    except Exception as e:
-        print(f"[Init] Could not get CPU affinity: {e}")
+        logical = psutil.cpu_count(logical=True)
+        physical = psutil.cpu_count(logical=False)
+    except Exception:
+        pass
 
-    if physical:
-        return physical
+    if not logical:
+        try:
+            logical = os.cpu_count() or multiprocessing.cpu_count()
+        except:
+            logical = 4
 
+    # VM detection
     try:
-        logical = os.cpu_count() or multiprocessing.cpu_count()
-        return max(1, logical // 2)
+        if sys.platform == 'win32':
+            import subprocess
+            r = subprocess.run(['wmic', 'computersystem', 'get', 'model'],
+                               capture_output=True, text=True, timeout=5)
+            model = r.stdout.lower()
+            is_vm = any(x in model for x in ['virtual', 'vmware', 'hyper-v', 'kvm', 'qemu', 'xen'])
+        elif sys.platform == 'linux':
+            try:
+                with open('/sys/class/dmi/id/product_name', 'r') as f:
+                    model = f.read().lower()
+                is_vm = any(x in model for x in ['virtual', 'vmware', 'kvm', 'qemu', 'xen'])
+            except:
+                pass
     except:
-        return 4
+        pass
 
-ALLOWED_THREADS = get_allowed_cpu_count()
+    # vCPU: physical == logical hoặc physical is None trên VM
+    if is_vm and (physical is None or physical == logical):
+        physical = logical  # mỗi vCPU = 1 core
+
+    if physical is None:
+        physical = max(1, logical // 2)  # fallback: giả sử HT 2x
+
+    has_ht = logical > physical
+
+    print(f"[CPU] {physical} physical cores, {logical} logical threads"
+          f"{', HT' if has_ht else ''}{', VM' if is_vm else ''}")
+
+    return physical, logical, is_vm
+
+
+PHYSICAL_CORES, LOGICAL_THREADS, IS_VM = _detect_cpu_topology()
+
+# Slider max = physical cores (user chọn bao nhiêu core muốn dùng)
+ALLOWED_THREADS = PHYSICAL_CORES
+
+# Default = physical cores
+DEFAULT_THREADS = PHYSICAL_CORES
+
+
+def compute_ort_threads(cpu_threads):
+    """
+    Tính Z = số threads thực cho ORT intra_op, có tính HT/SMT bonus.
+
+    cpu_threads: giá trị user chọn trên UI (1 → PHYSICAL_CORES)
+
+    Nếu không có HT (physical == logical, VM/vCPU):
+        Z = cpu_threads (không bonus)
+    Nếu có HT/SMT:
+        Z = cpu_threads + cpu_threads * (ht_ratio - 1) // 2
+        Ví dụ 6C/12T (ht_ratio=2): Z = cpu_threads * 3 // 2
+
+    Returns Z (>= 1)
+    """
+    if LOGICAL_THREADS <= PHYSICAL_CORES:
+        # Không HT (VM, hoặc CPU không HT)
+        return max(1, cpu_threads)
+
+    ht_ratio = LOGICAL_THREADS / PHYSICAL_CORES  # thường 2 (Intel HT, AMD SMT)
+    Z = cpu_threads + int(cpu_threads * (ht_ratio - 1) / 2)
+    return max(1, Z)
 
 
 # === Model Download Information ===
@@ -184,7 +253,7 @@ def prepare_hotwords_file(hotwords_path, base_dir):
         Đường dẫn đến file hotwords đã xử lý, hoặc chuỗi rỗng
     """
     if not hotwords_path:
-        hotwords_path = os.path.join(base_dir, "hotwords.txt")
+        hotwords_path = os.path.join(base_dir, "hotword.txt")
 
     if not os.path.exists(hotwords_path):
         return ""
@@ -197,14 +266,28 @@ def prepare_hotwords_file(hotwords_path, base_dir):
         for line in lines:
             line = line.strip()
             if line and not line.startswith('#'):
-                valid_lines.append(line)
+                # Tách trọng số nếu có (format: "TỪ KHÓA :2.5")
+                score_part = ""
+                if ':' in line:
+                    parts = line.rsplit(':', 1)
+                    try:
+                        float(parts[1].strip())
+                        line = parts[0].strip()
+                        score_part = " :" + parts[1].strip()
+                    except ValueError:
+                        pass  # Không phải score, giữ nguyên
+
+                # Uppercase toàn bộ (BPE vocab là uppercase)
+                line = line.upper()
+                valid_lines.append(line + score_part)
 
         if not valid_lines:
             return ""
 
-        # Ghi lại file đã clean
-        cleaned_path = hotwords_path + ".cleaned"
-        with open(cleaned_path, 'w', encoding='utf-8') as f:
+        # Ghi file đã clean vào thư mục temp (unique filename)
+        import tempfile
+        tmp_fd, cleaned_path = tempfile.mkstemp(suffix='.txt', prefix='asr_hotword_')
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
             f.write('\n'.join(valid_lines))
 
         print(f"[Hotwords] Prepared {len(valid_lines)} hotwords from {hotwords_path}")

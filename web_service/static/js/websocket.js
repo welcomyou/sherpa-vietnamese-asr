@@ -110,6 +110,18 @@ function handleWSMessage(data) {
             onSessionExpired(data);
             break;
 
+        case 'summary_started':
+            if (typeof onSummaryStarted === 'function') onSummaryStarted(data);
+            break;
+
+        case 'summary_complete':
+            if (typeof onSummaryComplete === 'function') onSummaryComplete(data);
+            break;
+
+        case 'summary_error':
+            if (typeof onSummaryError === 'function') onSummaryError(data);
+            break;
+
         default:
             console.log('[WS] Unknown message:', data);
     }

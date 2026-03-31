@@ -7,7 +7,8 @@ from core.config import (
     CONFIG_FILE,
     COLORS,
     ALLOWED_THREADS,
-    get_allowed_cpu_count,
+    DEFAULT_THREADS,
+    compute_ort_threads,
     MODEL_DOWNLOAD_INFO,
     get_speaker_embedding_models,
     is_diarization_available,
@@ -36,7 +37,7 @@ from core.asr_engine import (
     load_audio,
     setup_ffmpeg_path,
     find_silent_regions,
-    get_sherpa_onnx,
+    get_ort,
 )
 
 from core.speaker_diarization import (

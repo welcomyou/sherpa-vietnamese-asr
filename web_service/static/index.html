@@ -27,6 +27,7 @@
                 <button id="btn-login" class="btn btn-sm" onclick="showLoginModal()">Đăng nhập</button>
             </div>
             <div id="auth-loggedin" class="auth-section" style="display:none">
+                <button class="btn btn-sm" id="btn-admin" onclick="toggleAdminPanel()" style="display:none">Quản trị</button>
                 <button class="btn btn-sm" onclick="toggleMeetingsPanel()">Quản lý tập tin</button>
                 <div class="user-menu-wrapper">
                     <button class="user-menu-btn" onclick="toggleUserMenu(event)" id="user-menu-btn">
@@ -52,33 +53,66 @@
 
     <!-- Main Content -->
     <main id="app-main">
-        <!-- Install PWA Panel (collapsible, hidden by default) -->
+        <!-- Install Panel (collapsible, hidden by default) -->
         <div class="panel collapsed" id="install-panel" style="display:none">
             <div class="panel-header" onclick="togglePanel('install-panel')">
-                <span class="panel-toggle">&#9660;</span> Cài đặt ứng dụng?
+                <span class="panel-toggle">&#9660;</span> Cài đặt ứng dụng
             </div>
             <div class="panel-body">
-                <div class="install-steps">
-                    <div class="install-step" id="install-step-1">
-                        <button class="btn btn-sm btn-install-cert" onclick="showCertGuide()">
+                <div class="install-groups">
+                    <!-- Group 1: Online -->
+                    <div class="install-group">
+                        <div class="install-group-label">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                                <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
                             </svg>
-                            B1: Tải và cài cert SSL
-                        </button>
-                        <div id="cert-guide" class="install-guide" style="display:none"></div>
+                            Ứng dụng xử lý online
+                        </div>
+                        <div class="install-steps">
+                            <div class="install-step" id="install-step-1">
+                                <button class="btn btn-sm btn-install-cert" onclick="showCertGuide()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                                    </svg>
+                                    B1: Tải và cài cert SSL
+                                </button>
+                                <div id="cert-guide" class="install-guide" style="display:none"></div>
+                            </div>
+                            <div class="install-step" id="install-step-2">
+                                <button class="btn btn-sm btn-install" id="btn-install-app" disabled onclick="installPWA()">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    B2: Cài đặt ứng dụng
+                                </button>
+                                <div id="install-status-msg" class="install-status-msg" style="display:none"></div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="install-step" id="install-step-2">
-                        <button class="btn btn-sm btn-install" id="btn-install-app" disabled onclick="installPWA()">
+                    <!-- Group 2: Offline -->
+                    <div class="install-group">
+                        <div class="install-group-label">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                                <polyline points="7 10 12 15 17 10"/>
-                                <line x1="12" y1="15" x2="12" y2="3"/>
+                                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
                             </svg>
-                            B2: Cài đặt ứng dụng
-                        </button>
-                        <div id="install-status-msg" class="install-status-msg" style="display:none"></div>
+                            Ứng dụng xử lý offline
+                        </div>
+                        <div class="install-steps">
+                            <div class="install-step">
+                                <a class="btn btn-sm btn-install-offline" id="btn-download-offline" href="#" target="_blank" style="display:none">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                    Tải bản cài offline
+                                </a>
+                                <span class="install-offline-unavailable" id="offline-unavailable">Hiện chưa có bản cài offline</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -89,7 +123,11 @@
             <div class="panel-header" onclick="togglePanel('config-panel')">
                 <span class="panel-toggle">&#9660;</span> Cấu hình
             </div>
-            <div class="panel-body">
+            <div class="panel-body" style="position:relative">
+                <div id="config-loading" class="config-loading">
+                    <div class="config-spinner"></div>
+                    <span>Đang tải cấu hình...</span>
+                </div>
                 <div class="config-grid">
                     <div class="config-row">
                         <label>Model ASR:</label>
@@ -107,8 +145,14 @@
                     </div>
                     <div class="config-row full-width">
                         <label>
+                            <input type="checkbox" id="cfg-rms-normalize">
+                            🔊 Chuẩn hóa âm lượng từng đoạn (RMS)
+                        </label>
+                    </div>
+                    <div class="config-row full-width">
+                        <label>
                             <input type="checkbox" id="cfg-diarization" checked>
-                            Phân tách người nói (Speaker diarization)
+                            Phân tách người nói (nếu biết và chỉ định trước số người nói, kết quả sẽ chính xác hơn)
                         </label>
                     </div>
                     <div id="diarization-options">
@@ -127,6 +171,12 @@
                             <input type="range" id="cfg-threshold" min="10" max="150" value="70" step="1">
                             <span id="cfg-threshold-label">0.70</span>
                         </div>
+                        <div class="config-row full-width">
+                            <label>
+                                <input type="checkbox" id="cfg-merge-short-speaker" checked>
+                                Gộp các đoạn đổi người nói ngắn
+                            </label>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -142,6 +192,8 @@
                         <p id="anonymous-warning-empty" class="drop-warning" style="display:none">Ở chế độ không đăng nhập, khi tải lại hay thoát trình duyệt, dữ liệu sẽ không được lưu lại</p>
                         <p>Kéo thả file âm thanh (nếu có JSON thì thả tiếp theo sau) vào đây hoặc click để chọn file (tối đa 500MB)</p>
                         <p class="drop-hint">mp3, wav, m4a, flac, aac, wma, ogg, opus, mp4, mkv, avi, mov, webm, flv, wmv, json</p>
+                        <p class="drop-hint">Kết quả chính xác nhất với tập tin ghi âm trực tiếp từ hệ thống microphone cổ ngỗng.</p>
+                        <p class="drop-hint">Nếu ghi âm trực tiếp tại phòng họp thì ưu tiên sử dụng thiết bị chuyên ghi âm như Sony và để sát người chủ trì.</p>
                     </div>
                     <span class="drop-icon">&#128193;</span>
                 </div>
@@ -156,33 +208,24 @@
                     style="display:none">
             </div>
 
-            <!-- Upload Progress -->
-            <div id="upload-progress" class="progress-container" style="display:none">
-                <div class="progress-bar">
-                    <div id="upload-bar" class="progress-fill"></div>
-                </div>
-                <span id="upload-percent">0%</span>
-            </div>
-
             <!-- Action Buttons -->
             <div class="action-buttons">
                 <button id="btn-process" class="btn btn-primary" onclick="processFile()" disabled>Xử lý</button>
                 <button id="btn-cancel" class="btn btn-danger" onclick="cancelProcess()" style="display:none">Kết
                     thúc</button>
-                <button id="btn-load-json" class="btn" onclick="loadJSON()" disabled>&#8679; Upload JSON</button>
-                <button id="btn-save-json" class="btn" onclick="saveJSON()" disabled>&#8681; Tải JSON</button>
-                <button id="btn-copy" class="btn" onclick="copyText()" disabled>Sao chép văn bản</button>
+                <button id="btn-load-json" class="btn btn-secondary" onclick="loadJSON()" disabled>&#8679; Upload JSON</button>
+                <button id="btn-save-json" class="btn btn-secondary" onclick="saveJSON()" disabled>&#8681; Tải JSON</button>
+                <button id="btn-copy" class="btn btn-secondary" onclick="copyText()" disabled>Sao chép văn bản</button>
             </div>
 
             <!-- Processing Progress -->
             <div id="process-progress" class="progress-container" style="display:none">
+                <div class="progress-header">
+                    <span id="process-message">Đang chờ...</span>
+                    <span id="process-percent">0%</span>
+                </div>
                 <div class="progress-bar">
                     <div id="process-bar" class="progress-fill"></div>
-                </div>
-                <div class="progress-info">
-                    <span id="process-percent">0%</span>
-                    <span id="process-phase"></span>
-                    <span id="process-message">Đang chờ...</span>
                 </div>
             </div>
 
@@ -202,9 +245,10 @@
                 <div class="result-tabs">
                     <button class="tab-btn active" onclick="switchTab('content')">Nội dung</button>
                     <button class="tab-btn" onclick="switchTab('speakers')">Người nói</button>
+                    <button class="tab-btn" onclick="switchTab('summary')" id="tab-summary" style="display:none">📝 Tóm tắt</button>
                 </div>
                 <div class="search-widget" id="search-widget">
-                    <input type="text" id="search-input" placeholder="Tìm kiếm..." oninput="onSearchInput()">
+                    <input type="text" id="search-input" placeholder="Tìm kiếm..." oninput="onSearchInput()" onkeydown="onSearchKeydown(event)">
                     <span id="search-count"></span>
                     <button class="search-btn" onclick="searchNav(-1)" title="Trước">&#9650;</button>
                     <button class="search-btn" onclick="searchNav(1)" title="Sau">&#9660;</button>
@@ -213,6 +257,7 @@
             </div>
             <div id="result-content" class="result-content"></div>
             <div id="result-speakers" class="result-content" style="display:none"></div>
+            <div id="result-summary" class="result-content" style="display:none"></div>
             <div id="result-timing" class="result-timing"></div>
         </div>
 
@@ -365,6 +410,10 @@
                         <option value="">-- Chọn --</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label>Màu tên:</label>
+                    <div id="rename-colors" class="color-picker-row"></div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-primary" onclick="doRenameSpeaker(true)">Sửa tất cả</button>
@@ -414,6 +463,22 @@
         <div id="meetings-list" class="meetings-list"></div>
     </div>
 
+    <!-- Admin Panel (overlay) -->
+    <div id="admin-panel" class="meetings-panel" style="display:none">
+        <div class="meetings-header">
+            <h3>Quan tri he thong</h3>
+            <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
+        </div>
+        <div class="admin-tabs">
+            <button class="tab-btn active" onclick="switchAdminTab('stats',this)">Tong quan</button>
+            <button class="tab-btn" onclick="switchAdminTab('sessions',this)">Phien</button>
+            <button class="tab-btn" onclick="switchAdminTab('queue',this)">Hang doi</button>
+            <button class="tab-btn" onclick="switchAdminTab('users',this)">Nguoi dung</button>
+            <button class="tab-btn" onclick="switchAdminTab('config',this)">Cau hinh</button>
+        </div>
+        <div id="admin-content" class="meetings-list" style="padding:12px"></div>
+    </div>
+
     <!-- About Dialog -->
     <div id="about-modal" class="modal" style="display:none">
         <div class="modal-content about-dialog">
@@ -424,19 +489,19 @@
             <div class="modal-body about-body">
                 <div class="about-hero">
                     <div class="about-app-name">sherpa-vietnamese-asr</div>
-                    <div class="about-version">Phiên bản 1.0 &mdash; 10/03/2026</div>
+                    <div class="about-version">Phiên bản 2.0 &mdash; 30/03/2026</div>
                 </div>
 
                 <div class="about-info-grid">
                     <div class="about-info-item">
                         <span class="about-info-label">Thiết kế</span>
                         <span>Nguyễn Hồng Quân</span>
-                        <span class="about-info-sub">nhquan.thanhuy@tphcm.gov.vn</span>
+                        <span class="about-info-sub">nhquan.thanhuy@tphcm.gov.vn — 098.558.3555</span>
                         <span class="about-info-sub">Phòng Chuyển đổi số - Cơ yếu, VP Thành ủy TP.HCM</span>
                     </div>
                     <div class="about-info-item">
                         <span class="about-info-label">Lập trình</span>
-                        <span>Antigravity</span>
+                        <span>Claude và những người bạn</span>
                     </div>
                 </div>
 
@@ -447,24 +512,22 @@
                 <details class="about-details">
                     <summary>Chức năng</summary>
                     <ul>
-                        <li>Chuyển tập tin ghi âm thành văn bản tiếng Việt</li>
+                        <li>Chuyển ghi âm thành văn bản tiếng Việt (offline)</li>
                         <li>Phân tách người nói (Speaker Diarization)</li>
-                        <li>Thêm dấu câu tự động</li>
-                        <li>Phân tích chất lượng âm thanh (DNSMOS)</li>
+                        <li>Tự động thêm dấu câu, viết hoa</li>
                         <li>Nhận dạng real-time qua microphone</li>
                         <li>Hỗ trợ hotwords (từ khóa tùy chỉnh)</li>
                     </ul>
                 </details>
 
                 <details class="about-details">
-                    <summary>Công nghệ sử dụng</summary>
+                    <summary>Công nghệ</summary>
                     <ul>
-                        <li><b>Giao diện:</b> Python 3, PyQt6</li>
-                        <li><b>ASR Engine:</b> Sherpa-ONNX (Zipformer)</li>
-                        <li><b>Speaker Diarization:</b> TitaNet, Pyannote, ONNX Altunenes</li>
-                        <li><b>Xử lý âm thanh:</b> FFmpeg, Pydub</li>
-                        <li><b>NLP:</b> ViBERT-capu (Thêm dấu câu)</li>
-                        <li><b>Audio Quality:</b> DNSMOS</li>
+                        <li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T</li>
+                        <li><b>Diarization:</b> Pyannote Community-1 (Pure ONNX Runtime)</li>
+                        <li><b>Dấu câu:</b> ViBERT-capu (ONNX)</li>
+                        <li><b>VAD:</b> Silero VAD (ONNX)</li>
+                        <li><b>Web:</b> FastAPI, WebSocket</li>
                     </ul>
                 </details>
             </div>
@@ -483,6 +546,8 @@
     <script src="/static/js/speaker.js"></script>
     <script src="/static/js/search.js"></script>
     <script src="/static/js/meetings.js"></script>
+    <script src="/static/js/summary.js"></script>
+    <script src="/static/js/admin.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 

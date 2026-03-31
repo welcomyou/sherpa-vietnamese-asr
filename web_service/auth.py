@@ -3,34 +3,79 @@ Authentication - JWT token, password hashing, admin setup.
 """
 
 import os
+import hmac
 import hashlib
 import secrets
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
 from jose import JWTError, jwt
 
-from web_service.config import server_config
+from web_service.config import server_config, DATA_DIR
 from web_service.database import db
 
-# JWT
-SECRET_KEY = os.environ.get("ASR_JWT_SECRET", secrets.token_hex(32))
+logger = logging.getLogger("asr.auth")
+
+# JWT - persist secret to file so tokens survive restart
 ALGORITHM = "HS256"
+_JWT_SECRET_FILE = os.path.join(DATA_DIR, ".jwt_secret")
+
+
+def _load_jwt_secret() -> str:
+    env_secret = os.environ.get("ASR_JWT_SECRET")
+    if env_secret:
+        return env_secret
+    if os.path.exists(_JWT_SECRET_FILE):
+        with open(_JWT_SECRET_FILE, "r") as f:
+            secret = f.read().strip()
+            if secret:
+                return secret
+    secret = secrets.token_hex(32)
+    with open(_JWT_SECRET_FILE, "w") as f:
+        f.write(secret)
+    # Restrict permissions (owner-only)
+    try:
+        import stat
+        os.chmod(_JWT_SECRET_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+    return secret
+
+
+SECRET_KEY = _load_jwt_secret()
+
+# PBKDF2 iterations (OWASP 2023 recommendation for SHA-256)
+_PBKDF2_ITERATIONS = 600_000
 
 
 def hash_password(password: str) -> str:
-    """Hash password dùng SHA-256 + salt."""
+    """Hash password dùng PBKDF2-SHA256 + random salt."""
     salt = secrets.token_hex(16)
-    h = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
-    return f"{salt}${h}"
+    h = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), _PBKDF2_ITERATIONS
+    ).hex()
+    return f"pbkdf2${salt}${h}"
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Verify password."""
-    if "$" not in hashed:
-        return False
-    salt, h = hashed.split("$", 1)
-    return hashlib.sha256((salt + plain).encode("utf-8")).hexdigest() == h
+    """Verify password (hỗ trợ cả format PBKDF2 mới và SHA-256 cũ)."""
+    if hashed.startswith("pbkdf2$"):
+        # New PBKDF2 format: pbkdf2$salt$hash
+        parts = hashed.split("$", 2)
+        if len(parts) != 3:
+            return False
+        _, salt, h = parts
+        computed = hashlib.pbkdf2_hmac(
+            "sha256", plain.encode("utf-8"), salt.encode("utf-8"), _PBKDF2_ITERATIONS
+        ).hex()
+        return hmac.compare_digest(computed, h)
+    elif "$" in hashed:
+        # Legacy SHA-256 format: salt$hash (backward compatible)
+        salt, h = hashed.split("$", 1)
+        computed = hashlib.sha256((salt + plain).encode("utf-8")).hexdigest()
+        return hmac.compare_digest(computed, h)
+    return False
 
 
 def create_token(user_id: int, username: str, role: str) -> str:
@@ -72,7 +117,7 @@ def ensure_admin(password: str = None):
         role="admin",
         storage_limit_gb=0,  # Unlimited
     )
-    print(f"[Auth] Admin account created (id={admin_id})")
+    logger.info(f"Admin account created (id={admin_id})")
     return db.get_user_by_id(admin_id)
 
 

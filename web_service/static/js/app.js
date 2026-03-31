@@ -260,6 +260,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     initPlayer();
     initContextMenu();
 
+    // Disable scroll wheel trên config inputs (tránh thay đổi nhầm)
+    document.querySelectorAll('input[type="range"], select').forEach(el => {
+        el.addEventListener('wheel', e => { e.preventDefault(); }, { passive: false });
+    });
+
     // Tao session truoc (1 request duy nhat), cookie se duoc set tu response
     try {
         await fetch('/api/session', { method: 'POST', credentials: 'same-origin' });
@@ -270,6 +275,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Sau khi co session cookie, ket noi WebSocket va load config
     connectWebSocket();
 
+    // Init summary tab (check availability)
+    if (typeof initSummaryTab === 'function') initSummaryTab();
+
     // Load config
     try {
         const [models, defaults] = await Promise.all([
@@ -279,9 +287,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         window.appConfig = defaults;
         populateModels(models, defaults);
+
+        // Offline download link (chỉ cho phép http/https)
+        const offlineUrl = defaults.offline_download_url;
+        const btnOffline = document.getElementById('btn-download-offline');
+        const lblUnavailable = document.getElementById('offline-unavailable');
+        if (offlineUrl && /^https?:\/\//i.test(offlineUrl)) {
+            if (btnOffline) { btnOffline.href = offlineUrl; btnOffline.style.display = ''; }
+            if (lblUnavailable) lblUnavailable.style.display = 'none';
+        }
     } catch (e) {
         console.error('Failed to load config:', e);
     }
+    // Ẩn loading overlay
+    const loadingEl = document.getElementById('config-loading');
+    if (loadingEl) loadingEl.classList.add('hidden');
 
     // Init sliders
     initSliders();
@@ -385,6 +405,9 @@ function populateModels(models, defaults) {
     document.getElementById('cfg-punct').value = defaults.punctuation_confidence;
     document.getElementById('cfg-case').value = defaults.case_confidence;
     document.getElementById('cfg-threshold').value = defaults.diarization_threshold;
+    if (defaults.merge_short_speaker !== undefined) {
+        document.getElementById('cfg-merge-short-speaker').checked = defaults.merge_short_speaker;
+    }
     updateSliderLabels();
 }
 
@@ -436,13 +459,18 @@ async function processFile() {
     if (window.authToken) {
         // Upload file trước nếu chưa upload
         if (!currentFileId) {
-            showProcessProgress('Đang tải file lên...', 0, '');
             try {
                 await uploadFile();
             } catch (e) {
-                showToast('Lỗi upload: ' + e.message, 'error');
-                resetProcessUI();
-                return;
+                // Thử tạo lại session rồi retry 1 lần
+                try {
+                    await fetch('/api/session', { method: 'POST', credentials: 'same-origin' });
+                    await uploadFile();
+                } catch (e2) {
+                    showToast('Lỗi upload: ' + (e2.message || e.message), 'error');
+                    resetProcessUI();
+                    return;
+                }
             }
         }
         if (!currentFileId) return;
@@ -457,8 +485,13 @@ async function doProcessFile(meetingName) {
     try {
         // Upload file neu chua upload
         if (!currentFileId) {
-            showProcessProgress('Đang tải file lên...', 0, '');
-            await uploadFile();
+            try {
+                await uploadFile();
+            } catch (e) {
+                // Thử tạo lại session rồi retry 1 lần
+                await fetch('/api/session', { method: 'POST', credentials: 'same-origin' });
+                await uploadFile();
+            }
         }
 
         if (!currentFileId) return;
@@ -505,6 +538,9 @@ function getASRConfig() {
         punctuation_confidence: parseInt(document.getElementById('cfg-punct').value),
         case_confidence: parseInt(document.getElementById('cfg-case').value),
         diarization_threshold: parseInt(document.getElementById('cfg-threshold').value),
+        merge_short_speaker: document.getElementById('cfg-merge-short-speaker').checked,
+        gap_recover: false,
+        rms_normalize: document.getElementById('cfg-rms-normalize').checked,
     };
 }
 
@@ -537,6 +573,11 @@ function onProcessingStarted(data) {
 
 function onProgress(data) {
     if (data.file_id !== currentFileId) return;
+    // Hook summary progress
+    if (data.phase === 'Summary' && typeof _summaryProgressHook === 'function') {
+        _summaryProgressHook(data);
+        return;
+    }
     showProcessProgress(data.message, data.percent, data.phase || '');
 }
 
@@ -584,11 +625,15 @@ function onSessionExpired(data) {
 // === UI helpers ===
 
 function showProcessProgress(message, percent, phase) {
-    document.getElementById('process-progress').style.display = 'flex';
-    document.getElementById('process-bar').style.width = percent + '%';
-    document.getElementById('process-percent').textContent = percent > 0 ? percent + '%' : '';
-    document.getElementById('process-message').textContent = message;
+    const container = document.getElementById('process-progress');
+    const bar = document.getElementById('process-bar');
+    const pctEl = document.getElementById('process-percent');
+    const msgEl = document.getElementById('process-message');
     const phaseEl = document.getElementById('process-phase');
+    if (container) container.style.display = 'flex';
+    if (bar) bar.style.width = percent + '%';
+    if (pctEl) pctEl.textContent = percent > 0 ? percent + '%' : '';
+    if (msgEl) msgEl.textContent = message;
     if (phaseEl) phaseEl.textContent = phase || '';
 }
 
@@ -599,10 +644,14 @@ function showQueuePosition(position, total) {
 }
 
 function resetProcessUI() {
-    document.getElementById('btn-process').disabled = false;
-    document.getElementById('btn-cancel').style.display = 'none';
-    document.getElementById('process-progress').style.display = 'none';
-    document.getElementById('queue-info').style.display = 'none';
+    const btnProcess = document.getElementById('btn-process');
+    const btnCancel = document.getElementById('btn-cancel');
+    const progress = document.getElementById('process-progress');
+    const queue = document.getElementById('queue-info');
+    if (btnProcess) btnProcess.disabled = false;
+    if (btnCancel) btnCancel.style.display = 'none';
+    if (progress) progress.style.display = 'none';
+    if (queue) queue.style.display = 'none';
 }
 
 function hideResults() {
@@ -614,6 +663,64 @@ function hideResults() {
 }
 
 // === Render ASR result ===
+
+function renderTextWithConfidence(text, rawWords) {
+    /* Đổi màu chữ vùng nghi ngờ ASR lỗi sang cam kem nhẹ (#DFC8B0).
+       Chỉ đổi color — không highlight, không border, không phân tâm. */
+    if (!rawWords || rawWords.length === 0) return escapeHtml(text);
+
+    const escaped = escapeHtml(text);
+    const lower = escaped.toLowerCase();
+
+    // Tìm vị trí từ nghi ngờ
+    const positions = [];
+    let searchPos = 0;
+    for (const rw of rawWords) {
+        const word = (rw.text || '').trim();
+        if (!word) continue;
+        const idx = lower.indexOf(word.toLowerCase(), searchPos);
+        if (idx < 0) continue;
+
+        const isSuspect = rw.suspect || rw.gap_after_ms || rw.gap_before_ms;
+        if (isSuspect) {
+            positions.push({start: idx, end: idx + word.length});
+        }
+        searchPos = idx + word.length;
+    }
+
+    if (positions.length === 0) return escaped;
+
+    // Gom từ liền kề thành vùng
+    const regions = [];
+    let i = 0;
+    while (i < positions.length) {
+        let rStart = positions[i].start;
+        let rEnd = positions[i].end;
+        let j = i + 1;
+        while (j < positions.length) {
+            if (escaped.substring(rEnd, positions[j].start).trim().length === 0) {
+                rEnd = positions[j].end;
+                j++;
+            } else {
+                break;
+            }
+        }
+        regions.push({start: rStart, end: rEnd});
+        i = j;
+    }
+
+    // Build HTML — chỉ đổi color
+    let result = '';
+    let lastEnd = 0;
+    for (const r of regions) {
+        result += escaped.substring(lastEnd, r.start);
+        const regionText = escaped.substring(r.start, r.end);
+        result += `<span class="word-suspect">${regionText}</span>`;
+        lastEnd = r.end;
+    }
+    result += escaped.substring(lastEnd);
+    return result;
+}
 
 function renderASRResult(data) {
     currentASRData = data;
@@ -650,6 +757,11 @@ function renderASRResult(data) {
             seekToSegment(idx);
         });
     });
+
+    // Load summary if available
+    if (typeof loadSummaryForFile === 'function' && currentFileId) {
+        loadSummaryForFile(currentFileId);
+    }
 }
 
 function _qColor(score, thresholds) {
@@ -746,18 +858,28 @@ function renderTimingInfo(timing) {
     el.innerHTML = html;
 }
 
+function _safeColor(c) {
+    if (!c) return '';
+    return /^[a-zA-Z0-9#(), .%]+$/.test(c) ? c : '';
+}
+
 function renderSpeakerView(segments, speakerNames) {
     let html = '';
     let currentSpeaker = null;
     let currentBlock = [];
     let blockIdx = 0;
     let textIdx = 0;
+    const speakerColors = (currentASRData && currentASRData.speaker_colors) || {};
 
     const flushBlock = () => {
         if (currentBlock.length === 0) return;
-        const name = currentSpeaker ? (speakerNames[currentSpeaker] || `Speaker ${currentSpeaker}`) : 'Unknown';
-        html += `<div class="speaker-block" data-block="${blockIdx}" data-speaker-id="${currentSpeaker || ''}">`;
-        html += `<div class="speaker-label" onclick="ctxRenameSpeakerDirect('${currentSpeaker}', ${blockIdx})">${escapeHtml(name)}:</div>`;
+        const name = currentSpeaker ? (speakerNames[currentSpeaker] || `Người nói ${Number(currentSpeaker) + 1}`) : 'Unknown';
+        const color = _safeColor(currentSpeaker ? (speakerColors[currentSpeaker] || '') : '');
+        const borderStyle = color ? `border-left-color:${color}` : '';
+        const labelStyle = color ? `color:${color}` : '';
+        const safeSpk = escapeHtml(String(currentSpeaker || ''));
+        html += `<div class="speaker-block" data-block="${blockIdx}" data-speaker-id="${safeSpk}" style="${borderStyle}">`;
+        html += `<div class="speaker-label" style="${labelStyle}" onclick="ctxRenameSpeakerDirect('${safeSpk}', ${parseInt(blockIdx) || 0})">${escapeHtml(name)}:</div>`;
         html += `<div class="speaker-text">${currentBlock.join(' ')}</div>`;
         html += `</div>`;
         blockIdx++;
@@ -770,7 +892,8 @@ function renderSpeakerView(segments, speakerNames) {
             currentSpeaker = seg.speaker_id !== undefined ? String(seg.speaker_id) : null;
         } else if (seg.type === 'text') {
             const text = seg.text || '';
-            currentBlock.push(`<span class="seg-span" data-seg="${textIdx}">${escapeHtml(text)}</span>`);
+            const rendered = renderTextWithConfidence(text, seg.raw_words);
+            currentBlock.push(`<span class="seg-span" data-seg="${textIdx}">${rendered}</span>`);
             textIdx++;
         }
     }
@@ -785,7 +908,8 @@ function renderPlainView(segments) {
     for (const seg of segments) {
         if (seg.type === 'text') {
             const text = seg.text || '';
-            html += `<span class="seg-span" data-seg="${textIdx}">${escapeHtml(text)}</span> `;
+            const rendered = renderTextWithConfidence(text, seg.raw_words);
+            html += `<span class="seg-span" data-seg="${textIdx}">${rendered}</span> `;
             textIdx++;
         }
     }
@@ -794,17 +918,21 @@ function renderPlainView(segments) {
 }
 
 function renderRawSpeakers(segments, speakerNames) {
+    const speakerColors = (currentASRData && currentASRData.speaker_colors) || {};
     let html = '<table style="width:100%;font-size:13px;"><tr><th>Time</th><th>Speaker</th><th>Text</th></tr>';
     let textIdx = 0;
     let currentSpeaker = '';
+    let currentSpkId = '';
 
     for (const seg of segments) {
         if (seg.type === 'speaker') {
-            currentSpeaker = speakerNames[seg.speaker_id] || `Speaker ${seg.speaker_id}`;
+            currentSpkId = String(seg.speaker_id);
+            currentSpeaker = speakerNames[currentSpkId] || `Người nói ${seg.speaker_id + 1}`;
         } else if (seg.type === 'text') {
             const time = formatTime(seg.start_time || 0);
+            const color = _safeColor(speakerColors[currentSpkId] || '') || 'var(--accent)';
             html += `<tr><td style="color:var(--text-secondary)">${time}</td>`;
-            html += `<td style="color:var(--accent)">${escapeHtml(currentSpeaker)}</td>`;
+            html += `<td style="color:${color}">${escapeHtml(currentSpeaker)}</td>`;
             html += `<td>${escapeHtml(seg.text || '')}</td></tr>`;
             textIdx++;
         }
@@ -817,14 +945,24 @@ function renderRawSpeakers(segments, speakerNames) {
 
 function switchTab(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    if (tab === 'content') {
-        document.getElementById('result-content').style.display = '';
-        document.getElementById('result-speakers').style.display = 'none';
-        document.querySelectorAll('.tab-btn')[0].classList.add('active');
-    } else {
-        document.getElementById('result-content').style.display = 'none';
-        document.getElementById('result-speakers').style.display = '';
-        document.querySelectorAll('.tab-btn')[1].classList.add('active');
+    document.getElementById('result-content').style.display = 'none';
+    document.getElementById('result-speakers').style.display = 'none';
+    document.getElementById('result-summary').style.display = 'none';
+
+    const tabMap = {
+        content: { el: 'result-content', idx: 0 },
+        speakers: { el: 'result-speakers', idx: 1 },
+        summary: { el: 'result-summary', btn: 'tab-summary' },
+    };
+    const info = tabMap[tab];
+    if (info) {
+        document.getElementById(info.el).style.display = '';
+        if (info.btn) {
+            const btn = document.getElementById(info.btn);
+            if (btn) btn.classList.add('active');
+        } else {
+            document.querySelectorAll('.tab-btn')[info.idx].classList.add('active');
+        }
     }
 }
 
@@ -841,8 +979,14 @@ async function onJSONSelected(input) {
             try {
                 await uploadFile();
             } catch (e) {
-                showToast('Lỗi upload: ' + e.message, 'error');
-                return;
+                // Thử tạo lại session rồi retry 1 lần
+                try {
+                    await fetch('/api/session', { method: 'POST', credentials: 'same-origin' });
+                    await uploadFile();
+                } catch (e2) {
+                    showToast('Lỗi upload: ' + (e2.message || e.message), 'error');
+                    return;
+                }
             }
         }
         if (!currentFileId) {
@@ -914,7 +1058,7 @@ function copyText() {
                 if (blockTexts.length) {
                     text += currentSpeaker + ':\n' + blockTexts.join(' ') + '\n\n';
                 }
-                currentSpeaker = speakerNames[seg.speaker_id] || `Speaker ${seg.speaker_id}`;
+                currentSpeaker = speakerNames[seg.speaker_id] || `Người nói ${seg.speaker_id + 1}`;
                 blockTexts = [];
             } else if (seg.type === 'text') {
                 blockTexts.push(seg.text || '');
@@ -977,6 +1121,10 @@ function showLoggedIn(user) {
     document.getElementById('username-display').textContent = user.username;
     updateHeaderTitle(true);
 
+    // Hien nut admin neu co quyen
+    const btnAdmin = document.getElementById('btn-admin');
+    if (btnAdmin) btnAdmin.style.display = (user.role === 'admin') ? '' : 'none';
+
     // Khôi phục trạng thái nếu đang xử lý
     restoreSessionState();
 }
@@ -995,6 +1143,9 @@ async function logout() {
     // Reset toàn bộ UI về trạng thái anonymous ban đầu
     document.getElementById('auth-anonymous').style.display = 'flex';
     document.getElementById('auth-loggedin').style.display = 'none';
+    const btnAdmin = document.getElementById('btn-admin');
+    if (btnAdmin) btnAdmin.style.display = 'none';
+    closeAdminPanel();
     updateHeaderTitle(false);
 
     // Ẩn kết quả, progress, queue, player
