@@ -22,11 +22,6 @@ from common import (DragDropLabel, SearchWidget, ClickableTextEdit,
 
 DIARIZATION_AVAILABLE = is_diarization_available()
 SPEAKER_EMBEDDING_MODELS = get_speaker_embedding_models()
-from core.audio_analyzer import (
-    AudioQualityAnalyzer, AnalysisResult, QualityMetrics,
-    AnalysisThread, check_dnsmos_model_exists, DNSMOSDownloader
-)
-from quality_result_dialog import QualityResultDialog
 
 class FastJSONLoadThread(QThread):
     progress_updated = pyqtSignal(int, str)
@@ -181,11 +176,6 @@ class FileProcessingTab(QWidget):
         # Initialization flag
         self._initializing = True
         
-        # Audio quality analyzer
-        self.quality_analyzer = None
-        self.analysis_thread = None
-        self._init_quality_analyzer()
-        
         self.init_ui()
         
         self._initializing = False
@@ -301,7 +291,6 @@ class FileProcessingTab(QWidget):
         self.combo_model.addItem("hynt/Zipformer-30M (nhanh)", "zipformer-30m-rnnt-6000h")
         self.combo_model.addItem("Zipformer-Vi 2025 (68M)", "sherpa-onnx-zipformer-vi-2025-04-20")
         self.combo_model.addItem("ROVER (chậm, chính xác)", "rover-voting")
-        self.combo_model.currentIndexChanged.connect(self._reset_analyzer)
         form_config.addRow("Model:", self.combo_model)
         
         # CPU Threads
@@ -470,12 +459,16 @@ class FileProcessingTab(QWidget):
         embedding_layout = QHBoxLayout()
         
         self.combo_speaker_model = QComboBox()
-        self.combo_speaker_model.addItem("Pyannote Community-1 OnnxRuntime", "community1_pure_ort")
+        self.combo_speaker_model.addItem("Pyannote Community-1 (ResNet34+PLDA+VBx) — Chính xác nhất", "community1_pure_ort")
+        self.combo_speaker_model.addItem("3D-Speaker CAM++ 192-dim (Spectral) — Nhanh 5-6x", "3dspeaker_campp")
+        self.combo_speaker_model.addItem("ECAPA-TDNN 192-dim (Spectral) — Nhanh 8x", "3dspeaker_ecapa")
         self.combo_speaker_model.setCurrentIndex(0)
         self.combo_speaker_model.setEnabled(False)
         self.combo_speaker_model.setToolTip(
-            "Pyannote Community-1 chạy hoàn toàn trên OnnxRuntime\n"
-            "Không cần PyTorch, không cần pyannote.audio"
+            "Chọn model phân đoạn người nói:\n"
+            "• Community-1: ResNet34-LM + PLDA + VBx — chính xác nhất\n"
+            "• CAM++ 3D-Speaker: spectral clustering — nhanh 5-6x\n"
+            "• ECAPA-TDNN: spectral clustering — nhanh 8x"
         )
         self.combo_speaker_model.currentIndexChanged.connect(self.on_speaker_model_changed)
         
@@ -519,7 +512,7 @@ class FileProcessingTab(QWidget):
         form_config.addRow(self.check_merge_short_speaker)
 
         # RMS Normalize Option
-        self.check_rms_normalize = QCheckBox("🔊 Chuẩn hóa âm lượng từng đoạn (RMS)")
+        self.check_rms_normalize = QCheckBox("Chuẩn hóa âm lượng từng đoạn (RMS)")
         self.check_rms_normalize.setChecked(False)
         self.check_rms_normalize.setToolTip(
             "Cân bằng âm lượng giữa các đoạn nói (đoạn to giảm, đoạn nhỏ tăng).\n"
@@ -530,12 +523,13 @@ class FileProcessingTab(QWidget):
 
         # Save RAM Option
         self.check_save_ram = QCheckBox("Tiết kiệm RAM (unload model sau mỗi bước)")
-        self.check_save_ram.setChecked(False)
+        self.check_save_ram.setChecked(True)  # Mặc định bật cho desktop
         self.check_save_ram.setToolTip(
             "Khi bật, các model sẽ được giải phóng khỏi bộ nhớ sau mỗi bước xử lý.\n"
             "• Bật: Giảm ~30-50% RAM, nhưng chậm hơn khi xử lý file tiếp theo\n"
             "• Tắt: Giữ model trong RAM, xử lý file tiếp theo nhanh hơn"
         )
+        self.check_save_ram.stateChanged.connect(self._on_save_ram_changed)
         form_config.addRow(self.check_save_ram)
         
         
@@ -835,17 +829,22 @@ class FileProcessingTab(QWidget):
         self.label_diarization_threshold.setToolTip(f"Ngưỡng hiện tại: {threshold} - {tip}")
 
     def on_speaker_model_changed(self, index):
-        """Update default threshold when speaker model changes"""
-        from core.speaker_diarization import SpeakerDiarizer
-        
+        """Update threshold + visibility when speaker model changes"""
+        from core.speaker_diarization import SpeakerDiarizer, SPEAKER_EMBEDDING_MODELS
+
         model_id = self.combo_speaker_model.currentData()
+        model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {})
+        has_threshold = model_info.get("has_threshold", True)
+
+        # Spectral clustering models don't use threshold slider
+        self.slider_diarization_threshold.setEnabled(has_threshold)
+        self.slider_diarization_threshold.setVisible(has_threshold)
+
         default_threshold = SpeakerDiarizer.get_default_threshold(model_id)
-        
-        # Convert threshold to slider value (multiply by 100 for 2 decimal places)
         slider_value = int(default_threshold * 100)
         self.slider_diarization_threshold.setValue(slider_value)
-        
-        print(f"[Config] Model changed to {model_id}, threshold set to {default_threshold}")
+
+        print(f"[Config] Model changed to {model_id}, threshold={default_threshold}, has_threshold={has_threshold}")
 
     def on_speaker_diarization_changed(self, state):
         is_checked = (state == Qt.CheckState.Checked.value or state == 2)
@@ -1281,6 +1280,25 @@ class FileProcessingTab(QWidget):
             "preprocess_rms_normalize": self.check_rms_normalize.isChecked(),
         }
 
+    def _on_save_ram_changed(self, state):
+        """Cảnh báo khi tắt tiết kiệm RAM trên máy ≤ 8GB."""
+        if state == 0:  # Unchecked
+            import psutil
+            total_gb = psutil.virtual_memory().total / 1024 / 1024 / 1024
+            if total_gb <= 8:
+                reply = QMessageBox.warning(
+                    self, "Cảnh báo RAM",
+                    f"Ê bạn chắc chứ? Máy tính bạn có vẻ yếu !?\n\n"
+                    f"Máy bạn chỉ có {total_gb:.0f} GB RAM.\n"
+                    f"Tắt tiết kiệm RAM có thể khiến ứng dụng chậm do tràn bộ nhớ.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    self.check_save_ram.blockSignals(True)
+                    self.check_save_ram.setChecked(True)
+                    self.check_save_ram.blockSignals(False)
+
     def start_transcription(self):
         if not self.selected_file:
             return
@@ -1327,12 +1345,6 @@ class FileProcessingTab(QWidget):
             else:
                 # Làm lại từ đầu - xóa dữ liệu cũ
                 self._pending_text_only_mode = False
-
-        # Nếu đang phân tích âm thanh, dừng lại
-        if self.analysis_thread and self.analysis_thread.isRunning():
-            self.analysis_thread.terminate()
-            self.analysis_thread.wait()
-            self.stop_spinner()
 
         model_path = self.default_model_path
         if getattr(sys, 'frozen', False):
@@ -1584,7 +1596,7 @@ class FileProcessingTab(QWidget):
             self.render_text_content(immediate=True)
             
             if self.has_speaker_diarization and self.speaker_segments_raw:
-                self.display_raw_speaker_segments(self.speaker_segments_raw)
+                self.display_raw_speaker_segments(self.speaker_segments_raw, self.segments)
             else:
                 self.text_speaker_raw_output.setPlainText("Chưa có dữ liệu phân tách Người nói.")
             
@@ -1655,54 +1667,20 @@ class FileProcessingTab(QWidget):
             if self.segments and self.selected_file:
                 self.btn_rerun_diarization.setEnabled(True)
 
-            # Chạy DNSMOS background → khi xong mới hiện message box
-            self._run_dnsmos_then_show_result()
+            # Dùng DNSMOS đã tính sẵn trong pipeline (quality_info)
+            pipeline_dnsmos = result_data.get("quality_info")
+            self._show_finish_with_dnsmos(pipeline_dnsmos)
         except Exception as e:
             import traceback
             QMessageBox.critical(self.window(), "Lỗi hiển thị", f"Lỗi UI: {e}")
 
-    def _run_dnsmos_then_show_result(self):
-        """Chạy DNSMOS background, khi xong hiện message box kết quả."""
-        from core.audio_analyzer import check_dnsmos_model_exists
-        if not self.selected_file or not check_dnsmos_model_exists():
-            # Không có DNSMOS → hiện kết quả ngay
-            self._show_finish_dialog("")
-            return
-
-        # Progress bar tiếp tục chạy
-        self.current_progress_text = "Đang đánh giá chất lượng âm thanh..."
-        self.progress_bar.setValue(95)
-        self.start_spinner()
-
-        class _DNSMOSThread(QThread):
-            done = pyqtSignal(dict)
-            def __init__(self, file_path):
-                super().__init__()
-                self.file_path = file_path
-            def run(self):
-                try:
-                    from core.audio_analyzer import AudioQualityAnalyzer
-                    import librosa
-                    audio, sr = librosa.load(self.file_path, sr=16000, mono=True, res_type='soxr_vhq')
-                    analyzer = AudioQualityAnalyzer()
-                    scores = analyzer.compute_dnsmos_average(audio, sr)
-                    self.done.emit(scores or {})
-                except Exception:
-                    self.done.emit({})
-
-        self._dnsmos_thread = _DNSMOSThread(self.selected_file)
-        self._dnsmos_thread.done.connect(self._on_dnsmos_done)
-        self._dnsmos_thread.start()
-
-    def _on_dnsmos_done(self, scores):
-        """DNSMOS xong → hiện message box đầy đủ."""
-        self.stop_spinner()
-        self.progress_bar.setValue(100)
-        self.progress_bar.setFormat(f"✓ Hoàn tất! ({self._finish_time_str})")
-
+    def _show_finish_with_dnsmos(self, pipeline_dnsmos):
+        """Dùng DNSMOS đã tính sẵn từ pipeline → hiện message box ngay."""
         dnsmos_str = ""
-        if scores:
-            sig, bak, ovrl = scores.get('SIG', 0), scores.get('BAK', 0), scores.get('OVRL', 0)
+        if pipeline_dnsmos:
+            sig = pipeline_dnsmos.get('dnsmos_sig', 0)
+            bak = pipeline_dnsmos.get('dnsmos_bak', 0)
+            ovrl = pipeline_dnsmos.get('dnsmos_ovrl', 0)
             if ovrl > 0:
                 q_icon = "🟢" if ovrl >= 3.5 else ("🟡" if ovrl >= 2.5 else "🔴")
                 dnsmos_str = f"\n  {q_icon} Giọng nói: {sig:.2f}/5 | Nền: {bak:.2f}/5"
@@ -1711,6 +1689,11 @@ class FileProcessingTab(QWidget):
 
     def _show_finish_dialog(self, dnsmos_str):
         """Hiện message box kết quả cuối cùng."""
+        # Stop spinner + set progress bar hoàn tất
+        self.stop_spinner()
+        self.progress_bar.setValue(100)
+        self.progress_bar.setFormat(f"✓ Hoàn tất ({self._finish_time_str})")
+
         quality_str = ""
         if dnsmos_str or self._finish_asr_conf:
             quality_str = "\n\n🎙️ CHẤT LƯỢNG:" + dnsmos_str + self._finish_asr_conf
@@ -2712,49 +2695,104 @@ class FileProcessingTab(QWidget):
         else:
             self.text_output.setUpdatesEnabled(True)
 
-    def display_raw_speaker_segments(self, speaker_segments):
+    def display_raw_speaker_segments(self, speaker_segments, final_segments=None):
         if not speaker_segments:
             self.text_speaker_raw_output.setPlainText("Không có dữ liệu phân tách Người nói.")
             return
-        
+
+        def fmt_time(t):
+            m = int(t // 60)
+            s = t % 60
+            return f"{m:02d}:{s:05.2f}"
+
         lines = []
-        lines.append("=" * 70)
-        lines.append("KẾT QUẢ PHÂN TÁCH NGƯỜI NÓI (RAW)")
-        lines.append("=" * 70)
-        
+
         model_id = self.combo_speaker_model.currentData() if hasattr(self, 'combo_speaker_model') else None
         model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {}) if model_id else {}
         model_name = model_info.get("name", "Unknown")
         model_size = model_info.get("size", "Unknown")
-        
-        lines.append(f"Model sử dụng: {model_name}")
-        lines.append(f"Kích thước model: {model_size}")
+
+        # ═══ FINAL (sau post-processing) ═══
+        if final_segments:
+            lines.append("=" * 70)
+            lines.append("KẾT QUẢ HIỂN THỊ FINAL (sau NaturalTurn post-processing)")
+            lines.append("=" * 70)
+            lines.append(f"Model: {model_name}")
+            lines.append("")
+
+            # Group consecutive segments by speaker
+            final_sorted = sorted(final_segments, key=lambda x: x.get('start', 0))
+            groups = []
+            current_spk = None
+            current_start = 0
+            current_end = 0
+            for seg in final_sorted:
+                spk = seg.get('speaker', seg.get('speaker_id', 'Unknown'))
+                if isinstance(spk, int):
+                    spk = f"Người nói {spk + 1}"
+                if spk == current_spk:
+                    current_end = seg.get('end', 0)
+                else:
+                    if current_spk is not None:
+                        groups.append((current_spk, current_start, current_end))
+                    current_spk = spk
+                    current_start = seg.get('start', 0)
+                    current_end = seg.get('end', 0)
+            if current_spk is not None:
+                groups.append((current_spk, current_start, current_end))
+
+            n_final_spk = len(set(g[0] for g in groups))
+            lines.append(f"Tổng: {len(groups)} lượt nói, {n_final_spk} người nói")
+            lines.append("")
+            lines.append(f"{'#':<4} {'Người nói':<14} {'Bắt đầu':<12} {'Kết thúc':<12} {'Thời gian':<10}")
+            lines.append("-" * 70)
+
+            for i, (spk, start, end) in enumerate(groups, 1):
+                dur = end - start
+                lines.append(f"{i:<4} {spk:<14} {fmt_time(start):<12} {fmt_time(end):<12} {dur:>6.2f}s")
+
+            lines.append("")
+
+            # Thống kê
+            final_stats = {}
+            for spk, start, end in groups:
+                dur = end - start
+                if spk not in final_stats:
+                    final_stats[spk] = {'count': 0, 'total_time': 0}
+                final_stats[spk]['count'] += 1
+                final_stats[spk]['total_time'] += dur
+
+            lines.append("Thống kê:")
+            for spk, stats in sorted(final_stats.items()):
+                lines.append(f"  {spk}: {stats['count']} lượt, tổng {stats['total_time']:.1f}s")
+
+            lines.append("")
+            lines.append("")
+
+        # ═══ RAW (trước post-processing) ═══
+        lines.append("=" * 70)
+        lines.append("KẾT QUẢ PHÂN TÁCH NGƯỜI NÓI (RAW)")
+        lines.append("=" * 70)
+
+        lines.append(f"Model: {model_name} ({model_size})")
         lines.append(f"Tổng số đoạn: {len(speaker_segments)}")
         lines.append("")
-        
-        lines.append(f"{'#':<4} {'Người nói':<12} {'Bắt đầu':<12} {'Kết thúc':<12} {'Thớigian':<10}")
+
+        lines.append(f"{'#':<4} {'Người nói':<14} {'Bắt đầu':<12} {'Kết thúc':<12} {'Thời gian':<10}")
         lines.append("-" * 70)
-        
+
         sorted_segments = sorted(speaker_segments, key=lambda x: x.get('start', 0))
-        
+
         for i, seg in enumerate(sorted_segments, 1):
             speaker = seg.get('speaker', 'Unknown')
             start = seg.get('start', 0)
             end = seg.get('end', 0)
             duration = end - start
-            
-            def fmt_time(t):
-                m = int(t // 60)
-                s = t % 60
-                return f"{m:02d}:{s:05.2f}"
-            
-            lines.append(f"{i:<4} {speaker:<12} {fmt_time(start):<12} {fmt_time(end):<12} {duration:>6.2f}s")
-        
+            lines.append(f"{i:<4} {speaker:<14} {fmt_time(start):<12} {fmt_time(end):<12} {duration:>6.2f}s")
+
         lines.append("")
-        lines.append("-" * 70)
-        lines.append("Thống kê theo Người nói:")
-        lines.append("-" * 70)
-        
+        lines.append("Thống kê:")
+
         speaker_stats = {}
         for seg in sorted_segments:
             speaker = seg.get('speaker', 'Unknown')
@@ -2763,12 +2801,12 @@ class FileProcessingTab(QWidget):
                 speaker_stats[speaker] = {'count': 0, 'total_time': 0}
             speaker_stats[speaker]['count'] += 1
             speaker_stats[speaker]['total_time'] += duration
-        
+
         for speaker, stats in sorted(speaker_stats.items()):
             lines.append(f"  {speaker}: {stats['count']} đoạn, tổng {stats['total_time']:.1f}s")
-        
+
         lines.append("=" * 70)
-        
+
         self.text_speaker_raw_output.setPlainText("\n".join(lines))
 
     def rerun_speaker_diarization(self):
@@ -2855,7 +2893,7 @@ class FileProcessingTab(QWidget):
         self.progress_bar.setValue(100)
         self.progress_bar.setFormat(f"Hoàn thành ({elapsed_time:.1f}s)")
         
-        self.display_raw_speaker_segments(speaker_segments_raw)
+        self.display_raw_speaker_segments(speaker_segments_raw, merged_segments)
         self.render_text_content(immediate=True)
         
         self.btn_rerun_diarization.setEnabled(True)
@@ -3514,146 +3552,4 @@ class FileProcessingTab(QWidget):
             self.merged_speaker_blocks = []
             self.render_text_content(immediate=True)
 
-    # ==================== AUDIO QUALITY METHODS ====================
-    
-    def _init_quality_analyzer(self):
-        """Khởi tạo quality analyzer với offline model"""
-        try:
-            # Sẽ được lazy load khi cần
-            pass
-        except Exception as e:
-            print(f"[FileTab] Cannot init quality analyzer: {e}")
-    
-    def _ensure_analyzer(self):
-        """Đảm bảo analyzer đã được khởi tạo với model đang chọn"""
-        if self.quality_analyzer is None:
-            try:
-                import sherpa_onnx as so
-                
-                # Lấy model đang chọn từ combo, không dùng default
-                model_folder = self.combo_model.currentData()
-                if not model_folder:
-                    model_folder = "zipformer-30m-rnnt-6000h"
-                
-                model_path = os.path.join(BASE_DIR, "models", model_folder)
-                print(f"[FileTab] Using model for analysis: {model_folder}")
-                
-                # Tìm model files
-                def find_file(pattern):
-                    if not os.path.exists(model_path):
-                        return None
-                    files = [f for f in os.listdir(model_path) 
-                            if f.startswith(pattern) and f.endswith(".onnx")]
-                    float_files = [f for f in files if "int8" not in f]
-                    if float_files:
-                        return os.path.join(model_path, float_files[0])
-                    if files:
-                        return os.path.join(model_path, files[0])
-                    return None
-                
-                encoder = find_file("encoder-")
-                decoder = find_file("decoder-")
-                joiner = find_file("joiner-")
-                tokens = os.path.join(model_path, "tokens.txt")
-                
-                if all([encoder, decoder, joiner]):
-                    recognizer = so.OfflineRecognizer.from_transducer(
-                        tokens=tokens,
-                        encoder=encoder,
-                        decoder=decoder,
-                        joiner=joiner,
-                        num_threads=4,
-                        sample_rate=16000,
-                        feature_dim=80,
-                        decoding_method="modified_beam_search",
-                        max_active_paths=8,
-                    )
-                    self.quality_analyzer = AudioQualityAnalyzer(
-                        offline_recognizer=recognizer,
-                        online_recognizer=None
-                    )
-                    print("[FileTab] Quality analyzer initialized")
-                else:
-                    print(f"[FileTab] Model files not found in {model_path}")
-            except Exception as e:
-                print(f"[FileTab] Failed to init analyzer: {e}")
-        
-        return self.quality_analyzer is not None
-    
-    def _reset_analyzer(self):
-        """Reset analyzer khi đổi model để tạo lại với model mới"""
-        if self.quality_analyzer is not None:
-            print("[FileTab] Resetting analyzer for new model selection")
-            self.quality_analyzer = None
-            
-    
-    def analyze_file_quality(self):
-        """Chạy phân tích chất lượng file"""
-        if not self.selected_file:
-            return
-        
-        if not self._ensure_analyzer():
-            print("[FileTab] Analyzer not available")
-            return
-        
-        # Kiểm tra DNSMOS model
-        if not check_dnsmos_model_exists():
-            reply = QMessageBox.question(self.window(),
-                "Tải model DNSMOS",
-                "Cần tải model DNSMOS (~5MB) để phân tích chất lượng.\n\nTải ngay?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._download_dnsmos_and_analyze()
-            return
-        
-        # Chạy phân tích trong thread
-        self.current_progress_text = "Đang phân tích chất lượng âm thanh..."
-        self.start_spinner()
-        self.btn_process.setEnabled(False)  # Không cho xử lý khi đang phân tích
-        self.analysis_thread = AnalysisThread(
-            self.quality_analyzer,
-            file_path=self.selected_file,
-            use_offline=True
-        )
-        self.analysis_thread.progress.connect(self.on_analysis_progress)
-        self.analysis_thread.finished.connect(self.on_analysis_finished)
-        self.analysis_thread.start()
-    
-    def _download_dnsmos_and_analyze(self):
-        """Download DNSMOS rồi phân tích"""
-        self.download_thread = DNSMOSDownloader()
-        self.download_thread.finished.connect(self.on_dnsmos_download_finished)
-        self.download_thread.start()
-    
-    def on_dnsmos_download_finished(self, success, msg):
-        """Callback khi download xong"""
-        if success:
-            QMessageBox.information(self.window(), "Thành công", "Đã tải model DNSMOS!")
-            self.analyze_file_quality()  # Phân tích sau khi tải xong
-        else:
-            QMessageBox.warning(self.window(), "Lỗi", f"Không thể tải DNSMOS:\n{msg}")
-    
-    def on_analysis_progress(self, message, percent):
-        """Cập nhật progress phân tích"""
-        self.progress_bar.setValue(percent)
-        self.current_progress_text = f"{message} ({percent}%)"
-    
-    def on_analysis_finished(self, result):
-        """Hiển thị kết quả phân tích"""
-        self.stop_spinner()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Sẵn sàng")
-        # Enable nút xử lý nếu có file và không đang xử lý chính
-        transcriber_running = self.transcriber and self.transcriber.isRunning()
-        if self.selected_file and not transcriber_running:
-            self.btn_process.setEnabled(True)
-        
-        if result.error_message:
-            QMessageBox.warning(self.window(), "Lỗi phân tích", result.error_message)
-            return
-        
-        # Hiện dialog kết quả
-        dialog = QualityResultDialog(result, self)
-        dialog.exec()
 

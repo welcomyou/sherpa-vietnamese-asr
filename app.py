@@ -246,7 +246,7 @@ class MainWindow(QMainWindow):
                 
                 speaker_model = file_settings.get('speaker_model', 'community1_pure_ort')
                 # Migration: remap old model IDs to pure_ort
-                if speaker_model in ('titanet_small', 'community1_onnx', 'community1'):
+                if speaker_model in ('titanet_small', 'community1_onnx', 'community1', 'campp_pure_ort'):
                     speaker_model = 'community1_pure_ort'
                 index = file_tab.combo_speaker_model.findData(speaker_model)
                 if index >= 0:

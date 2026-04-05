@@ -96,8 +96,11 @@ def _detect_cpu_topology():
 
     has_ht = logical > physical
 
-    print(f"[CPU] {physical} physical cores, {logical} logical threads"
-          f"{', HT' if has_ht else ''}{', VM' if is_vm else ''}")
+    try:
+        print(f"[CPU] {physical} physical cores, {logical} logical threads"
+              f"{', HT' if has_ht else ''}{', VM' if is_vm else ''}")
+    except (ValueError, OSError):
+        pass  # stdout co the la DEVNULL khi chay headless
 
     return physical, logical, is_vm
 
@@ -111,17 +114,27 @@ ALLOWED_THREADS = PHYSICAL_CORES
 DEFAULT_THREADS = PHYSICAL_CORES
 
 
-def compute_ort_threads(cpu_threads):
+def compute_ort_threads(cpu_threads, full_ht=False):
     """
-    Tính Z = số threads thực cho ORT intra_op, có tính HT/SMT bonus.
+    Tính Z = số threads thực cho ORT intra_op.
 
     cpu_threads: giá trị user chọn trên UI (1 → PHYSICAL_CORES)
+    full_ht: True = dùng ~90% HT (cho diarization embedding — bottleneck duy nhất cần nhiều thread)
+             False = dùng đúng physical cores (tối ưu cho hầu hết ONNX models)
 
-    Nếu không có HT (physical == logical, VM/vCPU):
-        Z = cpu_threads (không bonus)
-    Nếu có HT/SMT:
-        Z = cpu_threads + cpu_threads * (ht_ratio - 1) // 2
-        Ví dụ 6C/12T (ht_ratio=2): Z = cpu_threads * 3 // 2
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ Benchmark 6C/12T (Intel), 10 min audio, mỗi component riêng biệt: │
+    │                                                                     │
+    │ ASR Encoder:    Z=6 → 0.84s (BEST)   Z=9 → 1.42s   Z=12 → 2.24s │
+    │ Punctuation:    Z=6 → 5.12s (BEST)   Z=9 → 7.98s   Z=12 → 7.35s │
+    │ Diar Segment:   Z=6 → 17.6s          Z=9 → 17.6s(B) Z=12 → 21.0s│
+    │ Diar Embedding: Z=6 → 128s           Z=9 → 54.3s   Z=11 → 52.2s │
+    │                                                       (BEST)       │
+    │                                                                     │
+    │ → Hầu hết models: Z = PHYSICAL_CORES là tối ưu                     │
+    │ → CHỈ Embedding model: Z = PHYSICAL + 80-90% HT bonus nhanh hơn    │
+    │ → Z = LOGICAL_THREADS (full) lại CHẬM hơn do over-subscription     │
+    └─────────────────────────────────────────────────────────────────────┘
 
     Returns Z (>= 1)
     """
@@ -129,9 +142,16 @@ def compute_ort_threads(cpu_threads):
         # Không HT (VM, hoặc CPU không HT)
         return max(1, cpu_threads)
 
-    ht_ratio = LOGICAL_THREADS / PHYSICAL_CORES  # thường 2 (Intel HT, AMD SMT)
-    Z = cpu_threads + int(cpu_threads * (ht_ratio - 1) / 2)
-    return max(1, Z)
+    if full_ht:
+        # Diar embedding: ~90% logical threads (sweet spot, Z=11 trên 6C/12T)
+        # full_ht chỉ tối ưu cho ResNet embedding model duy nhất
+        ht_ratio = LOGICAL_THREADS / PHYSICAL_CORES
+        Z = cpu_threads + int(cpu_threads * (ht_ratio - 1) * 0.85)
+        return max(1, min(Z, LOGICAL_THREADS))
+    else:
+        # Hầu hết models: đúng physical cores là nhanh nhất
+        # (ASR encoder, punctuation, segmentation đều chậm hơn khi thêm HT)
+        return max(1, cpu_threads)
 
 
 # === Model Download Information ===

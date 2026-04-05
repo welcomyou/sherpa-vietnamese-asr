@@ -30,6 +30,7 @@ def _get_vad_session():
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
+        opts.enable_cpu_mem_arena = False  # Tránh arena leak
         _vad_session = ort.InferenceSession(
             vad_model_path, providers=['CPUExecutionProvider'], sess_options=opts
         )

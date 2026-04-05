@@ -259,88 +259,59 @@ def compute_asr_confidence(audio: np.ndarray, model_path: str) -> tuple[float | 
 
 
 def analyze_audio_quality(wav_path: str, model_path: str,
-                          progress_callback=None) -> dict | None:
+                          progress_callback=None,
+                          asr_confidence: float = None) -> dict | None:
     """
     Analyze audio quality: DNSMOS + ASR confidence.
-    Đồng bộ logic với desktop (core/audio_analyzer.py):
-    - Load audio với soxr_vhq + peak normalization
-    - Stratified sampling (3 sample ở 15%, 50%, 85%)
-    - VAD segment trước DNSMOS (chỉ tính trên speech)
-    - ASR confidence trên VAD segments (không chỉ 10s giữa file)
+    - DNSMOS: stratified sampling (3 sample) + VAD + DNSMOS model
+    - ASR confidence: tận dụng từ pipeline (không chạy ASR lại)
+
+    Args:
+        asr_confidence: Confidence đã tính từ pipeline (0-1). Nếu None thì bỏ qua.
     """
     try:
         import librosa
+        import soundfile as sf
 
         if progress_callback:
             progress_callback("PHASE:Quality|Đang đánh giá chất lượng âm thanh...|92")
 
-        # Load audio với soxr_vhq giống desktop
-        audio, _ = librosa.load(wav_path, sr=SAMPLE_RATE, mono=True, res_type="soxr_vhq")
+        # Load audio nhẹ bằng soundfile (không resample — DNSMOS chỉ cần 16kHz)
+        audio, sr = sf.read(wav_path, dtype='float32')
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)  # stereo -> mono
+        # Resample nếu không phải 16kHz (WAV từ ffmpeg thường đã 16kHz)
+        if sr != SAMPLE_RATE:
+            import soxr
+            audio = soxr.resample(audio, sr, SAMPLE_RATE, quality='HQ')
 
         if len(audio) < SAMPLE_RATE * 0.5:
             logger.warning("Audio too short for quality analysis")
             return None
 
-        # Peak normalization giống desktop load_audio()
-        peak = np.max(np.abs(audio))
-        if peak > 0 and peak < 0.5:
-            audio = (audio / peak * 0.95).astype(np.float32)
-            logger.info(f"Peak normalization: {peak:.4f} -> 0.95 (low volume)")
-
-        # Stratified sampling giống desktop
+        # Stratified sampling (3 đoạn 10s ở 15%, 50%, 85%)
         samples = _stratified_sample(audio)
+        del audio  # Giải phóng — chỉ cần samples
 
         all_dnsmos_scores = []
-        all_asr_confidences = []
-        sample_texts = []
-        total_segments = 0
-        vad_found_speech = False
 
         for sample in samples:
-            # VAD segment giống desktop
             segments = _vad_segment(sample)
             if not segments:
-                continue
-
-            vad_found_speech = True
-            total_segments += len(segments)
-
-            # DNSMOS: tính trên từng segment riêng (giống desktop)
-            for seg in segments:
-                if len(seg) >= SAMPLE_RATE * 0.5:  # >= 0.5s
-                    dnsmos = compute_dnsmos(seg)
-                    if dnsmos:
-                        all_dnsmos_scores.append(dnsmos)
-
-            # Ghép segments cho ASR confidence
-            main_segment = np.concatenate(segments)
-            if len(main_segment) < SAMPLE_RATE * 0.5:
-                continue
-
-            if progress_callback:
-                progress_callback("PHASE:Quality|Đang đánh giá độ tự tin ASR...|95")
-
-            conf, text = compute_asr_confidence(main_segment, model_path)
-            if conf is not None:
-                all_asr_confidences.append(conf)
-            if text and not sample_texts:
-                sample_texts.append(text)
-
-        # Fallback: Nếu VAD không phát hiện speech, tính trực tiếp trên raw (giống desktop)
-        if not vad_found_speech and not all_dnsmos_scores:
-            logger.info("VAD found no speech, computing on raw audio as fallback")
-            for sample in samples:
+                # Fallback: tính DNSMOS trên raw sample
                 if len(sample) >= SAMPLE_RATE * 0.5:
                     dnsmos = compute_dnsmos(sample)
                     if dnsmos:
                         all_dnsmos_scores.append(dnsmos)
+                continue
 
-            if samples:
-                conf, text = compute_asr_confidence(samples[0], model_path)
-                if conf is not None:
-                    all_asr_confidences.append(conf)
-                if text:
-                    sample_texts.append(text)
+            for seg in segments:
+                if len(seg) >= SAMPLE_RATE * 0.5:
+                    dnsmos = compute_dnsmos(seg)
+                    if dnsmos:
+                        all_dnsmos_scores.append(dnsmos)
+
+        del samples  # Giải phóng
 
         result = {}
 
@@ -350,9 +321,9 @@ def analyze_audio_quality(wav_path: str, model_path: str,
             result["dnsmos_bak"] = round(float(np.mean([s["BAK"] for s in all_dnsmos_scores])), 2)
             result["dnsmos_ovrl"] = round(float(np.mean([s["OVRL"] for s in all_dnsmos_scores])), 2)
 
-        # ASR Confidence trung bình
-        if all_asr_confidences:
-            result["asr_confidence"] = round(float(np.mean(all_asr_confidences)), 4)
+        # ASR Confidence — tận dụng từ pipeline, không chạy ASR lại
+        if asr_confidence is not None:
+            result["asr_confidence"] = round(float(asr_confidence), 4)
 
         if not result:
             return None

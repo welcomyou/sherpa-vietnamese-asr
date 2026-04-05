@@ -1,18 +1,21 @@
 """
-[PRODUCTION - ĐANG DÙNG CHÍNH TRONG MAIN CODE]
-ResNet34-LM 256-dim + PLDA + VBx clustering. Zero PyTorch dependency.
-Nhanh nhất và ổn định nhất trong tất cả các variant.
-
-Pure ORT Speaker Diarization — No pyannote runtime dependency
+Pure ORT Speaker Diarization — CAM++ Embedding Variant
 ═══════════════════════════════════════════════════════════════
-Replicates pyannote Community-1 pipeline EXACTLY using:
-  - onnxruntime (segmentation + embedding ONNX inference)
-  - kaldi-native-fbank (feature extraction, same C++ as sherpa-onnx)
-  - numpy + scipy (VBx clustering, PLDA, reconstruction)
+Clone của speaker_diarization_pure_ort.py, thay ResNet34 embedding bằng CAM++.
+Clustering: AHC initial + VBx cosine refinement (không cần PLDA).
 
-Every step matches pyannote's SpeakerDiarization.apply() precisely:
-  SlidingWindow alignment, Inference.aggregate(), to_diarization(),
-  speaker_count(), reconstruct() — all replicated from pyannote source.
+CAM++ (Context-Aware Masking++) từ WeSpeaker:
+  - 2.5× faster trên CPU so với ResNet34 (RTF 0.013 vs 0.032)
+  - FLOPs: 1.72G vs ResNet34 6.84G
+  - Output: 512-dim embedding trực tiếp (full model, không encoder-only split)
+  - Input tensor: 'feats' (thay vì 'fbank_features')
+  - Accuracy tương đương ResNet34 trên Vox1-O (EER 0.659%)
+
+Thay đổi so với pure_ort gốc:
+  1. initialize(): load voxceleb_CAM++_LM.onnx thay vì embedding_encoder.onnx
+  2. _extract_embeddings(): emb_W=None path, input='feats', dim=512
+  3. Dùng VBx cosine (cosine similarity trên L2-normed embeddings) thay vì PLDA+VBx
+     → Margin-trained embeddings tương thích tốt với cosine scoring
 """
 import os
 import math
@@ -20,8 +23,6 @@ import logging
 import numpy as np
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import cdist
-from scipy.special import logsumexp, softmax
-from scipy.linalg import eigh
 from scipy.optimize import linear_sum_assignment
 
 logger = logging.getLogger(__name__)
@@ -131,10 +132,10 @@ POWERSET_MAP = np.array([
     [0, 1, 1],  # 6: spk 1+2
 ], dtype=np.float32)
 
-# VBx defaults from config.yaml
-DEFAULT_THRESHOLD = 0.6
-DEFAULT_FA = 0.07
-DEFAULT_FB = 0.8
+# VBx cosine defaults (grid-searched on test files)
+DEFAULT_THRESHOLD = 0.7
+DEFAULT_FA = 0.5
+DEFAULT_FB = 1.0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -305,7 +306,7 @@ def compute_emb_fbank(audio, sr=SAMPLE_RATE):
 
 
 # ══════════════════════════════════════════════════════════════
-# PLDA + VBx (from pyannote/vbx.py — exact copy)
+# VBx cosine clustering (no PLDA needed)
 # ══════════════════════════════════════════════════════════════
 
 def l2_norm(x):
@@ -314,58 +315,45 @@ def l2_norm(x):
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-10)
 
 
-def load_plda(model_dir):
-    plda_dir = os.path.join(model_dir, "plda")
-    x = np.load(os.path.join(plda_dir, "xvec_transform.npz"))
-    mean1, mean2, lda = x["mean1"], x["mean2"], x["lda"]
-    p = np.load(os.path.join(plda_dir, "plda.npz"))
-    plda_mu, plda_tr, plda_psi = p["mu"], p["tr"], p["psi"]
-    W = np.linalg.inv(plda_tr.T @ plda_tr)
-    B = np.linalg.inv((plda_tr.T / plda_psi) @ plda_tr)
-    acvar, wccn = eigh(B, W)
-    return {
-        'mean1': mean1, 'mean2': mean2, 'lda': lda,
-        'plda_mu': plda_mu, 'plda_tr': wccn.T[::-1],
-        'plda_psi': acvar[::-1],
-    }
+def vbx_cosine(embeddings_normed, ahc_labels, Fa, Fb, max_iters=20):
+    """VBx clustering using cosine similarity (no PLDA needed).
+    Fa scales cosine scores, Fb is unused (kept for API compat)."""
+    T, D = embeddings_normed.shape
+    K = int(ahc_labels.max()) + 1
 
+    # Initialize gamma from AHC labels
+    gamma = np.zeros((T, K), dtype=np.float64)
+    for t in range(T):
+        gamma[t, ahc_labels[t]] = 1.0
 
-def xvec_transform(embeddings, pd):
-    D_out = pd['lda'].shape[1]
-    return l2_norm(
-        (l2_norm(embeddings - pd['mean1']) * np.sqrt(pd['lda'].shape[0])) @ pd['lda'] - pd['mean2']
-    ) * np.sqrt(D_out)
+    pi = gamma.sum(0) / T  # prior
+    pi = np.maximum(pi, 1e-10)
 
+    for _ in range(max_iters):
+        # M-step: compute centroids
+        W = gamma.T  # (K, T)
+        centroids = W @ embeddings_normed  # (K, D)
+        norms = np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-10
+        centroids = centroids / norms  # L2 normalize
 
-def plda_transform(embeddings, pd, lda_dim=128):
-    return (embeddings - pd['plda_mu']) @ pd['plda_tr'].T[:, :lda_dim]
+        # E-step: cosine similarity as score
+        scores = embeddings_normed @ centroids.T  # (T, K) - cosine similarities
+        log_gamma = Fa * scores + np.log(pi)  # scale by Fa + prior
 
+        # Softmax
+        log_gamma -= np.max(log_gamma, axis=1, keepdims=True)
+        gamma_new = np.exp(log_gamma)
+        gamma_new /= gamma_new.sum(axis=1, keepdims=True) + 1e-10
 
-def vbx_cluster(fea, plda_psi, ahc_labels, Fa, Fb, max_iters=20):
-    """VBx clustering — exact from pyannote/vbx.py"""
-    T, D = fea.shape
-    n_clusters = ahc_labels.max() + 1
-    qinit = np.zeros((T, n_clusters))
-    qinit[np.arange(T), ahc_labels.astype(int)] = 1.0
-    gamma = softmax(qinit * 7.0, axis=1)
-    pi = np.ones(n_clusters) / n_clusters
-    G = -0.5 * (np.sum(fea**2, axis=1, keepdims=True) + D * np.log(2 * np.pi))
-    V = np.sqrt(plda_psi)
-    rho = fea * V
-    prev_elbo = -np.inf
-    for ii in range(max_iters):
-        invL = 1.0 / (1 + Fa / Fb * gamma.sum(axis=0, keepdims=True).T * plda_psi)
-        alpha = Fa / Fb * invL * gamma.T.dot(rho)
-        log_p_ = Fa * (rho.dot(alpha.T) - 0.5 * (invL + alpha**2).dot(plda_psi) + G)
-        lpi = np.log(pi + 1e-8)
-        log_p_x = logsumexp(log_p_ + lpi, axis=-1)
-        gamma = np.exp(log_p_ + lpi - log_p_x[:, None])
-        pi = gamma.sum(axis=0)
-        pi = pi / pi.sum()
-        elbo = np.sum(log_p_x) + Fb * 0.5 * np.sum(np.log(invL) - invL - alpha**2 + 1)
-        if ii > 0 and elbo - prev_elbo < 1e-4:
+        # Update prior
+        pi = gamma_new.sum(0) / T
+        pi = np.maximum(pi, 1e-10)
+
+        # Check convergence
+        if np.allclose(gamma, gamma_new, atol=1e-6):
             break
-        prev_elbo = elbo
+        gamma = gamma_new
+
     return gamma, pi
 
 
@@ -373,7 +361,7 @@ def vbx_cluster(fea, plda_psi, ahc_labels, Fa, Fb, max_iters=20):
 # Main Pipeline
 # ══════════════════════════════════════════════════════════════
 
-class PureOrtDiarizer:
+class PureOrtDiarizerCampp:
     def __init__(self, model_dir=None, onnx_dir=None, num_threads=6,
                  threshold=DEFAULT_THRESHOLD, Fa=DEFAULT_FA, Fb=DEFAULT_FB,
                  min_duration_off=0.0, num_speakers=-1,
@@ -382,6 +370,7 @@ class PureOrtDiarizer:
         self.model_dir = model_dir or os.path.join(base, "models", "pyannote",
                                                      "speaker-diarization-community-1")
         self.onnx_dir = onnx_dir or os.path.join(base, "models", "pyannote-onnx")
+        self.campp_dir = os.path.join(base, "models", "campp-wespeaker")
         self.num_threads = num_threads
         self.threshold = threshold
         self.Fa = Fa
@@ -392,10 +381,9 @@ class PureOrtDiarizer:
         self.max_speakers = max_speakers
         self.seg_sess = None
         self.emb_sess = None
-        self.emb_W = None  # Gemm weight for manual linear after masked pooling
-        self.emb_b = None  # Gemm bias
-        self.plda_data = None
-        self.speaker_centroids = None  # (n_speakers, 256) — saved after clustering
+        self.emb_W = None  # None — CAM++ là full model, không dùng external weight
+        self.emb_b = None
+        self.speaker_centroids = None  # (n_speakers, 512) — saved after clustering
 
     def initialize(self):
         import onnxruntime as ort
@@ -426,24 +414,14 @@ class PureOrtDiarizer:
         opts_seg.optimized_model_filepath = seg_model + ".opt"
         self.seg_sess = ort.InferenceSession(seg_model, opts_seg, providers=prov)
 
-        # Use encoder-only model (frame features) + external masked pooling + Gemm
-        encoder_path = os.path.join(self.onnx_dir, "embedding_encoder.onnx")
-        split_path = os.path.join(self.onnx_dir, "embedding_model_split.onnx")
-        if os.path.exists(encoder_path):
-            opts_emb.optimized_model_filepath = encoder_path + ".opt"
-            self.emb_sess = ort.InferenceSession(encoder_path, opts_emb, providers=prov)
-            self.emb_W = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_weight.npy"))
-            self.emb_b = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_bias.npy"))
-        elif os.path.exists(split_path):
-            self.emb_sess = ort.InferenceSession(split_path, opts_emb, providers=prov)
-            self.emb_W = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_weight.npy"))
-            self.emb_b = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_bias.npy"))
-        else:
-            self.emb_sess = ort.InferenceSession(
-                os.path.join(self.onnx_dir, "embedding_model.onnx"),
-                opts_emb, providers=prov)
-
-        self.plda_data = load_plda(self.model_dir)
+        # CAM++ full model — input: 'feats' (B,T,80), output: 'embs' (B,512)
+        campp_path = os.path.join(self.campp_dir, "voxceleb_CAM++_LM.onnx")
+        opts_emb.optimized_model_filepath = campp_path + ".opt"
+        self.emb_sess = ort.InferenceSession(campp_path, opts_emb, providers=prov)
+        self.emb_W = None  # CAM++ full model — không tách encoder + external weight
+        self.emb_b = None
+        print(f"[CamppORT] Loaded CAM++ from {campp_path}")
+        print(f"[CamppORT] VBx cosine: threshold={self.threshold}, Fa={self.Fa}, Fb={self.Fb}")
 
     def process(self, audio_file, progress_callback=None,
                 audio_data=None, audio_sample_rate=None):
@@ -484,12 +462,14 @@ class PureOrtDiarizer:
         t_count = time.perf_counter() - t0
 
         # 5. Embedding extraction
-        # Community-1 config: embedding_exclude_overlap=True
-        # → prefer clean (non-overlap) mask, fallback to full mask
+        # embedding_exclude_overlap=True: prefer clean (non-overlap) mask, fallback to full
         t0 = time.perf_counter()
         clean_frames = (binarized.sum(axis=2, keepdims=True) < 2).astype(np.float32)
         clean_binarized = binarized * clean_frames
-        emb_min_num_samples = 1680
+        # CAM++ requires continuous segments: min 1.0s per region for reliable embedding.
+        # ResNet34 used 1680 samples (105ms); CAM++ needs 16000 samples (1.0s).
+        # min_seg_frames = ceil(num_seg_frames * 16000 / 160000) = ceil(589*0.1) ≈ 59 frames
+        emb_min_num_samples = 16000  # 1.0s (vs 1680=105ms for ResNet34)
         min_seg_frames = math.ceil(
             num_seg_frames * emb_min_num_samples / CHUNK_SAMPLES)
         embeddings = self._extract_embeddings(
@@ -558,8 +538,7 @@ class PureOrtDiarizer:
         return segments
 
     def compute_single_embedding(self, audio_segment):
-        """Compute 256-dim speaker embedding for a short audio segment.
-        Used for verifying speaker identity of words in diarization gaps.
+        """Compute 512-dim CAM++ speaker embedding for a short audio segment.
         Returns None if audio too short (<9 frames ~= 0.1s).
         """
         if self.emb_sess is None:
@@ -568,22 +547,8 @@ class PureOrtDiarizer:
         fbank = compute_emb_fbank(audio_segment, SAMPLE_RATE)
         if fbank.shape[0] < 9:
             return None
-
-        if self.emb_W is None:
-            # Full embedding model: fbank → embedding directly
-            return self.emb_sess.run(
-                None, {"fbank_features": fbank[np.newaxis]})[0][0]
-        else:
-            # Encoder-only: fbank → frame features → stats pool → project
-            frame_feat = self.emb_sess.run(
-                None, {"fbank_features": fbank[np.newaxis]})[0][0]  # (D, F)
-            # Stats pooling (no mask — entire segment is the target speaker)
-            mean = frame_feat.mean(axis=1)
-            dx2 = (frame_feat - mean[:, np.newaxis]) ** 2
-            var = dx2.mean(axis=1)
-            std = np.sqrt(var)
-            stats = np.concatenate([mean, std])
-            return stats @ self.emb_W.T + self.emb_b
+        # CAM++ full model: input 'feats' (1, T, 80) → output 'embs' (1, 512)
+        return self.emb_sess.run(None, {"feats": fbank[np.newaxis]})[0][0]
 
     def _segment(self, audio):
         total_samples = len(audio)
@@ -648,110 +613,132 @@ class PureOrtDiarizer:
     def _extract_embeddings(self, audio, binarized, clean_binarized,
                              num_seg_frames, chunk_starts, min_seg_frames,
                              progress_callback):
+        """
+        CAM++ embedding extraction — CORRECT per WeSpeaker paper.
+
+        Nguyên tắc cốt lõi: CAM++ được train trên CONTINUOUS speech segments.
+        → Phải feed contiguous fbank blocks, KHÔNG được scatter/filter frames.
+
+        Approach:
+          1. Compute global fbank một lần (no CMVN)
+          2. Per (chunk, speaker): tìm CONTIGUOUS active regions trong seg-frame space
+          3. Với mỗi region >= min_seg_frames:
+             a. all_raw_frames[fb_start:fb_end]  — contiguous block, không bỏ frame nào
+             b. CMVN trên đúng speaker's audio (không nhiễm speaker kia)
+             c. Inference B=1, T=region_length (không zero-pad → không pooling noise)
+             d. L2 normalize output
+          4. Average embeddings từ nhiều regions → 1 embedding per (chunk, speaker)
+
+        Khác biệt then chốt so với masked-fbank (SAI):
+          WRONG: fbank[active_mask]          → scatter non-adjacent frames, discontinuous
+          RIGHT: fbank[fb_start:fb_end]      → continuous block, natural speech ✓
+        """
         num_chunks = binarized.shape[0]
-        total_samples = len(audio)
-        embeddings = np.full((num_chunks, MAX_SPEAKERS_PER_CHUNK, 256),
+        EMB_DIM = 512
+        embeddings = np.full((num_chunks, MAX_SPEAKERS_PER_CHUNK, EMB_DIM),
                              np.nan, dtype=np.float32)
 
-        if self.emb_W is None:
-            # Fallback: no encoder-only model
-            for c in range(num_chunks):
-                cs = chunk_starts[c]
-                ce = min(cs + CHUNK_SAMPLES, total_samples)
-                ca = audio[cs:ce]
-                if len(ca) < CHUNK_SAMPLES:
-                    ca = np.pad(ca, (0, CHUNK_SAMPLES - len(ca)))
-                fbank = compute_emb_fbank(ca, SAMPLE_RATE)
-                for s in range(MAX_SPEAKERS_PER_CHUNK):
-                    mask = binarized[c, :, s]
-                    cm = clean_binarized[c, :, s]
-                    um = cm if cm.sum() > min_seg_frames else mask
-                    if um.sum() < 1:
-                        continue
-                    fb_idx = np.floor(np.arange(fbank.shape[0]) * num_seg_frames / fbank.shape[0]).astype(int)
-                    fb_idx = np.clip(fb_idx, 0, num_seg_frames - 1)
-                    mfb = fbank[um[fb_idx] > 0.5]
-                    if mfb.shape[0] < 9:
-                        continue
-                    embeddings[c, s, :] = self.emb_sess.run(None, {"fbank_features": mfb[np.newaxis]})[0][0]
-            return embeddings
-
-        emb_W, emb_b = self.emb_W, self.emb_b
-        frames_per_chunk = int(CHUNK_DURATION * 1000 / 10) - 2  # 998 for 10s
-
-        # --- 1. Single-stream fbank (numpy direct, không .tolist()) ---
+        # --- 1. Compute global fbank (no CMVN — applied per-region below) ---
         import kaldi_native_fbank as knf
         compute_emb_fbank(np.zeros(1600, dtype=np.float32), SAMPLE_RATE)
 
         scaled = audio * np.float32(32768.0)
         fb = knf.OnlineFbank(_knf_emb_opts)
-        fb.accept_waveform(SAMPLE_RATE, scaled)  # numpy direct — không tạo Python list
-        del scaled  # giải phóng ngay
-        # Pad cuối (thay vì np.pad toàn bộ audio trước)
+        fb.accept_waveform(SAMPLE_RATE, scaled)
+        del scaled
         fb.accept_waveform(SAMPLE_RATE, np.zeros(CHUNK_SAMPLES, dtype=np.float32))
         fb.input_finished()
         n_total_frames = fb.num_frames_ready
         all_raw_frames = np.empty((n_total_frames, 80), dtype=np.float32)
         for i in range(n_total_frames):
             all_raw_frames[i] = fb.get_frame(i)
-        del fb  # giải phóng C++ internal buffer (~230MB cho 2hr)
+        del fb
 
-        # --- 2. Batched: windowing + encoder + pooling (streamed per-batch) ---
         frame_shift_samples = int(SAMPLE_RATE * 0.01)  # 160
-        batch_size = 64  # tăng từ 32 → giảm số batch iterations
-        io_binding = self.emb_sess.io_binding()
-        out_name = self.emb_sess.get_outputs()[0].name
-        feat_idx = None  # lazy compute ở batch đầu
+        frames_per_chunk = int(CHUNK_DURATION * 1000 / 10) - 2  # 998 for 10s
+        all_fbank_starts = np.asarray(chunk_starts) // frame_shift_samples
 
-        for b_start in range(0, num_chunks, batch_size):
-            b_end = min(b_start + batch_size, num_chunks)
-            bs = b_end - b_start
+        # seg_frame → fbank_frame (relative, 0-based within chunk)
+        # seg_f ∈ [0, num_seg_frames] → fbank_f ∈ [0, frames_per_chunk]
+        seg_to_fbank_rel = np.round(
+            np.arange(num_seg_frames + 1) * frames_per_chunk / num_seg_frames
+        ).astype(int)
+        seg_to_fbank_rel = np.clip(seg_to_fbank_rel, 0, frames_per_chunk)
 
-            # Windowing: extract fbank per batch từ all_raw_frames + CMVN
-            batch_fbanks = np.zeros((bs, frames_per_chunk, 80), dtype=np.float32)
-            for i, c in enumerate(range(b_start, b_end)):
-                fbank_start = chunk_starts[c] // frame_shift_samples
-                fbank_end = min(fbank_start + frames_per_chunk, n_total_frames)
-                n = fbank_end - fbank_start
-                if n > 0:
-                    batch_fbanks[i, :n] = all_raw_frames[fbank_start:fbank_end]
-                batch_fbanks[i] -= batch_fbanks[i].mean(axis=0, keepdims=True)
+        out_name = self.emb_sess.get_outputs()[0].name  # 'embs'
+        done = 0
+        total_items = num_chunks * MAX_SPEAKERS_PER_CHUNK
 
-            # Encoder inference
-            io_binding.bind_cpu_input("fbank_features", batch_fbanks)
-            io_binding.bind_output(out_name)
-            self.emb_sess.run_with_iobinding(io_binding)
-            out = io_binding.get_outputs()[0].numpy()
+        # --- 2. Per (chunk, speaker): contiguous region extraction ---
+        for c in range(num_chunks):
+            fbank_chunk_start = int(all_fbank_starts[c])
 
-            # Lazy compute feat_idx (1 lần duy nhất)
-            if feat_idx is None:
-                n_feat_frames = out[0].shape[1]
-                feat_idx = np.floor(
-                    np.arange(n_feat_frames) * num_seg_frames / n_feat_frames
-                ).astype(int)
-                feat_idx = np.clip(feat_idx, 0, num_seg_frames - 1)
+            for s in range(MAX_SPEAKERS_PER_CHUNK):
+                # Prefer clean (non-overlap) activity; fallback to full mask
+                cm = clean_binarized[c, :, s]
+                activity = cm if cm.sum() > min_seg_frames else binarized[c, :, s]
 
-            # Masked pooling + Gemm NGAY (không lưu all_frame_feats)
-            for i, c in enumerate(range(b_start, b_end)):
-                frame_feat = out[i]
-                for s in range(MAX_SPEAKERS_PER_CHUNK):
-                    mask = binarized[c, :, s]
-                    cm = clean_binarized[c, :, s]
-                    used_mask = cm if cm.sum() > min_seg_frames else mask
-                    weights = used_mask[feat_idx].astype(np.float32)
+                # Find contiguous active regions — vectorized O(N)
+                act_i8 = (activity > 0.5).astype(np.int8)
+                padded = np.empty(len(act_i8) + 2, dtype=np.int16)
+                padded[0] = 0
+                padded[1:-1] = act_i8
+                padded[-1] = 0
+                d = np.diff(padded)
+                region_starts_sf = np.where(d == 1)[0]   # inclusive seg frame
+                region_ends_sf   = np.where(d == -1)[0]  # exclusive seg frame
 
-                    w = weights[np.newaxis, :]
-                    v1 = w.sum() + 1e-8
-                    mean = (frame_feat * w).sum(axis=1) / v1
-                    dx2 = (frame_feat - mean[:, np.newaxis]) ** 2
-                    v2 = (w * w).sum()
-                    var = (dx2 * w).sum(axis=1) / (v1 - v2 / v1 + 1e-8)
-                    std = np.sqrt(var)
-                    stats = np.concatenate([mean, std])
-                    embeddings[c, s, :] = stats @ emb_W.T + emb_b
+                # Keep only regions long enough for reliable CAM++ embedding
+                valid = (region_ends_sf - region_starts_sf) >= min_seg_frames
+                region_starts_sf = region_starts_sf[valid]
+                region_ends_sf   = region_ends_sf[valid]
 
-            if progress_callback:
-                progress_callback(25 + int(b_end / num_chunks * 60), 100)
+                if len(region_starts_sf) == 0:
+                    done += 1
+                    continue
+
+                # For each valid region: extract CONTIGUOUS fbank, embed, normalize
+                region_embs = []
+                for rs, re in zip(region_starts_sf, region_ends_sf):
+                    # Map seg frames → absolute fbank frame indices
+                    fb_abs_start = fbank_chunk_start + int(seg_to_fbank_rel[rs])
+                    fb_abs_end   = fbank_chunk_start + int(seg_to_fbank_rel[re])
+                    fb_abs_start = max(0, fb_abs_start)
+                    fb_abs_end   = min(n_total_frames, fb_abs_end)
+                    if fb_abs_end - fb_abs_start < 10:
+                        continue
+
+                    # ★ Extract CONTIGUOUS fbank block (no scatter, no masking)
+                    region_fbank = all_raw_frames[fb_abs_start:fb_abs_end].copy()
+
+                    # Per-region CMVN: only this speaker's audio, no other-speaker bias
+                    region_fbank -= region_fbank.mean(axis=0, keepdims=True)
+
+                    # B=1, T=actual (no zero-padding → no pooling contamination)
+                    emb = self.emb_sess.run(
+                        [out_name], {"feats": region_fbank[np.newaxis]}
+                    )[0][0]  # (512,)
+
+                    # L2 normalize (WeSpeaker uses cosine-distance)
+                    norm = np.linalg.norm(emb)
+                    if norm > 1e-10:
+                        emb = emb / norm
+                    region_embs.append(emb)
+
+                if region_embs:
+                    # Spherical mean of multiple region embeddings
+                    avg = np.mean(region_embs, axis=0)
+                    norm = np.linalg.norm(avg)
+                    if norm > 1e-10:
+                        avg = avg / norm
+                    embeddings[c, s] = avg
+
+                done += 1
+                if progress_callback and done % 50 == 0:
+                    progress_callback(25 + int(done / total_items * 60), 100)
+
+        del all_raw_frames
+        return embeddings
 
         del all_raw_frames, io_binding  # giải phóng
 
@@ -759,7 +746,7 @@ class PureOrtDiarizer:
 
     def _cluster(self, all_embeddings, train_mask, segmentations,
                   max_clusters=None):
-        """Exact replication of pyannote VBxClustering.__call__.
+        """AHC initial clustering + VBx cosine refinement.
         all_embeddings: (nc, 3, dim) — ALL embeddings (non-NaN for all speakers)
         train_mask: (nc, 3) bool — filter_embeddings result for VBx training
         segmentations: (nc, frames, 3) — binarized segmentation for inactive detection
@@ -770,45 +757,46 @@ class PureOrtDiarizer:
         if len(train_emb) < 2:
             return np.zeros((num_chunks, num_speakers), dtype=np.int8)
 
-        # AHC on L2-normed train embeddings
+        # AHC on L2-normed train embeddings (initial labels for VBx)
         train_normed = train_emb / (np.linalg.norm(train_emb, axis=1, keepdims=True) + 1e-10)
         dendrogram = linkage(train_normed, method="centroid", metric="euclidean")
         ahc_labels = fcluster(dendrogram, self.threshold, criterion="distance") - 1
         _, ahc_labels = np.unique(ahc_labels, return_inverse=True)
 
-        # VBx
-        emb_tf = xvec_transform(train_emb, self.plda_data)
-        emb_plda = plda_transform(emb_tf, self.plda_data)
-        gamma, pi = vbx_cluster(emb_plda, self.plda_data['plda_psi'],
-                                 ahc_labels, Fa=self.Fa, Fb=self.Fb)
+        # Cap AHC clusters before VBx if max_clusters specified
+        if max_clusters and int(ahc_labels.max()) + 1 > max_clusters:
+            ahc_labels = np.where(ahc_labels >= max_clusters,
+                                  max_clusters - 1, ahc_labels)
+            _, ahc_labels = np.unique(ahc_labels, return_inverse=True)
 
-        # Soft centroids (pyannote: W.T @ train / W.sum)
-        active_spk = np.where(pi > 1e-7)[0]
-        if len(active_spk) == 0:
-            active_spk = np.array([0])
-        W = gamma[:, active_spk]
-        centroids = (W.T @ train_emb) / (W.sum(axis=0, keepdims=True).T + 1e-8)
+        # VBx cosine refinement on L2-normed train embeddings
+        gamma, pi = vbx_cosine(train_normed, ahc_labels, self.Fa, self.Fb)
+        vbx_labels = gamma.argmax(axis=1)
 
-        # Optional K-Means re-clustering
-        n_auto = centroids.shape[0]
-        min_cl = max_clusters if max_clusters else 1
-        max_cl = max_clusters if max_clusters else num_chunks * num_speakers
-        if max_clusters and n_auto > max_cl:
-            from sklearn.cluster import KMeans
-            km = KMeans(n_clusters=max_cl, n_init=3, random_state=42, copy_x=False)
-            km.fit_predict(train_normed)
-            centroids = np.vstack([
-                train_emb[km.labels_ == k].mean(axis=0) for k in range(max_cl)])
+        n_clusters = int(vbx_labels.max()) + 1
+
+        # Centroids from VBx posteriors (weighted mean, L2-normalized)
+        centroids_raw = np.vstack([
+            train_normed[vbx_labels == k].mean(axis=0)
+            if (vbx_labels == k).any()
+            else np.zeros(dimension)
+            for k in range(n_clusters)
+        ])
+        centroid_norms = np.linalg.norm(centroids_raw, axis=1, keepdims=True)
+        centroids = centroids_raw / (centroid_norms + 1e-10)
 
         # Save centroids for later speaker verification (gap words)
         self.speaker_centroids = centroids.copy()
 
-        # Distance ALL embeddings → centroids (pyannote: rearrange + cdist)
-        flat_emb = all_embeddings.reshape(-1, dimension)  # (nc*3, dim)
+        # Distance ALL embeddings → centroids (cosine on unit sphere)
+        flat_emb = all_embeddings.reshape(-1, dimension)
         e2k_dist = cdist(flat_emb, centroids, metric="cosine")
         soft_clusters = (2.0 - e2k_dist).reshape(num_chunks, num_speakers, -1)
 
         # Suppress inactive speakers (pyannote: segmentations.data.sum(1)==0)
+        nan_mask = np.isnan(soft_clusters)
+        if nan_mask.any():
+            soft_clusters = np.where(nan_mask, -1e9, soft_clusters)
         const = soft_clusters.min() - 1.0
         inactive = segmentations.sum(axis=1) == 0  # (nc, 3)
         soft_clusters[inactive] = const

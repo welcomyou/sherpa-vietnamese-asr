@@ -3,10 +3,13 @@ Tu sinh HTTPS self-signed certificate.
 """
 
 import os
+import logging
 import datetime
 import ipaddress
 
 from web_service.config import CERTS_DIR
+
+logger = logging.getLogger("asr.ssl")
 
 
 def ensure_ssl_certs(cert_dir: str = None) -> tuple:
@@ -24,16 +27,16 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
     custom_cert = os.path.join(cert_dir, "custom.crt")
     custom_key = os.path.join(cert_dir, "custom.key")
     if os.path.exists(custom_cert) and os.path.exists(custom_key):
-        print("[SSL] Using custom certificate")
+        logger.info("[SSL] Using custom certificate")
         return custom_cert, custom_key
 
     # Da co self-signed cert
     if os.path.exists(cert_file) and os.path.exists(key_file):
-        print("[SSL] Using existing self-signed certificate")
+        logger.info("[SSL] Using existing self-signed certificate")
         return cert_file, key_file
 
     # Tu sinh
-    print("[SSL] Generating self-signed certificate...")
+    logger.info("[SSL] Generating self-signed certificate...")
     os.makedirs(cert_dir, exist_ok=True)
 
     from cryptography import x509
@@ -97,5 +100,5 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
     with open(cert_file, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-    print(f"[SSL] Certificate generated: {cert_file}")
+    logger.info(f"[SSL] Certificate generated: {cert_file}")
     return cert_file, key_file

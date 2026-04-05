@@ -12,7 +12,7 @@ import re
 
 
 class ImprovedPunctuationRestorer:
-    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu", case_confidence=0.0):
+    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu", case_confidence=0.0, prefer_int8=False):
         self.device = device
         self.model_name = model_name
         self.confidence = confidence
@@ -21,7 +21,9 @@ class ImprovedPunctuationRestorer:
         vocab_path = os.path.join(base_dir, "vocabulary")
 
         img_model_path = os.path.join(base_dir, "models", "vibert-capu")
-        if os.path.exists(img_model_path) and os.path.exists(os.path.join(img_model_path, "vibert-capu.onnx")):
+        int8_exists = os.path.exists(os.path.join(img_model_path, "vibert-capu.int8.onnx"))
+        fp32_exists = os.path.exists(os.path.join(img_model_path, "vibert-capu.onnx"))
+        if os.path.exists(img_model_path) and (fp32_exists or int8_exists):
             model_to_load = img_model_path
         else:
             model_to_load = self.model_name
@@ -39,7 +41,8 @@ class ImprovedPunctuationRestorer:
             iterations=3,
             device=device,
             confidence=confidence,
-            case_confidence=case_confidence
+            case_confidence=case_confidence,
+            prefer_int8=prefer_int8,
         )
 
     def restore(self, text, progress_callback=None, pause_hints=None):

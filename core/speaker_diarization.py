@@ -1,4 +1,10 @@
 """
+[DEPRECATED - KHÔNG DÙNG TRONG PRODUCTION]
+Lý do: NeMo TitaNet Small chậm hơn và kém chính xác hơn so với
+  speaker_diarization_pure_ort.py (ResNet34-LM + VBx + PLDA).
+  Segmentation 3.0 cũng kém hơn community-1 segmentation.
+Dùng thay thế: core/speaker_diarization_pure_ort.py
+
 Người nói Diarization module using sherpa-onnx
 Based on: https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/models.html
 
@@ -92,15 +98,37 @@ def _setup_ffmpeg_path():
 # Speaker embedding model registry
 SPEAKER_EMBEDDING_MODELS = {
     "community1_pure_ort": {
-        "name": "Community-1 ONNX (Pure ORT)",
-        "file": "community1_pure_ort",  # Special marker
+        "name": "Pyannote Community-1 (ResNet34-LM + PLDA + VBx)",
+        "file": "community1_pure_ort",
         "size": "~32 MB",
         "language": "Multilingual",
-        "speed": "Fastest",
+        "speed": "Chính xác nhất",
         "accuracy": "Excellent",
         "sample_rate": 16000,
-        "description": "Pyannote Community-1 via ONNX Runtime, no PyTorch dependency"
-    }
+        "description": "Pyannote Community-1 via ONNX Runtime — ResNet34-LM + PLDA + VBx, no PyTorch"
+    },
+    "3dspeaker_campp": {
+        "name": "3D-Speaker CAM++ 192-dim (Spectral Clustering)",
+        "file": "3dspeaker_campp",
+        "size": "~28 MB",
+        "language": "Multilingual (ZH+EN)",
+        "speed": "Nhanh gấp 5-6x",
+        "accuracy": "Tốt",
+        "sample_rate": 16000,
+        "has_threshold": False,  # spectral clustering tự detect, không dùng threshold
+        "description": "3D-Speaker pipeline — CAM++ 192-dim + Silero VAD + spectral clustering (arXiv 2403.19971)"
+    },
+    "3dspeaker_ecapa": {
+        "name": "ECAPA-TDNN 192-dim (Spectral Clustering)",
+        "file": "3dspeaker_ecapa",
+        "size": "~25 MB",
+        "language": "Multilingual (EN)",
+        "speed": "Nhanh gấp 8x",
+        "accuracy": "Tốt",
+        "sample_rate": 16000,
+        "has_threshold": False,
+        "description": "SpeechBrain pipeline — ECAPA-TDNN 192-dim + Silero VAD + spectral clustering (Interspeech 2021)"
+    },
 }
 
 
@@ -125,6 +153,16 @@ def get_available_models(base_dir: str = None) -> Dict[str, str]:
             enc_path = os.path.join(onnx_model_dir, "embedding_encoder.onnx")
             if os.path.exists(seg_path) and (os.path.exists(emb_path) or os.path.exists(enc_path)):
                 available[model_id] = "pure_ort"
+        elif model_id == "3dspeaker_campp":
+            campp_path = os.path.join(base_dir, "models", "campp-3dspeaker", "campplus_cn_en_common_200k.onnx")
+            vad_path = os.path.join(base_dir, "models", "silero-vad", "silero_vad_16k_op15.onnx")
+            if os.path.exists(campp_path) and os.path.exists(vad_path):
+                available[model_id] = "3dspeaker_campp"
+        elif model_id == "3dspeaker_ecapa":
+            ecapa_path = os.path.join(base_dir, "models", "ecapa-wespeaker", "voxceleb_ECAPA512_LM.onnx")
+            vad_path = os.path.join(base_dir, "models", "silero-vad", "silero_vad_16k_op15.onnx")
+            if os.path.exists(ecapa_path) and os.path.exists(vad_path):
+                available[model_id] = "3dspeaker_ecapa"
         else:
             model_path = os.path.join(models_dir, info["file"])
             if os.path.exists(model_path):
@@ -327,6 +365,8 @@ class SpeakerDiarizer:
     # Default thresholds for each model
     MODEL_DEFAULT_THRESHOLDS = {
         "community1_pure_ort": 0.7,
+        "3dspeaker_campp": 0.5,
+        "3dspeaker_ecapa": 0.5,
     }
 
     @classmethod
@@ -335,9 +375,40 @@ class SpeakerDiarizer:
         return cls.MODEL_DEFAULT_THRESHOLDS.get(model_id, 0.7)
 
     def initialize(self):
-        """Initialize Pure ORT speaker diarization"""
-        self._init_pure_ort()
-    
+        """Initialize speaker diarization backend based on embedding_model_id"""
+        if self.embedding_model_id == "campp_pure_ort":
+            self._init_campp()
+        else:
+            self._init_pure_ort()
+
+    def _init_campp(self):
+        """Initialize CAM++ Pure ORT backend (2.5× faster than ResNet34)"""
+        try:
+            from core.speaker_diarization_pure_ort_campp import PureOrtDiarizerCampp
+        except ImportError as e:
+            raise RuntimeError(
+                f"CAM++ Pure ORT diarizer not available: {e}\n"
+                "Install with: pip install onnxruntime scipy kaldi-native-fbank"
+            )
+
+        num_spk = self.num_clusters if self.num_clusters > 0 else -1
+        max_spk = None
+        if self.num_clusters > 0:
+            max_spk = self.num_clusters + 1
+            print(f"[SpeakerDiarizer] CAM++: User selected {self.num_clusters} speakers -> max={max_spk}")
+        else:
+            print(f"[SpeakerDiarizer] CAM++: Auto-detect speakers")
+
+        self._pyannote_backend = PureOrtDiarizerCampp(
+            num_threads=self.num_threads,
+            threshold=self.threshold,
+            min_duration_off=self.min_duration_off,
+            num_speakers=num_spk,
+            max_speakers=max_spk,
+        )
+        self._pyannote_backend.initialize()
+        self.model_info = get_model_info("campp_pure_ort")
+
     def _init_pure_ort(self):
         """Initialize Pure ORT backend (no PyTorch/pyannote dependency)"""
         try:
@@ -371,14 +442,21 @@ class SpeakerDiarizer:
                 audio_file: str,
                 progress_callback: Optional[Callable[[int, int], int]] = None,
                 audio_data: Optional[np.ndarray] = None,
-                audio_sample_rate: Optional[int] = None) -> List[Segment]:
-        """Perform speaker diarization on audio file"""
+                audio_sample_rate: Optional[int] = None,
+                asr_words: List[Dict] = None) -> List[Segment]:
+        """Perform speaker diarization on audio file
+
+        Args:
+            asr_words: word-level timestamps từ ASR (optional). Nếu có,
+                       NaturalTurn dùng word count để classify backchannel
+                       chính xác hơn (duration < 0.8s VÀ word_count <= 3).
+        """
         SpeakerDiarizer._call_count += 1
 
         if self._pyannote_backend is None:
             self.initialize()
 
-        return self._process_pyannote(audio_file, progress_callback, audio_data, audio_sample_rate)
+        return self._process_pyannote(audio_file, progress_callback, audio_data, audio_sample_rate, asr_words)
 
     def _clip_segments_to_speech(self, segments: List[Segment],
                                  audio: np.ndarray, sample_rate: int) -> List[Segment]:
@@ -425,87 +503,20 @@ class SpeakerDiarizer:
 
         return clipped if clipped else segments
 
-    def _merge_short_islands(self, segments: List[Segment], max_short_duration: float = 1.5) -> List[Segment]:
-        """
-        Gộp các đoạn ngắn (< max_short_duration) nằm giữa cùng 1 người nói.
-        Pattern: SpkA -> [SpkX(<1.5s)] -> [SpkY(<1.5s)] -> ... -> SpkA
-        → Gộp tất cả vào SpkA
-        """
-        if len(segments) < 3:
-            return segments
-            
-        n = len(segments)
-        to_skip = set()
-        
-        i = 0
-        while i < n:
-            if i in to_skip:
-                i += 1
-                continue
-                
-            spk_a = segments[i].speaker
-            
-            # Tìm chuỗi các đoạn ngắn liên tiếp phía sau
-            j = i + 1
-            short_segments_indices = []
-            
-            while j < n:
-                if segments[j].duration < max_short_duration:
-                    short_segments_indices.append(j)
-                    j += 1
-                else:
-                    break
-            
-            # Nếu sau chuỗi ngắn là SpkA, đánh dấu gộp
-            if short_segments_indices and j < n:
-                if segments[j].speaker == spk_a:
-                    for idx in short_segments_indices:
-                        to_skip.add(idx)
-                    # j là đoạn SpkA kết thúc chuỗi, ta sẽ xử lý tiếp từ j
-                    i = j
-                    continue
-            
-            i += 1
-            
-        # Tạo kết quả cuối cùng
-        result = []
-        i = 0
-        while i < n:
-            if i in to_skip:
-                i += 1
-                continue
-                
-            current = segments[i]
-            
-            # Kiểm tra xem có chuỗi gộp bắt đầu từ đây không
-            if i + 1 < n and (i + 1) in to_skip:
-                j = i + 1
-                while j < n and j in to_skip:
-                    j += 1
-                
-                # j là đoạn SpkA tiếp theo
-                if j < n and segments[j].speaker == current.speaker:
-                    # Tạo segment mới kéo dài từ đầu SpkA này đến hết SpkA kia
-                    current = Segment(start=current.start, end=segments[j].end, speaker=current.speaker)
-                    i = j + 1
-                    result.append(current)
-                    continue
-            
-            result.append(current)
-            i += 1
-            
-        return result
-    
-    def _post_process_diarization_segments(self, segments: List[Segment]) -> List[Segment]:
+    def _post_process_diarization_segments(self, segments: List[Segment],
+                                           asr_words: List[Dict] = None) -> List[Segment]:
         """
         Post-processing cho exclusive_speaker_diarization trước khi dùng cho ASR.
-        Áp dụng cho ONNX path (PyTorch đã tự xử lý trong Community1Diarizer).
 
         Thứ tự:
-        1. Merge adjacent + small gaps (0.3s)
-        2. Smooth A-B-A với ngưỡng 0.5s
-        3. Reassign cực ngắn (<0.2s)
+        1. Merge adjacent + small gaps (0.3s) cùng speaker
+        2. Resolve fragment zones (nhiều segment ngắn xen kẽ → dominant speaker)
+        3. NaturalTurn: xác định floor-holder, gộp secondary speech vào primary
         4. Final merge
+
+        Args:
+            asr_words: word-level timestamps từ ASR (optional, nếu có sẽ dùng
+                       word count để classify backchannel chính xác hơn)
         """
         if not segments:
             return segments
@@ -515,20 +526,158 @@ class SpeakerDiarizer:
         # 1. Merge đoạn liền kề + gap nhỏ (0.3s) cùng speaker
         segments = self._merge_segments_with_gap(segments, max_gap=0.3)
 
-        # 2. Smooth A-B-A với ngưỡng 0.5s
-        segments = self._smooth_aba_segments(segments, max_middle_duration=0.5)
+        # 2. Resolve fragment zones: vùng nhiều segment ngắn xen kẽ → dominant speaker
+        segments = self._resolve_fragment_zones(segments, short_thresh=0.5, min_zone_size=3)
 
-        # 3. Reassign segment cực ngắn (<0.2s) vào neighbor
-        segments = self._reassign_short(segments, min_duration=0.3)
+        # 3. NaturalTurn: floor-holding detection + secondary speech absorption
+        if self.merge_short_speaker:
+            segments = self._natural_turn_merge(segments, max_pause=1.5, asr_words=asr_words)
 
-        # 4. Final merge sau khi smooth
-        segments = self._merge_segments_with_gap(segments, max_gap=0.0)
+        # 4. Final merge
+        segments = self._merge_segments_with_gap(segments, max_gap=0.3)
 
         final_count = len(segments)
         if final_count < original_count:
-            print(f"[SpeakerDiarizer] Post-process ASR: {original_count} -> {final_count} segments")
+            print(f"[SpeakerDiarizer] Post-process: {original_count} -> {final_count} segments")
 
         return segments
+
+    def _natural_turn_merge(self, segments: List[Segment], max_pause: float = 1.5,
+                            asr_words: List[Dict] = None) -> List[Segment]:
+        """
+        NaturalTurn algorithm (Cychosz et al., Scientific Reports 2025).
+
+        Xác định ai đang "giữ sàn" (floor-holder) dựa trên timing,
+        rồi gộp secondary speech (backchannel, nói chêm) vào primary turn.
+
+        Thuật toán 4 bước (theo paper):
+          1. Per speaker: collapse segments có gap < max_pause thành "turns"
+             (speaker tiếp tục giữ floor qua pause ngắn)
+          2. Sort tất cả turns theo thời gian, nếu turn T2 nằm HOÀN TOÀN
+             bên trong boundary của turn T1 → T2 là secondary
+          3. Classify secondary: BACKCHANNEL nếu (duration < 0.8s VÀ word_count <= 3),
+             ngược lại SECONDARY_TURN (giữ nguyên, phản hồi có nội dung)
+             Nếu có asr_words → đếm word count chính xác
+             Nếu không → dùng duration-only (pre-ASR fallback)
+          4. Gán lại segments: chỉ BACKCHANNEL → speaker của primary turn
+
+        Ví dụ (max_pause=1.5s):
+          A(0-10s) → B(10.5-11s) → A(11.5-20s)
+          Step 1: A turn = [0-20s] (gap 1.5s < max_pause), B turn = [10.5-11s]
+          Step 2: B turn [10.5-11s] nằm trong A turn [0-20s] → secondary
+          Step 3: B segment gán lại thành A → output A(0-20s)
+
+        Paper: https://www.nature.com/articles/s41598-025-24381-1
+        """
+        if len(segments) < 3:
+            return segments
+
+        sorted_segs = sorted(segments, key=lambda s: s.start)
+
+        # === Step 1: Build virtual turns per speaker ===
+        # Collapse segments cùng speaker có gap < max_pause thành 1 turn
+        speakers = set(s.speaker for s in sorted_segs)
+        turns = []  # list of (turn_start, turn_end, speaker, [segment_indices])
+
+        for spk in speakers:
+            spk_indices = [i for i, s in enumerate(sorted_segs) if s.speaker == spk]
+            if not spk_indices:
+                continue
+
+            # Start first turn
+            turn_start = sorted_segs[spk_indices[0]].start
+            turn_end = sorted_segs[spk_indices[0]].end
+            turn_seg_indices = [spk_indices[0]]
+
+            for k in range(1, len(spk_indices)):
+                idx = spk_indices[k]
+                gap = sorted_segs[idx].start - turn_end
+                if gap < max_pause:
+                    # Same turn: extend boundary
+                    turn_end = max(turn_end, sorted_segs[idx].end)
+                    turn_seg_indices.append(idx)
+                else:
+                    # New turn: save current, start new
+                    turns.append((turn_start, turn_end, spk, turn_seg_indices))
+                    turn_start = sorted_segs[idx].start
+                    turn_end = sorted_segs[idx].end
+                    turn_seg_indices = [idx]
+
+            turns.append((turn_start, turn_end, spk, turn_seg_indices))
+
+        # Sort turns by start time
+        turns.sort(key=lambda t: t[0])
+
+        # === Step 2: Label primary vs secondary ===
+        # Turn T2 nằm hoàn toàn trong T1 → T2 là secondary
+        n_turns = len(turns)
+        is_secondary = [False] * n_turns
+        primary_of = [None] * n_turns  # secondary turn i thuộc primary turn nào
+
+        for i in range(n_turns):
+            if is_secondary[i]:
+                continue
+            t1_start, t1_end, t1_spk, _ = turns[i]
+            for j in range(i + 1, n_turns):
+                if is_secondary[j]:
+                    continue
+                t2_start, t2_end, t2_spk, _ = turns[j]
+                # T2 bắt đầu sau T1 kết thúc → không còn overlap
+                if t2_start >= t1_end:
+                    break
+                # T2 nằm hoàn toàn trong T1 và khác speaker
+                if t2_end <= t1_end and t2_spk != t1_spk:
+                    is_secondary[j] = True
+                    primary_of[j] = i
+
+        # === Step 3: Classify + Reassign secondary turns ===
+        # Paper: BACKCHANNEL nếu word_count <= 3 + match backchannel cues
+        # Implementation: duration < 0.8s VÀ word_count <= 3 (nếu có ASR text)
+        max_backchannel_dur = 0.8
+        backchannel_word_max = 3
+
+        def _count_words_in_range(start, end):
+            """Đếm số ASR words có timestamp rơi vào [start, end]."""
+            if not asr_words:
+                return None  # không có text → trả None
+            count = 0
+            for w in asr_words:
+                w_mid = (w.get("start", 0) + w.get("end", 0)) / 2
+                if start <= w_mid <= end:
+                    count += 1
+            return count
+
+        reassign = {}
+        for j in range(n_turns):
+            if is_secondary[j] and primary_of[j] is not None:
+                t2_start, t2_end, _, _ = turns[j]
+                turn_dur = t2_end - t2_start
+
+                # Check duration
+                if turn_dur >= max_backchannel_dur:
+                    continue  # quá dài → SECONDARY_TURN
+
+                # Check word count (nếu có ASR text)
+                wc = _count_words_in_range(t2_start, t2_end)
+                if wc is not None and wc > backchannel_word_max:
+                    continue  # > 3 từ → nói nhanh nhưng có nội dung
+
+                # BACKCHANNEL: duration < 0.8s VÀ (word_count <= 3 hoặc không có text)
+                primary_spk = turns[primary_of[j]][2]
+                for seg_idx in turns[j][3]:
+                    reassign[seg_idx] = primary_spk
+
+        # Build result
+        result = []
+        for i, seg in enumerate(sorted_segs):
+            new_spk = reassign.get(i, seg.speaker)
+            result.append(Segment(start=seg.start, end=seg.end, speaker=new_spk))
+
+        # Merge adjacent same-speaker segments tạo bởi reassignment
+        # Chỉ merge khi gần kề (gap < 0.5s) — tránh gộp quá mạnh
+        result = self._merge_segments_with_gap(result, max_gap=0.5)
+
+        return result
 
     def _merge_segments_with_gap(self, segments: List[Segment], max_gap: float = 0.3) -> List[Segment]:
         """Gộp các đoạn liền kề hoặc có gap nhỏ cùng speaker."""
@@ -548,76 +697,61 @@ class SpeakerDiarizer:
 
         return merged
 
-    def _smooth_aba_segments(self, segments: List[Segment], max_middle_duration: float = 0.5) -> List[Segment]:
-        """Loại bỏ chuyển đổi giả kiểu A-B-A. B < max_middle_duration → gộp vào A."""
-        if len(segments) < 3:
-            return segments
+    def _resolve_fragment_zones(self, segments: List[Segment],
+                                short_thresh: float = 0.5,
+                                min_zone_size: int = 3) -> List[Segment]:
+        """
+        Phát hiện vùng fragment (nhiều segment ngắn xen kẽ) và gán toàn bộ
+        cho speaker dominant (tổng duration lớn nhất) trong vùng đó.
 
-        smoothed = list(segments)
-        changes_made = True
-        iterations = 0
+        Tránh cascade bug của reassign từng segment:
+          spk_01(0.05) → spk_02(0.03) → spk_01(0.07) → ...
+          → gán hết cho speaker có tổng duration lớn nhất trong vùng
 
-        while changes_made and iterations < 3:
-            changes_made = False
-            iterations += 1
-            new_smoothed = []
-            i = 0
-
-            while i < len(smoothed):
-                if i == 0 or i >= len(smoothed) - 1:
-                    new_smoothed.append(smoothed[i])
-                    i += 1
-                    continue
-
-                prev_seg = smoothed[i - 1]
-                cur_seg = smoothed[i]
-                next_seg = smoothed[i + 1]
-
-                if (cur_seg.duration <= max_middle_duration and
-                        prev_seg.speaker == next_seg.speaker and
-                        cur_seg.speaker != prev_seg.speaker):
-                    merged_seg = Segment(
-                        start=prev_seg.start, end=next_seg.end, speaker=prev_seg.speaker)
-                    if new_smoothed:
-                        new_smoothed[-1] = merged_seg
-                    else:
-                        new_smoothed.append(merged_seg)
-                    changes_made = True
-                    i += 2
-                else:
-                    new_smoothed.append(cur_seg)
-                    i += 1
-
-            smoothed = new_smoothed
-
-        return smoothed
-
-    def _reassign_short(self, segments: List[Segment], min_duration: float = 0.2) -> List[Segment]:
-        """Reassign segment cực ngắn vào speaker lân cận."""
-        if not segments:
+        Fragment zone = chuỗi liên tiếp >= min_zone_size segments có duration < short_thresh.
+        """
+        if len(segments) < min_zone_size:
             return segments
 
         result = []
         n = len(segments)
+        i = 0
 
-        for i, seg in enumerate(segments):
-            if seg.duration >= min_duration:
-                result.append(Segment(start=seg.start, end=seg.end, speaker=seg.speaker))
-                continue
+        while i < n:
+            # Tìm đầu fragment zone: segment ngắn
+            if segments[i].duration < short_thresh:
+                # Scan vùng liên tiếp các segment ngắn
+                j = i
+                while j < n and segments[j].duration < short_thresh:
+                    j += 1
 
-            prev_speaker = result[-1].speaker if result else None
-            next_speaker = segments[i + 1].speaker if i < n - 1 else None
+                zone_size = j - i
 
-            if prev_speaker is not None:
-                result[-1].end = seg.end
-            elif next_speaker is not None:
-                result.append(Segment(start=seg.start, end=seg.end, speaker=next_speaker))
-            else:
-                result.append(Segment(start=seg.start, end=seg.end, speaker=seg.speaker))
+                if zone_size >= min_zone_size:
+                    # Fragment zone: tính dominant speaker theo tổng duration
+                    spk_dur = {}
+                    for k in range(i, j):
+                        s = segments[k]
+                        spk_dur[s.speaker] = spk_dur.get(s.speaker, 0) + s.duration
+                    dominant_spk = max(spk_dur, key=spk_dur.get)
+
+                    # Gán toàn bộ zone cho dominant speaker
+                    zone_start = segments[i].start
+                    zone_end = segments[j - 1].end
+                    result.append(Segment(
+                        start=zone_start, end=zone_end, speaker=dominant_spk))
+                    i = j
+                    continue
+
+            result.append(Segment(
+                start=segments[i].start, end=segments[i].end,
+                speaker=segments[i].speaker))
+            i += 1
 
         return result
 
-    def _process_pyannote(self, audio_file, progress_callback, audio_data, audio_sample_rate):
+    def _process_pyannote(self, audio_file, progress_callback, audio_data, audio_sample_rate,
+                          asr_words=None):
         """Process using Pyannote/Community-1 ONNX backend"""
         # Call Pyannote backend
         result = self._pyannote_backend.process(
@@ -668,16 +802,9 @@ class SpeakerDiarizer:
                 )
                 segments.append(segment)
 
-        # Post-process: merge, smooth A-B-A, reassign short segments
+        # Post-process: merge gaps, gộp nói chêm, reassign short segments
         if segments:
-            segments = self._post_process_diarization_segments(segments)
-
-        # _clip_segments_to_speech đã bỏ: Fix 1,2,3 word-level xử lý boundary
-        # chính xác hơn, và clip tạo ra segments ngắn không mong muốn
-
-        # Post-processing: Merge short islands (< 1.5s) between same speaker
-        if segments and self.merge_short_speaker:
-            segments = self._merge_short_islands(segments, max_short_duration=1.5)
+            segments = self._post_process_diarization_segments(segments, asr_words=asr_words)
 
         if segments:
             num_speakers = max(s.speaker for s in segments) + 1
@@ -822,11 +949,8 @@ class SpeakerDiarizer:
                         dist_prev = w_start - prev_seg.end
                         dist_next = next_seg.start - w_start
                         if prev_seg.speaker != next_seg.speaker:
-                            # Speech continuity: trong 1 lượt nói, inter-word gap < 0.3s.
-                            # Nếu từ cách segment trước > 0.5s → speaker trước đã dừng
-                            # (turn-taking pause) → từ thuộc speaker sau.
-                            TURN_GAP_THRESHOLD = 0.5
-                            if dist_prev > TURN_GAP_THRESHOLD:
+                            # Khác speaker: gán cho speaker GẦN HƠN
+                            if dist_next <= dist_prev:
                                 w_spk_id = next_seg.speaker
                             else:
                                 w_spk_id = prev_seg.speaker
@@ -925,14 +1049,17 @@ class SpeakerDiarizer:
             for w in rw_b:
                 ws = w.get("start", 0)
                 if ws - last_end < SPEECH_CONT_GAP:
-                    # Chỉ move nếu word nằm trong segment gốc của spk_b
+                    # Chỉ move nếu word KHÔNG nằm trong segment gốc của spk_b
+                    # (word rơi vào gap hoặc thuộc segment spk_a → ASR cắt sai)
                     idx2 = _br(_orig_starts, ws) - 1
-                    if idx2 >= 0 and speaker_segments[idx2].start <= ws <= speaker_segments[idx2].end:
-                        if speaker_segments[idx2].speaker == spk_b:
-                            move_count += 1
-                            last_end = w.get("end", 0)
-                            continue
-                    break
+                    word_in_spk_b_seg = (idx2 >= 0
+                        and speaker_segments[idx2].start <= ws <= speaker_segments[idx2].end
+                        and speaker_segments[idx2].speaker == spk_b)
+                    if word_in_spk_b_seg:
+                        # Word đúng là của spk_b theo diarization → dừng, không move
+                        break
+                    move_count += 1
+                    last_end = w.get("end", 0)
                 else:
                     break
 
@@ -960,6 +1087,50 @@ class SpeakerDiarizer:
                 # Không tăng i — check segment tiếp theo
             else:
                 i += 1
+
+        # ── Fix trailing word at speaker boundary ──
+        # Khi ASR timestamp drift, word cuối segment A thực ra thuộc segment B.
+        # Pattern: word cuối A + word đầu B tạo thành cụm cố định (VD: "kính thưa",
+        # "xin mời", "xin chào") → chuyển word cuối A sang B.
+        # Tổng quát hơn: nếu word cuối A nằm NGOÀI diarization segment của A
+        # (timestamp > segment.end) → nên thuộc B.
+        i = 0
+        while i < len(results) - 1:
+            seg_a = results[i]
+            seg_b = results[i + 1]
+            spk_a = seg_a.get("speaker_id")
+            spk_b = seg_b.get("speaker_id")
+            rw_a = seg_a.get("raw_words", [])
+            rw_b = seg_b.get("raw_words", [])
+
+            if spk_a is None or spk_b is None or spk_a == spk_b or not rw_a or not rw_b:
+                i += 1
+                continue
+
+            # Check: word cuối A nằm ngoài diarization segment của A?
+            last_word = rw_a[-1]
+            lw_start = last_word.get("start", 0)
+
+            # Tìm diarization segment chứa last word
+            idx_lw = _br(_orig_starts, lw_start) - 1
+            word_in_spk_a = (idx_lw >= 0
+                and speaker_segments[idx_lw].start <= lw_start <= speaker_segments[idx_lw].end
+                and speaker_segments[idx_lw].speaker == spk_a)
+
+            if not word_in_spk_a and len(rw_a) > 1:
+                # Word cuối A không thuộc segment A → chuyển sang B
+                moved_word = rw_a.pop()
+                seg_a["end"] = rw_a[-1].get("end", seg_a["end"])
+                seg_a["text"] = " ".join(w.get("text", "") for w in rw_a)
+
+                rw_b.insert(0, moved_word)
+                seg_b["start"] = moved_word.get("start", seg_b["start"])
+                seg_b["raw_words"] = rw_b
+                seg_b["text"] = " ".join(w.get("text", "") for w in rw_b)
+                # Don't increment — check again
+                continue
+
+            i += 1
 
         return results
 
@@ -1165,6 +1336,65 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
 
     emit("PHASE:Diarization|Đang khởi tạo model|0")
 
+    # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
+    if speaker_model_id in ("3dspeaker_campp", "3dspeaker_ecapa"):
+        if speaker_model_id == "3dspeaker_campp":
+            from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
+            diarizer_3d = ThreeDSpeakerCamppDiarizer(
+                num_speakers=num_speakers, num_threads=num_threads)
+            label = "3D-Speaker CAM++"
+        else:
+            from core.speaker_diarization_3dspeaker_ecapa import ThreeDSpeakerEcapaDiarizer
+            diarizer_3d = ThreeDSpeakerEcapaDiarizer(
+                num_speakers=num_speakers, num_threads=num_threads)
+            label = "ECAPA-TDNN"
+        diarizer_3d.initialize()
+
+        emit(f"PHASE:Diarization|Đang phân tách Người nói ({label})|10")
+        raw_dict_segments = diarizer_3d.process(audio_file=audio_file)
+
+        speaker_segments_raw = [
+            {
+                "speaker": f"Người nói {seg['speaker'] + 1}",
+                "speaker_id": seg['speaker'],
+                "start": seg['start'],
+                "end": seg['end'],
+                "duration": seg['end'] - seg['start']
+            }
+            for seg in raw_dict_segments
+        ]
+
+        emit("PHASE:Diarization|Đang gán nhãn Người nói|90")
+
+        raw_segments = [Segment(s['start'], s['end'], s['speaker']) for s in raw_dict_segments]
+
+        # NaturalTurn + fragment zone post-processing (same as pyannote pipeline)
+        merger = SpeakerDiarizer(merge_short_speaker=True)
+        raw_segments = merger._post_process_diarization_segments(raw_segments)
+
+        # Update speaker_segments_raw with post-processed segments
+        speaker_segments_raw = [
+            {
+                "speaker": f"Người nói {seg.speaker + 1}",
+                "speaker_id": seg.speaker,
+                "start": seg.start,
+                "end": seg.end,
+                "duration": seg.duration
+            }
+            for seg in raw_segments
+        ]
+
+        results = merger.process_with_transcription(
+            audio_file=audio_file,
+            transcribed_segments=segments,
+            speaker_segments=raw_segments
+        )
+
+        elapsed = _time.time() - start_time
+        emit("PHASE:Diarization|Hoàn thành|100")
+        return speaker_segments_raw, elapsed, results
+
+    # --- Pyannote Community-1 pipeline (default) ---
     diarizer = SpeakerDiarizer(
         embedding_model_id=speaker_model_id,
         num_clusters=num_speakers,

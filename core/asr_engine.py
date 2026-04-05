@@ -18,6 +18,15 @@ from core.hotword_context import build_context_graph
 
 logger = logging.getLogger(__name__)
 
+# Safe print cho Windows console (tránh UnicodeEncodeError cp1252)
+_original_print = print
+def print(*args, **kwargs):
+    try:
+        _original_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        text = ' '.join(str(a) for a in args)
+        _original_print(text.encode('ascii', errors='replace').decode(), **kwargs)
+
 # =============================================================================
 # OVERLAP CHUNKING CONFIGURATION
 # =============================================================================
@@ -224,15 +233,18 @@ def merge_chunks_with_overlap(chunk_results, overlap_duration_sec=OVERLAP_SEC):
 
             merged_words.extend(remaining_words)
 
-    # Post-merge dedup: xóa n-gram lặp liên tiếp (hallucination hoặc overlap miss)
-    merged_words = remove_repeated_ngrams(merged_words)
-
     merged_text = " ".join([w["text"] for w in merged_words])
     return merged_words, merged_text
 
 
 def remove_repeated_ngrams(words, max_ngram=1, max_gap_sec=0.3):
     """
+    ⚠️ KHÔNG DÙNG HÀM NÀY - đã bị disable vì gây mất từ hợp lệ.
+
+    Hàm này xóa nhầm các từ lặp có chủ đích trong tiếng Việt, ví dụ:
+    - "một một bảy" → mất "một" (đọc số 117)
+    - "chiều chiều ra đứng bên bờ" → mất "chiều" (thơ/ca dao)
+
     Phát hiện và xóa n-gram lặp liên tiếp trong danh sách words.
 
     Ví dụ: "thành phố thành phố hồ chí minh" → "thành phố hồ chí minh"
@@ -460,7 +472,7 @@ def setup_ffmpeg_path():
             return
 
 
-def load_audio(file_path, sample_rate=16000, progress_callback=None):
+def load_audio(file_path, sample_rate=16000, progress_callback=None, res_type="soxr_hq"):
     """
     Load và chuẩn hóa audio file thành float32 array tại sample rate mong muốn.
 
@@ -468,6 +480,8 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None):
         file_path: Đường dẫn file audio/video
         sample_rate: Sample rate đích (mặc định 16000)
         progress_callback: callable(message) - callback báo tiến trình
+        res_type: librosa resample quality — "soxr_vhq" (web, chính xác nhất)
+                  hoặc "soxr_hq" (desktop, nhanh hơn, tiết kiệm RAM)
 
     Returns:
         numpy.ndarray - audio float32 array, mono, normalized
@@ -487,14 +501,14 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None):
 
     if file_ext in needs_conversion:
         try:
-            audio, sr = librosa.load(file_path, sr=sample_rate, mono=True, res_type="soxr_vhq")
+            audio, sr = librosa.load(file_path, sr=sample_rate, mono=True, res_type=res_type)
         except Exception:
             emit(f"Đang chuyển đổi {file_ext} sang wav")
             try:
                 from pydub import AudioSegment
                 setup_ffmpeg_path()
 
-                import tempfile
+                import io
                 format_map = {'.m4a': 'm4a', '.ogg': 'ogg', '.wma': 'wma', '.opus': 'opus'}
                 if file_ext in format_map:
                     audio_segment = AudioSegment.from_file(file_path, format=format_map[file_ext])
@@ -502,20 +516,29 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None):
                     audio_segment = AudioSegment.from_file(file_path)
 
                 audio_segment = audio_segment.set_channels(1)
-                tmp_fd, temp_wav = tempfile.mkstemp(suffix='.wav', prefix='asr_')
-                os.close(tmp_fd)
-                try:
-                    audio_segment.export(temp_wav, format='wav')
-                    audio, sr = librosa.load(temp_wav, sr=sample_rate, mono=True, res_type="soxr_vhq")
-                finally:
-                    if os.path.exists(temp_wav):
-                        os.remove(temp_wav)
+                # In-memory WAV: tránh ghi temp file ra disk (giảm disk I/O)
+                buf = io.BytesIO()
+                audio_segment.export(buf, format='wav')
+                buf.seek(0)
+                audio, sr = librosa.load(buf, sr=sample_rate, mono=True, res_type=res_type)
             except ImportError:
                 raise ImportError(f"Không thể đọc file {file_ext}. Vui lòng cài đặt pydub: pip install pydub")
             except Exception as e2:
                 raise Exception(f"Không thể đọc file {file_ext}. Đảm bảo đã cài ffmpeg: {e2}")
     else:
-        audio, sr = librosa.load(file_to_load, sr=sample_rate, mono=True, res_type="soxr_vhq")
+        # WAV/FLAC: dùng soundfile nếu đã đúng sample rate (tránh resample thừa)
+        import soundfile as sf
+        info = sf.info(file_to_load)
+        if info.samplerate == sample_rate and info.channels == 1:
+            # Đã đúng 16kHz mono — đọc trực tiếp, không qua librosa/soxr
+            audio, sr = sf.read(file_to_load, dtype='float32')
+        elif info.samplerate == sample_rate and info.channels > 1:
+            # Đúng sample rate nhưng stereo — đọc rồi trộn mono
+            audio, sr = sf.read(file_to_load, dtype='float32')
+            audio = audio.mean(axis=1)
+        else:
+            # Cần resample — dùng librosa + soxr
+            audio, sr = librosa.load(file_to_load, sr=sample_rate, mono=True, res_type=res_type)
 
     # Peak normalization
     peak = np.max(np.abs(audio))
@@ -718,7 +741,7 @@ def compute_fbank_ort(audio, sr=16000):
         _knf_opts.mel_opts.high_freq = 7600.0
         _knf_opts.energy_floor = 1.0
     fbank = knf.OnlineFbank(_knf_opts)
-    fbank.accept_waveform(sr, audio.tolist())
+    fbank.accept_waveform(sr, audio)
     fbank.input_finished()
     n = fbank.num_frames_ready
     features = np.empty((n, 80), dtype=np.float32)
@@ -777,7 +800,7 @@ def clear_model_cache(which="all"):
     gc.collect()
 
 
-def _get_cached_restorer(device, confidence, case_confidence):
+def _get_cached_restorer(device, confidence, case_confidence, prefer_int8=False):
     """Lấy PunctuationRestorer từ cache, cập nhật confidence per-request.
     Model BERT load 1 lần duy nhất. Confidence chỉ là threshold cộng vào
     logit sau softmax — đổi thoải mái mà không cần reload model.
@@ -794,7 +817,8 @@ def _get_cached_restorer(device, confidence, case_confidence):
 
     from core.punctuation_restorer_improved import ImprovedPunctuationRestorer
     _punct_restorer = ImprovedPunctuationRestorer(
-        device=device, confidence=confidence, case_confidence=case_confidence
+        device=device, confidence=confidence, case_confidence=case_confidence,
+        prefer_int8=prefer_int8,
     )
     logger.info(f"[ModelCache] Loaded new PunctuationRestorer "
                 f"(conf={confidence:.3f}, case={case_confidence:.3f})")
@@ -927,6 +951,9 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
     opts_enc.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     opts_enc.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts_enc.log_severity_level = 3
+    opts_enc.enable_cpu_mem_arena = False  # Tránh arena leak — save_ram sẽ unload session
+    # Cache optimized graph: lần 2+ load nhanh hơn, giảm disk I/O
+    opts_enc.optimized_model_filepath = encoder + ".opt"
 
     # Decoder/Joiner: Z//3 (benchmark: nhanh 7% vs 1 thread)
     dec_joi_threads = max(1, Z // 3)
@@ -935,7 +962,7 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
     opts_small.inter_op_num_threads = 1
     opts_small.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     opts_small.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    opts_small.enable_cpu_mem_arena = False
+    opts_small.enable_cpu_mem_arena = False  # Tiết kiệm RAM cho decoder/joiner (model nhỏ)
     opts_small.log_severity_level = 3
 
     enc_sess = ort.InferenceSession(encoder, opts_enc, providers=prov)
@@ -1864,8 +1891,31 @@ class TranscriberPipeline:
         self.progress_callback = progress_callback or (lambda msg: None)
         self.cancel_check = cancel_check or (lambda: False)
 
+    _last_phase = None
+    _phase_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.asr_phase')
+
     def _emit(self, msg):
         self.progress_callback(msg)
+        # Ghi phase ra file cho monitor (chỉ khi phase ĐỔI, tránh disk I/O thừa)
+        if msg.startswith("PHASE:"):
+            phase_name = msg.split("|")[0]
+            if phase_name != self._last_phase:
+                self._last_phase = phase_name
+                try:
+                    with open(self._phase_file, 'w', encoding='utf-8') as f:
+                        f.write(msg)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _cleanup_phase_file():
+        """Xóa file .asr_phase (khi bắt đầu hoặc kết thúc pipeline)."""
+        try:
+            pf = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.asr_phase')
+            if os.path.exists(pf):
+                os.remove(pf)
+        except OSError:
+            pass
 
     def _is_cancelled(self):
         return self.cancel_check()
@@ -1878,11 +1928,12 @@ class TranscriberPipeline:
             dict với keys: text, segments, timing, paragraphs,
                           has_speaker_diarization, speaker_segments_raw
         """
+        self._cleanup_phase_file()  # Xóa stale phase từ lần trước
+        self._last_phase = None
         try:
             return self._run_pipeline()
         finally:
-            # Đảm bảo giải phóng tất cả model nếu save_ram=True, dù pipeline lỗi
-            # (idempotent — nếu đã clear bên trong thì gọi lại không ảnh hưởng)
+            self._cleanup_phase_file()  # Xóa khi xong hoặc crash
             if self.config.get("save_ram", False):
                 try:
                     clear_model_cache("all")
@@ -1949,6 +2000,8 @@ class TranscriberPipeline:
 
             self._emit("PHASE:Init|Đang khởi tạo mô hình|30")
             recognizer = create_recognizer(self.model_path, cpu_threads)
+            # Clear decoder cache từ file trước (tránh tích lũy unbounded trong server mode)
+            recognizer['dec_cache'].clear()
             self._emit("PHASE:Init|Đang khởi tạo mô hình|60")
 
         # Load audio
@@ -1956,7 +2009,8 @@ class TranscriberPipeline:
         load_audio_start = time.time()
 
         self._emit("PHASE:LoadAudio|Đang chuẩn hóa audio|30")
-        audio = load_audio(self.file_path, progress_callback=lambda msg: self._emit(f"PHASE:LoadAudio|{msg}|35"))
+        audio = load_audio(self.file_path, progress_callback=lambda msg: self._emit(f"PHASE:LoadAudio|{msg}|35"),
+                           res_type=self.config.get("resample_quality", "soxr_vhq"))
 
         timing_details["upload_convert"] = time.time() - load_audio_start
         self._emit(f"PHASE:LoadAudio|Đã tải audio ({timing_details['upload_convert']:.1f}s)|100")
@@ -1996,6 +2050,21 @@ class TranscriberPipeline:
                     print(f"[Preprocess] Done in {preprocess_time:.2f}s")
                 except Exception as e:
                     print(f"[Preprocess] Error (skipping): {e}")
+
+            # --- Merge VAD segments có gap nhỏ (< 5s) ---
+            # Tránh cắt speech ở ranh giới chuyển người nói (background noise, pause ngắn)
+            MAX_VAD_GAP = 5 * 16000  # 5s in samples
+            if len(vad_segments) > 1:
+                merged_vad = [vad_segments[0]]
+                for seg_s, seg_e in vad_segments[1:]:
+                    prev_s, prev_e = merged_vad[-1]
+                    if seg_s - prev_e <= MAX_VAD_GAP:
+                        merged_vad[-1] = (prev_s, seg_e)  # merge
+                    else:
+                        merged_vad.append((seg_s, seg_e))
+                if len(merged_vad) < len(vad_segments):
+                    print(f"[VAD] Merged {len(vad_segments)} -> {len(merged_vad)} segments (gap < 5s)")
+                vad_segments = merged_vad
 
             # --- Concat speech: nối VAD segments, bỏ silence ---
             self._emit("PHASE:VAD|Đang nối các đoạn nói|95")
@@ -2152,8 +2221,6 @@ class TranscriberPipeline:
                 words_b = rover_raw_b[ci]
 
                 merged, chunk_disagree = rover_merge_words(words_a, words_b)
-                merged = remove_repeated_ngrams(merged, max_gap_sec=0.8)
-
                 # Shift disagree indices to global
                 for idx in chunk_disagree:
                     rover_disagree.add(word_offset + idx)
@@ -2169,6 +2236,40 @@ class TranscriberPipeline:
         elif len(chunk_results) > 1:
             merged_w, _ = merge_chunks_with_overlap(chunk_results, OVERLAP_SEC)
             all_words.extend(merged_w)
+
+        # ── DNSMOS: tính ngay trên concat_audio (đã VAD = chỉ speech, không cần VAD lại) ──
+        # concat_audio chỉ chứa tiếng nói → lấy 3 mẫu 9s (đầu/giữa/cuối) → 3 DNSMOS calls
+        self._emit("PHASE:QualityAnalysis|Đang phân tích chất lượng âm thanh|0")
+        _dnsmos_result = None
+        try:
+            from core.audio_analyzer import AudioQualityAnalyzer
+            _dnsmos_analyzer = AudioQualityAnalyzer()
+            DNSMOS_LEN = 144160  # 9.01s @ 16kHz — đúng input size DNSMOS model
+            concat_len = len(concat_audio)
+            all_dnsmos = []
+            if concat_len >= 8000:  # >= 0.5s speech
+                positions = [0.15, 0.50, 0.85]
+                for pos in positions:
+                    center = int(concat_len * pos)
+                    start = max(0, center - DNSMOS_LEN // 2)
+                    end = min(concat_len, start + DNSMOS_LEN)
+                    if end - start >= 8000:
+                        d = _dnsmos_analyzer.compute_dnsmos(concat_audio[start:end])
+                        if d:
+                            all_dnsmos.append(d)
+            if all_dnsmos:
+                _dnsmos_result = {
+                    "dnsmos_sig": round(float(np.mean([s["SIG"] for s in all_dnsmos])), 2),
+                    "dnsmos_bak": round(float(np.mean([s["BAK"] for s in all_dnsmos])), 2),
+                    "dnsmos_ovrl": round(float(np.mean([s["OVRL"] for s in all_dnsmos])), 2),
+                }
+            del _dnsmos_analyzer
+            self._emit("PHASE:QualityAnalysis|Phân tích chất lượng hoàn tất|100")
+        except Exception as e:
+            print(f"[DNSMOS] Error (non-critical): {e}")
+
+        # Giải phóng intermediate lists + concat_audio — đã merge vào all_words, ASR xong
+        del chunk_results, rover_raw_a, rover_raw_b, concat_audio
 
         full_text = " ".join(w["text"] for w in all_words)
 
@@ -2198,6 +2299,8 @@ class TranscriberPipeline:
         # Suspect Detect: disagree OR entropy (tsallis > 0.04 AND margin < 0.6)
         all_words = suspect_detect(all_words, audio, disagree_indices=disagree_indices)
 
+        import gc; gc.collect()
+
         # Xóa từ vô nghĩa (filler words)
         all_words = remove_filler_words(all_words)
         full_text = " ".join(w["text"] for w in all_words)
@@ -2215,6 +2318,7 @@ class TranscriberPipeline:
         restore_duration = 0.0
         final_segments = []
         paragraphs = []
+
 
         # ══════════════════════════════════════════════════════
         # Speaker diarization — chạy TRƯỚC punctuation
@@ -2243,72 +2347,120 @@ class TranscriberPipeline:
                     hf_token = self.config.get("hf_token") or os.environ.get('HF_TOKEN', None)
 
                     self._emit("PHASE:Diarization|Đang tải model phân tách|5")
-                    logger.info("[DEBUG] Getting cached diarizer")
-                    diarizer = _get_cached_diarizer(
-                        embedding_model_id=speaker_model_id,
-                        num_clusters=num_speakers,
-                        num_threads=self.config.get("cpu_threads", 4),
-                        threshold=self.config.get("diarization_threshold", 0.6),
-                        auth_token=hf_token,
-                        merge_short_speaker=self.config.get("merge_short_speaker", True),
-                    )
 
-                    if self._is_cancelled():
-                        raise InterruptedError("Cancelled by user")
+                    # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
+                    if speaker_model_id in ("3dspeaker_campp", "3dspeaker_ecapa"):
+                        if speaker_model_id == "3dspeaker_campp":
+                            from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
+                            diarizer_3d = ThreeDSpeakerCamppDiarizer(
+                                num_speakers=num_speakers,
+                                num_threads=self.config.get("cpu_threads", 4))
+                        else:
+                            from core.speaker_diarization_3dspeaker_ecapa import ThreeDSpeakerEcapaDiarizer
+                            diarizer_3d = ThreeDSpeakerEcapaDiarizer(
+                                num_speakers=num_speakers,
+                                num_threads=self.config.get("cpu_threads", 4))
+                        diarizer_3d.initialize()
 
-                    self._emit("PHASE:Diarization|Đang phân tách Người nói|10")
+                        self._emit("PHASE:Diarization|Đang phân tách (3D-Speaker CAM++)|10")
+                        raw_dict_segs = diarizer_3d.process(
+                            audio_file=None, audio_data=audio, audio_sample_rate=16000)
 
-                    _last_progress = [0]
+                        from core.speaker_diarization import Segment, SpeakerDiarizer
+                        raw_segments = [Segment(s['start'], s['end'], s['speaker'])
+                                        for s in raw_dict_segs]
+                        speaker_segments_raw = [
+                            {"speaker": f"Người nói {s['speaker']+1}", "speaker_id": s['speaker'],
+                             "start": s['start'], "end": s['end'],
+                             "duration": s['end']-s['start']}
+                            for s in raw_dict_segs
+                        ]
 
-                    def diarization_progress_callback(num_processed, num_total):
-                        if num_total == 0:
-                            return 0
-                        progress = int(num_processed / num_total * 100)
-                        if progress >= _last_progress[0] + 5 or num_processed == num_total:
-                            _last_progress[0] = progress
-                            phase_progress = 10 + int(progress * 0.75)
-                            self._emit(f"PHASE:Diarization|Đang phân tách Người nói|{phase_progress}")
-                            time.sleep(0.001)
-                        return 1 if self._is_cancelled() else 0
+                        # NaturalTurn + fragment zone post-processing
+                        merger = SpeakerDiarizer(merge_short_speaker=True)
+                        raw_segments = merger._post_process_diarization_segments(raw_segments)
 
-                    print("[Transcriber] Starting speaker diarization...")
-                    raw_segments = diarizer.process(
-                        self.file_path,
-                        progress_callback=diarization_progress_callback,
-                        audio_data=audio,
-                        audio_sample_rate=16000,
-                    )
-                    print(f"[Transcriber] Speaker diarization done: {len(raw_segments)} segments")
+                        speaker_segments_raw = [
+                            {"speaker": f"Người nói {seg.speaker+1}", "speaker_id": seg.speaker,
+                             "start": seg.start, "end": seg.end, "duration": seg.duration}
+                            for seg in raw_segments
+                        ]
 
-                    if self._is_cancelled():
-                        raise InterruptedError("Cancelled by user")
+                        self._emit("PHASE:Diarization|Đang ghép nối với văn bản|85")
+                        one_seg = [{"text": full_text, "start": all_words[0]["start"],
+                                    "end": all_words[-1]["end"], "raw_words": list(all_words)}]
+                        diar_results = merger.process_with_transcription(
+                            self.file_path, one_seg, speaker_segments=raw_segments)
 
-                    speaker_segments_raw = [
-                        {
-                            "speaker": f"Người nói {seg.speaker + 1}",
-                            "speaker_id": seg.speaker,
-                            "start": seg.start,
-                            "end": seg.end,
-                            "duration": seg.duration
-                        }
-                        for seg in raw_segments
-                    ]
+                    else:
+                        # --- Pyannote Community-1 pipeline (default) ---
+                        logger.info("[DEBUG] Getting cached diarizer")
+                        diarizer = _get_cached_diarizer(
+                            embedding_model_id=speaker_model_id,
+                            num_clusters=num_speakers,
+                            num_threads=self.config.get("cpu_threads", 4),
+                            threshold=self.config.get("diarization_threshold", 0.6),
+                            auth_token=hf_token,
+                            merge_short_speaker=self.config.get("merge_short_speaker", True),
+                        )
 
-                    self._emit("PHASE:Diarization|Đang ghép nối với văn bản|85")
+                        if self._is_cancelled():
+                            raise InterruptedError("Cancelled by user")
 
-                    # Tạo 1 segment chứa TẤT CẢ raw_words → Fix 1,2,3 chạy trên toàn bộ
-                    one_seg = [{
-                        "text": full_text,
-                        "start": all_words[0]["start"],
-                        "end": all_words[-1]["end"],
-                        "raw_words": list(all_words),
-                    }]
+                        self._emit("PHASE:Diarization|Đang phân tách Người nói|10")
 
-                    diar_results = diarizer.process_with_transcription(
-                        self.file_path,
-                        one_seg,
-                        speaker_segments=raw_segments
-                    )
+                        _last_progress = [0]
+
+                        def diarization_progress_callback(num_processed, num_total):
+                            if num_total == 0:
+                                return 0
+                            progress = int(num_processed / num_total * 100)
+                            if progress >= _last_progress[0] + 5 or num_processed == num_total:
+                                _last_progress[0] = progress
+                                phase_progress = 10 + int(progress * 0.75)
+                                self._emit(f"PHASE:Diarization|Đang phân tách Người nói|{phase_progress}")
+                                time.sleep(0.001)
+                            return 1 if self._is_cancelled() else 0
+
+                        print("[Transcriber] Starting speaker diarization...")
+                        raw_segments = diarizer.process(
+                            self.file_path,
+                            progress_callback=diarization_progress_callback,
+                            audio_data=audio,
+                            audio_sample_rate=16000,
+                            asr_words=all_words if all_words else None,
+                        )
+                        print(f"[Transcriber] Speaker diarization done: {len(raw_segments)} segments")
+
+                        if self._is_cancelled():
+                            raise InterruptedError("Cancelled by user")
+
+                        speaker_segments_raw = [
+                            {
+                                "speaker": f"Người nói {seg.speaker + 1}",
+                                "speaker_id": seg.speaker,
+                                "start": seg.start,
+                                "end": seg.end,
+                                "duration": seg.duration
+                            }
+                            for seg in raw_segments
+                        ]
+
+                        self._emit("PHASE:Diarization|Đang ghép nối với văn bản|85")
+
+                        # Tạo 1 segment chứa TẤT CẢ raw_words → Fix 1,2,3 chạy trên toàn bộ
+                        one_seg = [{
+                            "text": full_text,
+                            "start": all_words[0]["start"],
+                            "end": all_words[-1]["end"],
+                            "raw_words": list(all_words),
+                        }]
+
+                        diar_results = diarizer.process_with_transcription(
+                            self.file_path,
+                            one_seg,
+                            speaker_segments=raw_segments
+                        )
 
                     if diar_results:
                         _diar_speaker_groups = []
@@ -2337,6 +2489,10 @@ class TranscriberPipeline:
                     import traceback
                     traceback.print_exc()
                     self._emit(f"PHASE:Diarization|Lỗi phân tách người nói: {str(e)[:80]}|0")
+
+        # Giải phóng audio — diarization xong, không cần nữa
+        del audio
+        gc.collect()
 
         # ── Diarization-first: punctuation trên full_text + speaker boundary hints ──
         # Chạy punctuation 1 lần trên toàn bộ text (full context),
@@ -2380,7 +2536,8 @@ class TranscriberPipeline:
 
                 # Chạy punctuation 1 lần trên full_text (full context, GecBERT tự chunk)
                 if not bypass and full_text.strip():
-                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence)
+                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence,
+                                                        prefer_int8=self.config.get("save_ram", False))
 
                     def punct_progress_cb(current, total):
                         if self._is_cancelled():
@@ -2547,7 +2704,8 @@ class TranscriberPipeline:
                     punct_confidence = self.config.get("punctuation_confidence", 0.3)
                     case_confidence = self.config.get("case_confidence", -1.0)
                     logger.info(f"[DEBUG] Getting PunctuationRestorer (confidence={punct_confidence:.3f})")
-                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence)
+                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence,
+                                                        prefer_int8=self.config.get("save_ram", False))
                     logger.info("[DEBUG] PunctuationRestorer ready")
 
                     def punct_progress_cb(current, total):
@@ -2866,6 +3024,10 @@ class TranscriberPipeline:
 
         duration_sec = total_samples / 16000.0 if total_samples > 0 else 0.0
 
+        # ASR confidence trung bình từ pipeline (tận dụng prob đã tính, không cần chạy lại)
+        word_probs = [w.get("prob", 1.0) for w in all_words if w.get("prob") is not None]
+        asr_confidence = float(np.mean(word_probs)) if word_probs else None
+
         result_data = {
             "text": full_text,
             "segments": final_segments,
@@ -2875,6 +3037,8 @@ class TranscriberPipeline:
             "speaker_segments_raw": speaker_segments_raw,
             "duration_sec": duration_sec,
             "speaker_names": {},
+            "asr_confidence": asr_confidence,
+            "quality_info": _dnsmos_result,
         }
 
         logger.info(f"TRANSCRIPTION COMPLETED: {len(full_text)} chars, "

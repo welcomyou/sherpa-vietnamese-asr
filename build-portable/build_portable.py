@@ -7,6 +7,7 @@ Prerequisites:
     1. python build-portable/setup_build_env.py  # Setup .venv with all dependencies
     2. python build-portable/build_portable.py   # Build portable distribution
 """
+import io
 import os
 import sys
 import subprocess
@@ -103,6 +104,12 @@ def setup_python(zip_file):
     # Create sitecustomize.py for DLL loading
     sitecustomize = '''import sys
 import os
+import io
+# Fix Windows console encoding (cp1252 -> utf-8) cho tieng Viet
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 python_dir = os.path.dirname(os.path.abspath(__file__))
 base_dir = os.path.dirname(python_dir)
 if base_dir not in sys.path:
@@ -535,6 +542,7 @@ def copy_vcredist_dlls():
         'vcruntime140.dll',
         'vcruntime140_1.dll',
         'concrt140.dll',
+        'vcomp140.dll',    # OpenMP runtime - required by llama_cpp ggml-cpu.dll
     ]
 
     # Uu tien System32 (phien ban moi nhat, tuong thich ORT 1.24+)
@@ -759,10 +767,10 @@ def copy_data():
         else:
             print(f"  [WARN] Not found: {dir_name}")
 
-    # Clean vibert-capu: keep only onnx + vocab + config
+    # Clean vibert-capu: Desktop giữ int8, xóa fp32 (tiết kiệm 328MB)
     vibert_dst = DIST_DIR / "models" / "vibert-capu"
     if vibert_dst.exists():
-        VIBERT_KEEP = {'vibert-capu.onnx', 'vocab.txt', 'config.json'}
+        VIBERT_KEEP = {'vibert-capu.int8.onnx', 'vocab.txt', 'config.json'}
         removed = 0
         for f in list(vibert_dst.rglob('*')):
             if f.is_file() and f.name not in VIBERT_KEEP:
@@ -774,7 +782,7 @@ def copy_data():
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         if removed > 0:
-            print(f"  [TRIM] vibert-capu: removed {removed:.0f} MB (kept .onnx, vocab.txt, config.json)")
+            print(f"  [TRIM] vibert-capu: removed {removed:.0f} MB (kept int8.onnx, vocab.txt, config.json)")
 
     # Clean pyannote PyTorch dir: keep only plda/ data (needed by pure ORT)
     pyannote_dst = DIST_DIR / "models" / "pyannote" / "speaker-diarization-community-1"
@@ -806,7 +814,7 @@ def copy_data():
                 print(f"  [DEL] {f.relative_to(models_dst)} ({size_mb:.1f} MB)")
                 f.unlink()
 
-        # Remove int8 ONNX duplicates when fp32 exists (code prefers fp32)
+        # Desktop build: Remove fp32 ONNX when int8 exists (desktop prefers int8)
         for model_dir in models_dst.iterdir():
             if not model_dir.is_dir():
                 continue
@@ -815,10 +823,10 @@ def copy_data():
                 fp32_name = int8f.name.replace('.int8', '')
                 fp32_path = model_dir / fp32_name
                 if fp32_path.exists():
-                    size_mb = int8f.stat().st_size / 1024 / 1024
+                    size_mb = fp32_path.stat().st_size / 1024 / 1024
                     removed_total += size_mb
-                    print(f"  [DEL] {int8f.relative_to(models_dst)} ({size_mb:.1f} MB) — fp32 exists")
-                    int8f.unlink()
+                    print(f"  [DEL] {fp32_path.relative_to(models_dst)} ({size_mb:.1f} MB) — int8 exists")
+                    fp32_path.unlink()
 
         # Remove pyannote-onnx fallback embedding models (pure ORT uses embedding_encoder.onnx)
         for name in ['embedding_model.onnx', 'embedding_model_split.onnx']:
@@ -1002,7 +1010,12 @@ def main():
 
         # Cleanup
         clean_build()
-        
+
+        # Xóa .opt files — máy target sẽ tự tạo lần đầu chạy (phụ thuộc ORT version + CPU)
+        for opt_file in DIST_DIR.rglob("*.opt"):
+            opt_file.unlink()
+            print(f"  [DEL] {opt_file.relative_to(DIST_DIR)} (ORT cache, auto-generated on target)")
+
         # Report
         print()
         print("="*60)
@@ -1028,4 +1041,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # Fix stdout encoding khi chay truc tiep (cp1252 -> utf-8)
+    if sys.stdout and hasattr(sys.stdout, 'buffer'):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    if sys.stderr and hasattr(sys.stderr, 'buffer'):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
     sys.exit(main())

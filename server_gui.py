@@ -1063,35 +1063,45 @@ class ConfigTab(BaseTab):
         sg = QFormLayout()
         sg.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self.chk_summarizer_enabled = QCheckBox("Bật chức năng tóm tắt cuộc họp")
-        self.chk_summarizer_enabled.setToolTip(
-            "Khi bật, tab 'Tóm tắt' sẽ hiện trên web client.\n"
-            "Cần có model GGUF local hoặc Ollama server."
-        )
+        # Dòng 1: checkbox + model status cùng hàng
+        row_enable = QHBoxLayout()
+        self.chk_summarizer_enabled = QCheckBox("Bật tóm tắt cuộc họp")
         self.chk_summarizer_enabled.toggled.connect(self._on_summarizer_toggled)
-        sg.addRow("", self.chk_summarizer_enabled)
-
+        row_enable.addWidget(self.chk_summarizer_enabled)
         self.lbl_summarizer_status = QLabel("")
-        self.lbl_summarizer_status.setWordWrap(True)
-        sg.addRow("", self.lbl_summarizer_status)
+        self.lbl_summarizer_status.setStyleSheet(f"color: {COLORS['text_secondary']}")
+        row_enable.addWidget(self.lbl_summarizer_status, 1)
+        sg.addRow("", row_enable)
 
-        self.edit_summarizer_url = QLineEdit()
-        self.edit_summarizer_url.setPlaceholderText("models/Qwen3.5-4B-Q4_K_M.gguf hoặc http://localhost:11434")
-        self.edit_summarizer_url.setToolTip(
-            "Đường dẫn file GGUF (ưu tiên, dùng llama.cpp trực tiếp)\n"
-            "hoặc URL Ollama server (fallback)"
-        )
-        sg.addRow("Model path / Ollama URL:", self.edit_summarizer_url)
-
-        self.edit_summarizer_model = QLineEdit()
-        self.edit_summarizer_model.setPlaceholderText("qwen3.5:4b")
-        self.edit_summarizer_model.setToolTip("Tên model Ollama (chỉ dùng khi trỏ tới Ollama URL)")
-        sg.addRow("Tên model (Ollama):", self.edit_summarizer_model)
-
-        self.btn_download_model = QPushButton("📥 Tải model Qwen3.5-4B (~2.7 GB)")
-        self.btn_download_model.setToolTip("Tải model GGUF từ HuggingFace vào thư mục models/")
+        # Dòng 2: đường dẫn model + browse + tải
+        row_model = QHBoxLayout()
+        row_model.setContentsMargins(0, 0, 0, 0)
+        self.edit_summarizer_gguf = QLineEdit()
+        self.edit_summarizer_gguf.setPlaceholderText("Đường dẫn file model GGUF...")
+        btn_browse = QPushButton("Chọn file...")
+        btn_browse.setFixedWidth(90)
+        btn_browse.clicked.connect(self._browse_gguf_model)
+        self.btn_download_model = QPushButton("Tải model")
+        self.btn_download_model.setFixedWidth(90)
+        self.btn_download_model.setToolTip("Tải Qwen3-4B-Instruct-2507 Q4_K_M (~2.5 GB) từ HuggingFace")
         self.btn_download_model.clicked.connect(self._download_summarizer_model)
-        sg.addRow("", self.btn_download_model)
+        row_model.addWidget(self.edit_summarizer_gguf, 1)
+        row_model.addWidget(btn_browse)
+        row_model.addWidget(self.btn_download_model)
+        sg.addRow("Model GGUF:", row_model)
+
+        # Dòng 3: số luồng LLM
+        row_threads = QHBoxLayout()
+        self.spin_llm_threads = QSpinBox()
+        self.spin_llm_threads.setRange(1, 64)
+        self.spin_llm_threads.setValue(ALLOWED_THREADS)
+        self.spin_llm_threads.setFixedWidth(80)
+        row_threads.addWidget(self.spin_llm_threads)
+        lbl_threads_hint = QLabel(f"(vật lý: {ALLOWED_THREADS} cores — khuyến nghị = số core vật lý)")
+        lbl_threads_hint.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 11px;")
+        row_threads.addWidget(lbl_threads_hint)
+        row_threads.addStretch()
+        sg.addRow("Số luồng LLM:", row_threads)
 
         summ_group.setLayout(sg)
         layout.addWidget(summ_group)
@@ -1256,8 +1266,11 @@ class ConfigTab(BaseTab):
             self.edit_offline_url.setText(server_config.get("offline_download_url"))
 
             # Summarizer
-            self.edit_summarizer_url.setText(server_config.get("summarizer_model_path") or "")
-            self.edit_summarizer_model.setText(server_config.get("summarizer_ollama_model") or "qwen3.5:4b")
+            summ_path = server_config.get("summarizer_model_path") or ""
+            if summ_path:
+                self.edit_summarizer_gguf.setText(summ_path)
+            llm_threads = int(server_config.get("summarizer_threads") or ALLOWED_THREADS)
+            self.spin_llm_threads.setValue(llm_threads)
             self.chk_summarizer_enabled.setChecked(server_config.get("summarizer_enabled") == "1")
             self._check_summarizer_status()
 
@@ -1277,93 +1290,131 @@ class ConfigTab(BaseTab):
         """Khi toggle summarizer — check model có sẵn không."""
         self._check_summarizer_status()
 
+    def _browse_gguf_model(self):
+        """Mở file dialog chọn file GGUF."""
+        from core.config import BASE_DIR
+        start_dir = os.path.join(BASE_DIR, "models")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Chọn file model GGUF",
+            start_dir,
+            "GGUF Files (*.gguf);;All Files (*)",
+        )
+        if path:
+            self.edit_summarizer_gguf.setText(path)
+            self._check_summarizer_status()
+
     def _check_summarizer_status(self):
-        """Kiểm tra model summarizer có sẵn không và cập nhật UI."""
+        """Kiểm tra model và cập nhật status label."""
         import os
-        path = self.edit_summarizer_url.text().strip()
         lbl = self.lbl_summarizer_status
 
         if not self.chk_summarizer_enabled.isChecked():
             lbl.setText("")
-            lbl.setStyleSheet("")
+            lbl.setStyleSheet(f"color: {COLORS['text_secondary']}")
             return
 
+        path = self.edit_summarizer_gguf.text().strip()
+
+        # Nếu chưa chọn → check model mặc định
         if not path:
-            # Kiểm tra model mặc định
             try:
                 from web_service.summarizer import get_default_model_path
                 default = get_default_model_path()
                 if os.path.isfile(default):
-                    self.edit_summarizer_url.setText(default)
-                    lbl.setText(f"✅ Model tìm thấy: {os.path.basename(default)}")
-                    lbl.setStyleSheet(f"color: {COLORS['success']}")
-                    return
+                    self.edit_summarizer_gguf.setText(default)
+                    path = default
             except Exception:
                 pass
-            lbl.setText("⚠ Chưa cấu hình model. Nhấn 'Tải model' hoặc nhập đường dẫn.")
-            lbl.setStyleSheet(f"color: {COLORS['warning']}")
-            return
 
-        if os.path.isfile(path):
+        if not path:
+            lbl.setText("Chưa chọn model")
+            lbl.setStyleSheet(f"color: {COLORS['warning']}")
+        elif os.path.isfile(path):
             size_mb = os.path.getsize(path) / 1e6
-            lbl.setText(f"✅ Model GGUF: {os.path.basename(path)} ({size_mb:.0f} MB)")
+            lbl.setText(f"{os.path.basename(path)} ({size_mb:.0f} MB)")
             lbl.setStyleSheet(f"color: {COLORS['success']}")
-        elif path.startswith("http"):
-            lbl.setText(f"🔗 Sẽ dùng Ollama tại {path}")
-            lbl.setStyleSheet(f"color: {COLORS['accent']}")
         else:
-            lbl.setText(f"❌ Không tìm thấy: {path}")
-            lbl.setStyleSheet(f"color: {COLORS['danger']}")
+            # Thử resolve relative path
+            from web_service.summarizer import _resolve_model_path
+            resolved = _resolve_model_path(path)
+            if os.path.isfile(resolved):
+                size_mb = os.path.getsize(resolved) / 1e6
+                lbl.setText(f"{os.path.basename(resolved)} ({size_mb:.0f} MB)")
+                lbl.setStyleSheet(f"color: {COLORS['success']}")
+            else:
+                lbl.setText("File không tồn tại")
+                lbl.setStyleSheet(f"color: {COLORS['danger']}")
 
     def _download_summarizer_model(self):
-        """Tải model GGUF trong background thread."""
+        """Tải model GGUF — hỏi xác nhận, chọn thư mục, chạy background."""
+        from web_service.summarizer import get_default_model_path, DEFAULT_GGUF_FILE
+        import os
+
+        default_path = get_default_model_path()
+        default_dir = os.path.dirname(default_path)
+
+        # Hỏi chọn thư mục tải về
+        dest_dir = QFileDialog.getExistingDirectory(
+            self, "Chọn thư mục lưu model GGUF",
+            default_dir,
+        )
+        if not dest_dir:
+            return  # User cancel
+
+        dest_file = os.path.join(dest_dir, DEFAULT_GGUF_FILE)
+
+        # Nếu file đã tồn tại → hỏi ghi đè
+        if os.path.isfile(dest_file):
+            size_mb = os.path.getsize(dest_file) / 1e6
+            reply = QMessageBox.question(
+                self, "File đã tồn tại",
+                f"File đã có:\n{dest_file}\n({size_mb:.0f} MB)\n\nGhi đè?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.No:
+                # Dùng file có sẵn
+                self.edit_summarizer_gguf.setText(dest_file)
+                self._check_summarizer_status()
+                return
+            # Xóa file cũ để tải lại
+            os.remove(dest_file)
+
         self.btn_download_model.setEnabled(False)
-        self.btn_download_model.setText("⏳ Đang tải...")
-        self.lbl_summarizer_status.setText("Đang tải model từ HuggingFace (~2.7 GB)...")
+        self.btn_download_model.setText("Đang tải...")
+        self.lbl_summarizer_status.setText("Đang tải ~2.7 GB...")
         self.lbl_summarizer_status.setStyleSheet(f"color: {COLORS['warning']}")
 
         import threading
+        from PyQt6.QtCore import QTimer
 
         def _do_download():
             try:
-                from web_service.summarizer import download_model
-                path = download_model(progress_cb=lambda msg, pct: None)
-                # Update UI từ main thread
-                from PyQt6.QtCore import QMetaObject, Qt as QtCore_Qt, Q_ARG
-                QMetaObject.invokeMethod(
-                    self.btn_download_model, "setText",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, "✅ Đã tải xong"),
-                )
-                QMetaObject.invokeMethod(
-                    self.edit_summarizer_url, "setText",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, path),
-                )
-                QMetaObject.invokeMethod(
-                    self.lbl_summarizer_status, "setText",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, f"✅ Model tải thành công: {path}"),
-                )
+                from web_service.summarizer import download_model_to
+                path = download_model_to(dest_dir)
+                # Update UI từ main thread qua QTimer (an toàn hơn QMetaObject)
+                QTimer.singleShot(0, lambda: self._on_download_done(path))
             except Exception as e:
-                QMetaObject.invokeMethod(
-                    self.btn_download_model, "setText",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, "❌ Lỗi tải - Thử lại"),
-                )
-                QMetaObject.invokeMethod(
-                    self.lbl_summarizer_status, "setText",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, f"❌ Lỗi: {str(e)[:100]}"),
-                )
-            finally:
-                QMetaObject.invokeMethod(
-                    self.btn_download_model, "setEnabled",
-                    QtCore_Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(bool, True),
-                )
+                QTimer.singleShot(0, lambda: self._on_download_error(str(e)))
 
         threading.Thread(target=_do_download, daemon=True).start()
+
+    def _on_download_done(self, path):
+        """Callback khi tải model xong (chạy trên main thread)."""
+        import os
+        self.btn_download_model.setEnabled(True)
+        self.btn_download_model.setText("Tải model")
+        self.edit_summarizer_gguf.setText(path)
+        size_mb = os.path.getsize(path) / 1e6
+        self.lbl_summarizer_status.setText(f"{os.path.basename(path)} ({size_mb:.0f} MB)")
+        self.lbl_summarizer_status.setStyleSheet(f"color: {COLORS['success']}")
+
+    def _on_download_error(self, error_msg):
+        """Callback khi tải model lỗi (chạy trên main thread)."""
+        self.btn_download_model.setEnabled(True)
+        self.btn_download_model.setText("Tải model")
+        self.lbl_summarizer_status.setText(f"Lỗi: {error_msg[:80]}")
+        self.lbl_summarizer_status.setStyleSheet(f"color: {COLORS['danger']}")
 
     def _on_http_mode_toggled(self, checked):
         """Ẩn/hiện SSL widgets khi toggle HTTP mode."""
@@ -1844,8 +1895,8 @@ class ConfigTab(BaseTab):
 
             # Summarizer
             server_config.set("summarizer_enabled", "1" if self.chk_summarizer_enabled.isChecked() else "0")
-            server_config.set("summarizer_model_path", self.edit_summarizer_url.text().strip())
-            server_config.set("summarizer_ollama_model", self.edit_summarizer_model.text().strip())
+            server_config.set("summarizer_model_path", self.edit_summarizer_gguf.text().strip())
+            server_config.set("summarizer_threads", str(self.spin_llm_threads.value()))
 
             server_config.save()
 

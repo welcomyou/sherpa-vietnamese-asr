@@ -369,16 +369,13 @@ class QueueManager:
             if self._cancelled:
                 raise InterruptedError("Cancelled by user")
 
-            # 4. Đánh giá chất lượng âm thanh (DNSMOS + ASR Confidence)
-            quality_info = None
-            try:
-                from web_service.audio_quality import analyze_audio_quality
-                quality_info = analyze_audio_quality(
-                    wav_path, model_path,
-                    progress_callback=self.progress_callback,
-                )
-            except Exception as e:
-                logger.warning(f"Quality analysis failed (non-critical): {e}")
+            # 4. Đánh giá chất lượng: tận dụng DNSMOS + ASR confidence từ pipeline
+            quality_info = result.get("quality_info")
+            asr_conf = result.get("asr_confidence")
+            if quality_info and asr_conf is not None:
+                quality_info["asr_confidence"] = round(float(asr_conf), 4)
+            elif asr_conf is not None:
+                quality_info = {"asr_confidence": round(float(asr_conf), 4)}
 
             if self._cancelled:
                 raise InterruptedError("Cancelled by user")

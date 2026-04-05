@@ -5,11 +5,18 @@ Dua tren build_portable.py nhung them web_service/ va loai tru streaming model.
 
 Usage: python build-portable/build_portable_online.py
 """
+import io
 import os
 import sys
 import shutil
 import stat
 from pathlib import Path
+
+# Fix stdout encoding on Windows (cp1252 -> utf-8) de print Unicode khong bi crash
+if sys.stdout and hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr and hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Reuse logic tu build_portable.py
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -70,7 +77,8 @@ EXCLUDE_PACKAGES_SERVICES = {
     'torch', 'torchaudio', 'torio', 'torchmetrics', 'torchgen',
     'torchcodec', 'torch_audiomentations', 'torch_pitch_shift',
     'functorch', 'ml_dtypes',
-    'sympy', 'networkx', 'jinja2', 'markupsafe',
+    'sympy', 'networkx',
+    # jinja2 + markupsafe: GIU LAI — llama_cpp requires jinja2 for chat templates
 
     # === PyTorch Lightning ===
     'lightning', 'lightning_fabric', 'lightning_utilities',

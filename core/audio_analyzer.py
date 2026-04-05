@@ -132,7 +132,9 @@ class AudioQualityAnalyzer:
                     return None
                 
                 providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
-                self._dnsmos_session = ort.InferenceSession(model_path, providers=providers)
+                sess_opts = ort.SessionOptions()
+                sess_opts.enable_cpu_mem_arena = False  # Tránh arena leak
+                self._dnsmos_session = ort.InferenceSession(model_path, sess_opts, providers=providers)
                 print("[AudioAnalyzer] Loaded DNSMOS model")
                 
             except ImportError:

@@ -74,9 +74,47 @@ def _get_locked_ips() -> list:
             result.append({"ip": ip, "attempts": len(valid), "unlock_in_seconds": remain})
     return result
 
+# === Upload rate limiting (per session, cho phép tải nhiều nhưng chống spam) ===
+_upload_attempts: dict[str, list[float]] = defaultdict(list)
+_UPLOAD_MAX_PER_MINUTE = 10  # 10 upload/phút — đủ cho người dùng bình thường
+_UPLOAD_WINDOW_SECONDS = 60
+
+
+def _check_upload_rate(session_id: str):
+    now = time.time()
+    _upload_attempts[session_id] = [t for t in _upload_attempts[session_id]
+                                     if now - t < _UPLOAD_WINDOW_SECONDS]
+    if len(_upload_attempts[session_id]) >= _UPLOAD_MAX_PER_MINUTE:
+        raise HTTPException(429, "Upload quá nhanh. Vui lòng đợi 1 phút.")
+    _upload_attempts[session_id].append(now)
+
+
+# === Account lockout (per username, chống brute force) ===
+_account_failures: dict[str, list[float]] = defaultdict(list)
+_LOCKOUT_THRESHOLD = 10        # Lock sau 10 lần sai
+_LOCKOUT_DURATION_SECONDS = 900  # Khóa 15 phút
+
+
+def _check_account_lockout(username: str):
+    now = time.time()
+    _account_failures[username] = [t for t in _account_failures[username]
+                                    if now - t < _LOCKOUT_DURATION_SECONDS]
+    if len(_account_failures[username]) >= _LOCKOUT_THRESHOLD:
+        remain = int(_LOCKOUT_DURATION_SECONDS - (now - min(_account_failures[username]))) + 1
+        raise HTTPException(429, f"Tài khoản tạm khóa do đăng nhập sai quá nhiều. Thử lại sau {remain // 60} phút.")
+
+
+def _record_failed_account(username: str):
+    _account_failures[username].append(time.time())
+
+
+def _clear_account_lockout(username: str):
+    _account_failures.pop(username, None)
+
+
 # === FastAPI App ===
 
-app = FastAPI(title="Sherpa Vietnamese ASR", docs_url="/api/docs")
+app = FastAPI(title="Sherpa Vietnamese ASR", docs_url=None, redoc_url=None)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -413,6 +451,9 @@ async def upload_file(
     if not session_id and not user:
         raise HTTPException(400, "Session hết hạn. Vui lòng tải lại trang.")
 
+    # Rate limit upload (chống spam, không ảnh hưởng sử dụng bình thường)
+    _check_upload_rate(session_id or (user["id"] if user else "unknown"))
+
     # Validate extension
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
     if ext not in ALLOWED_EXTENSIONS:
@@ -444,9 +485,17 @@ async def upload_file(
         if old_files:
             logger.info(f"Cleaned {len(old_files)} old file(s) for anonymous session {session_id[:8]}")
 
+    # Sanitize filename (chống path traversal)
+    import re as _re
+    safe_name = _re.sub(r'[^\w\s.\-]', '', file.filename.replace('..', '').replace('/', '_').replace('\\', '_'))
+    if not safe_name:
+        safe_name = "upload"
+
     # Lưu file
-    stored_name = f"{uuid.uuid4().hex}_{file.filename}"
+    stored_name = f"{uuid.uuid4().hex}_{safe_name}"
     stored_path = os.path.join(UPLOAD_DIR, stored_name)
+    if not os.path.realpath(stored_path).startswith(os.path.realpath(UPLOAD_DIR)):
+        raise HTTPException(400, "Tên file không hợp lệ")
     with open(stored_path, "wb") as f:
         f.write(content)
     file_id = db.create_file(
@@ -1008,14 +1057,20 @@ async def login(request: Request, session_id: str = Depends(get_session_id)):
     _check_login_rate(ip)
 
     body = await request.json()
-    username = body.get("username", "")
+    username = body.get("username", "").strip()
     password = body.get("password", "")
+
+    # Account lockout (chống brute force per username)
+    _check_account_lockout(username)
 
     user = authenticate_user(username, password)
     if not user:
         _record_failed_login(ip)
+        _record_failed_account(username)
         logger.warning(f"Failed login from {ip} for user '{username}'")
         raise HTTPException(401, "Sai tên đăng nhập hoặc mật khẩu")
+
+    _clear_account_lockout(username)
 
     token = create_token(user["id"], user["username"], user["role"])
     logger.info(f"User '{username}' logged in from {ip}")

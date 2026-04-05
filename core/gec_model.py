@@ -54,7 +54,9 @@ class GecBERTModel:
         min_words_cut=6,
         punc_dict={':', ".", ",", "?"},
         case_confidence=0.0,
+        prefer_int8=False,
     ):
+        self.prefer_int8 = prefer_int8
         if isinstance(model_paths, str):
             model_paths = [model_paths]
         self.model_weights = list(map(float, weights)) if weights else [1] * len(model_paths)
@@ -104,11 +106,18 @@ class GecBERTModel:
         for model_path in model_paths:
             logger.info(f"[GecBERT] Loading ONNX model from: {model_path}")
 
-            # Tìm file ONNX
-            onnx_path = os.path.join(model_path, "vibert-capu.onnx")
-            if not os.path.exists(onnx_path):
+            # Tìm file ONNX — ưu tiên int8 nếu prefer_int8=True (desktop)
+            onnx_fp32 = os.path.join(model_path, "vibert-capu.onnx")
+            onnx_int8 = os.path.join(model_path, "vibert-capu.int8.onnx")
+            if self.prefer_int8 and os.path.exists(onnx_int8):
+                onnx_path = onnx_int8
+            elif os.path.exists(onnx_fp32):
+                onnx_path = onnx_fp32
+            elif os.path.exists(onnx_int8):
+                onnx_path = onnx_int8
+            else:
                 raise FileNotFoundError(
-                    f"ONNX model not found at {onnx_path}. "
+                    f"ONNX model not found in {model_path}. "
                     f"Run temp/export_vibert_onnx.py to export first."
                 )
 
@@ -117,7 +126,12 @@ class GecBERTModel:
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             sess_options.inter_op_num_threads = 1
             from core.config import compute_ort_threads, PHYSICAL_CORES
-            sess_options.intra_op_num_threads = compute_ort_threads(PHYSICAL_CORES)
+            # BERT transformer song song tốt hơn ASR encoder — dùng full_ht=True
+            # Benchmark: Z=9-10 tốt hơn Z=6 (~20% faster trên 6C/12T)
+            sess_options.intra_op_num_threads = compute_ort_threads(PHYSICAL_CORES, full_ht=True)
+            sess_options.enable_cpu_mem_arena = False  # Tránh arena leak
+            # Cache optimized graph: giảm disk I/O lần load sau
+            sess_options.optimized_model_filepath = onnx_path + ".opt"
             session = ort.InferenceSession(
                 onnx_path, sess_options,
                 providers=["CPUExecutionProvider"]
@@ -449,6 +463,10 @@ class GecBERTModel:
                     elif gap >= 0.2:
                         if current_label == "$KEEP":
                             all_class_probs[b_idx, t_idx, self.append_comma_index] += 0.2
+                    elif gap < 0.1:
+                        # Nói nhanh: suppress dấu phẩy nếu model đang predict APPEND_,
+                        # (không cần check current_label — cần suppress kể cả khi model đã chọn phẩy)
+                        all_class_probs[b_idx, t_idx, self.append_comma_index] -= 0.3
 
             # Log pause changes
             after_idx = all_class_probs.argmax(axis=-1)
@@ -456,7 +474,7 @@ class GecBERTModel:
                 if hints is None:
                     continue
                 for w_idx, gap in enumerate(hints):
-                    if gap < 0.2:
+                    if 0.1 <= gap < 0.2:
                         continue
                     t_idx = w_idx + 1
                     if t_idx >= all_class_probs.shape[1]:

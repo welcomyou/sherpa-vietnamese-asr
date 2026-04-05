@@ -13,19 +13,21 @@
 |--|-------------|-------------|
 | **Giao diện** | PyQt6 GUI | FastAPI + Web UI (PWA) |
 | **Đa người dùng** | Không | Có (anonymous + login) |
-| **File** | `sherpa-vietnamese-asr.bat` | `sherpa-vietnamese-asr-service.bat` |
+| **Launcher** | `sherpa-vietnamese-asr.bat` | `sherpa-vietnamese-asr-service.bat` |
 
 ## Tính năng
 
-- **Chuyển giọng nói thành văn bản** — hỗ trợ MP3, WAV, M4A, MP4, MKV, AVI...
+- **Chuyển giọng nói thành văn bản** — MP3, WAV, M4A, FLAC, AAC, OGG, MP4, MKV, AVI, MOV, WEBM...
 - **Phân tách người nói** (Speaker Diarization) — Pure ONNX Runtime, không cần PyTorch
-- **Tự động thêm dấu câu, viết hoa** — ViBERT-capu + pause hints
+- **Tự động thêm dấu câu, viết hoa** — ViBERT-capu (ONNX) + pause hints
 - **ROVER** — bỏ phiếu 2 model ASR để tăng độ chính xác
 - **Thu âm trực tiếp** (Desktop) — real-time streaming, phím 1-9 đánh dấu người nói
 - **Click câu để tua** — phát lại đồng bộ với văn bản
-- **Hỗ trợ hotwords** — tên riêng, thuật ngữ chuyên ngành
+- **Hỗ trợ hotwords** — tên riêng, thuật ngữ chuyên ngành (Aho-Corasick)
 - **Đánh giá chất lượng** — DNSMOS + ASR confidence
 - **PWA** (Web) — cài trên mobile/desktop như app native
+- **Admin GUI** (Web) — quản lý server, session, queue, user
+- **Windows Service** (Web) — chạy headless hoặc cài service
 
 ## Công nghệ
 
@@ -57,7 +59,7 @@ git clone https://github.com/welcomyou/sherpa-vietnamese-asr.git
 cd sherpa-vietnamese-asr
 python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt          # Desktop
-pip install -r requirements-online.txt   # Web service
+pip install -r requirements-online.txt   # Web service (thêm)
 ```
 
 ## Chạy
@@ -68,7 +70,11 @@ python server_gui.py                     # Web service (GUI admin)
 python server_launcher.py --no-gui       # Web service (headless)
 ```
 
+Web service mặc định chạy HTTPS tại `https://IP:8443`. Admin mặc định: `admin` / `admin`.
+
 ## Build Portable
+
+Build bản portable không cần cài Python trên máy đích:
 
 ```bash
 python build-portable/build_portable.py         # Desktop (~1.4 GB)
@@ -80,23 +86,45 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 ## Cấu trúc
 
 ```
-├── app.py                     # Desktop entry point
-├── tab_file.py                # Tab xử lý file
-├── tab_live.py                # Tab thu âm trực tiếp
-├── core/                      # Core modules (dùng chung)
-│   ├── asr_engine.py          # ASR pipeline (chunk, overlap, ROVER, postprocess)
-│   ├── speaker_diarization_pure_ort.py  # Diarization (Pure ORT)
-│   ├── punctuation_restorer_improved.py # Dấu câu (ViBERT + pause)
-│   ├── vad_utils.py           # Silero VAD
-│   └── audio_analyzer.py      # DNSMOS quality
-├── web_service/               # FastAPI web service
-│   ├── server.py              # API endpoints + WebSocket
-│   ├── queue_manager.py       # Job queue
-│   ├── session_manager.py     # Session + anonymous timeout
-│   └── static/                # Frontend (PWA)
-├── build-portable/            # Build scripts
-├── models/                    # AI models (tải riêng)
-└── config.ini                 # Runtime config
+├── app.py                        # Desktop entry point
+├── tab_file.py                   # Tab xử lý file
+├── tab_live.py                   # Tab thu âm trực tiếp
+├── streaming_asr.py              # Streaming ASR (offline VAD)
+├── streaming_asr_online.py       # Streaming ASR (online, no VAD)
+├── transcriber.py                # Transcriber thread wrapper
+├── common.py                     # Shared UI components
+├── server_gui.py                 # Web service admin GUI (PyQt6)
+├── server_launcher.py            # Web service entry point
+├── service_installer.py          # Windows Service installer
+├── core/                         # Core modules (dùng chung desktop & web)
+│   ├── asr_engine.py             # ASR pipeline (chunk, overlap, ROVER)
+│   ├── asr_json.py               # Đọc/ghi .asr.json
+│   ├── config.py                 # Config, CPU detection, model registry
+│   ├── vad_utils.py              # Silero VAD (ONNX)
+│   ├── speaker_diarization.py    # Diarization dispatcher
+│   ├── speaker_diarization_pure_ort.py   # Pure ORT diarization
+│   ├── punctuation_restorer_improved.py  # Dấu câu (ViBERT + pause)
+│   ├── gec_model.py              # GEC ONNX inference
+│   ├── audio_analyzer.py         # DNSMOS quality analysis
+│   ├── audio_preprocessing.py    # RMS normalize, preprocessing
+│   ├── hotword_context.py        # Aho-Corasick hotword boosting
+│   └── utils.py                  # Shared helpers
+├── web_service/                  # FastAPI web service
+│   ├── server.py                 # API endpoints + WebSocket
+│   ├── database.py               # SQLite management
+│   ├── auth.py                   # JWT authentication
+│   ├── session_manager.py        # Session + anonymous timeout
+│   ├── queue_manager.py          # Job queue
+│   ├── config.py                 # Server config
+│   ├── ssl_utils.py              # SSL cert generation
+│   ├── audio_quality.py          # Audio quality (DNSMOS)
+│   ├── summarizer.py             # Meeting summarizer
+│   └── static/                   # Frontend (HTML/JS/CSS/PWA)
+├── build-portable/               # Build scripts
+├── models/                       # AI models (tải riêng)
+├── vocabulary/                   # Vocabulary data
+├── config.ini                    # Runtime config
+└── hotword.txt                   # Hotword list
 ```
 
 ## Ghi nhận

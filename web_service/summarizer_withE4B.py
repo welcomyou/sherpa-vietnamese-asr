@@ -1,7 +1,7 @@
 """
 Meeting summarizer - 2-pass pipeline (Extract → Summarize).
-Model: Gemma 4 E2B (PLE architecture, 2.3B effective params).
-Backend: llama-cpp-python (GGUF) hoặc Ollama API.
+Model: Gemma 4 E4B (PLE architecture, 4.5B effective / 8B total params).
+Backend: llama-cpp-python (GGUF).
 Chỉ dùng cho web app. Tích hợp vào queue_manager.
 """
 
@@ -16,8 +16,8 @@ logger = logging.getLogger("asr.summarizer")
 
 # === Model download ===
 
-DEFAULT_GGUF_REPO = "unsloth/gemma-4-E2B-it-GGUF"
-DEFAULT_GGUF_FILE = "gemma-4-E2B-it-Q4_K_M.gguf"
+DEFAULT_GGUF_REPO = "unsloth/gemma-4-E4B-it-GGUF"
+DEFAULT_GGUF_FILE = "gemma-4-E4B-it-Q4_K_M.gguf"
 
 
 def get_default_model_path() -> str:
@@ -156,77 +156,72 @@ def _get_logical_cores() -> int:
         return os.cpu_count() or 8
 
 
-# === Prompts — Distilled từ Claude Opus trên 5 mẫu họp thực tế VN ===
+# === Prompts — tối ưu cho Gemma 4 E2B (ngắn gọn, direct, tiếng Việt) ===
 
 EXTRACT_SYSTEM_PROMPT = """\
-Bạn là trợ lý trích xuất thông tin từ biên bản cuộc họp/cuộc gọi tiếng Việt.
+Bạn là chuyên gia phân tích biên bản họp. Trích xuất TẤT CẢ thông tin quan trọng từ bản ghi.
 
-QUY TẮC PHÂN LOẠI:
-- THẢO LUẬN: nhiều người bàn qua bàn lại, chưa kết luận → KHÔNG đưa vào "quyết định".
-- QUYẾT ĐỊNH: chỉ khi chủ trì nói "thống nhất/chốt/đồng ý" hoặc giao việc cụ thể (ai + làm gì).
-- ACTION ITEM: bám vào động từ chỉ thị + tên người/đơn vị. "Đồng chí X rà soát" = giao việc cho X. \
-"Báo cáo lại", "tham mưu", "nghiên cứu", "tiếp thu" đều là giao việc.
-- THÔNG BÁO CẤP TRÊN: chính sách/lộ trình do cấp trên ban hành → thông tin nền, không phải quyết định cuộc họp này.
-
-QUY TẮC XỬ LÝ:
-- GIỮ CHÍNH XÁC: số liệu, mốc thời gian, tên văn bản pháp lý.
-- BỎ NOISE: bỏ lặp từ, sai chính tả, câu bỏ dở. Giữ ý chính, viết lại ngắn gọn.
-- KHÔNG suy diễn, KHÔNG thêm ý không có trong bản ghi.
-- Viết tắt: giải thích lần đầu, sau đó dùng viết tắt.
-- Trả lời bằng tiếng Việt."""
+QUY TẮC:
+1. Đọc KỸ từng dòng, KHÔNG bỏ sót quyết định, nhiệm vụ, số liệu, tên riêng.
+2. CHỈ ghi thông tin CÓ TRONG bản ghi. KHÔNG suy diễn hay bịa đặt.
+3. Ghi rõ số đoạn nguồn (đoạn X). Giữ nguyên tên, số, ngày tháng CHÍNH XÁC.
+4. Bỏ qua lời chào, câu lặp, tiếng ồn. Trả lời bằng tiếng Việt."""
 
 EXTRACT_USER_TEMPLATE = """\
+CUỘC HỌP: {duration_min} phút, {num_speakers} người ({speaker_list}).
+
+BẢN GHI:
 {transcript}
 
 ---
-Trích xuất:
-1. LOẠI: (cuộc họp nhiều người / cuộc gọi 2 người / báo cáo)
-2. NGƯỜI CHỦ TRÌ/QUYẾT ĐỊNH: (ai có quyền chốt)
-3. CÁC Ý CHÍNH THEO THỜI GIAN: (ai nói gì, ý chính — chỉ ý quan trọng, bỏ ý phụ)
-4. QUYẾT ĐỊNH ĐÃ CHỐT: (chỉ những gì được "thống nhất/chốt/đồng ý")
-5. CÔNG VIỆC: (Ai | Việc gì | Hạn chót — bao gồm cả giao việc ẩn)
-6. VẤN ĐỀ CHƯA GIẢI QUYẾT:
-7. SỐ LIỆU/MỐC THỜI GIAN QUAN TRỌNG:
-8. KẾT LUẬN:"""
+Trích xuất theo nhóm:
+
+DIỄN BIẾN CHÍNH: các nội dung thảo luận, báo cáo, câu hỏi, tranh luận theo thứ tự thời gian.
+Format: "• [Nội dung] — {{tên người nói}} (đoạn X)"
+
+QUYẾT ĐỊNH: mọi quyết định, thống nhất, phê duyệt.
+Format: "• [Quyết định] (đoạn X)"
+
+CÔNG VIỆC: nhiệm vụ, deadline, cam kết.
+Format: "• [Việc gì] → [Ai] — deadline: [nếu có] (đoạn X)"
+
+VẤN ĐỀ MỞ: vấn đề chưa thống nhất hoặc chưa có kết luận.
+
+KẾT LUẬN: kết luận cuối cuộc họp (nếu có)."""
 
 SUMMARIZE_SYSTEM_PROMPT = """\
-Viết tóm tắt cuộc họp/cuộc gọi tiếng Việt từ thông tin đã trích xuất.
-
-QUY TẮC:
-- CHỈ dùng thông tin từ TRÍCH XUẤT. KHÔNG thêm mới. KHÔNG suy diễn.
-- Cấu trúc tùy loại: họp nhiều người cần đầy đủ (diễn biến, quyết định, action items). \
-Cuộc gọi 2 người chỉ cần: mục đích, nội dung chính, kết quả.
-- Tóm tắt tổng quan trả lời: Họp về gì? Ai tham dự? Kết quả chính?
-- Quyết định: CHỈ những gì đã "thống nhất/chốt". Đánh số thứ tự.
-- Công việc: bao gồm cả giao việc ẩn ("rà soát", "báo cáo lại", "nghiên cứu").
-- GIỮ CHÍNH XÁC số liệu và tên văn bản.
-- Trả về DUY NHẤT JSON hợp lệ, tiếng Việt. KHÔNG wrap markdown."""
+Viết báo cáo tóm tắt cuộc họp. CHỈ dùng thông tin từ TRÍCH XUẤT, KHÔNG thêm mới.
+Giữ nguyên tên, số liệu chính xác. Trả về DUY NHẤT JSON hợp lệ, tiếng Việt.
+KHÔNG wrap JSON trong ```json``` hay markdown."""
 
 SUMMARIZE_USER_TEMPLATE = """\
+CUỘC HỌP: {duration_min} phút | {speaker_list}
+
 TRÍCH XUẤT:
 {extracted_facts}
 
 ---
-JSON (ngắn gọn, mỗi key_point tối đa 2 câu):
+Trả về JSON:
 {{
-  "title": "Tiêu đề (dưới 15 từ)",
-  "summary": "Tóm tắt 2-3 câu: họp về gì, ai tham dự, kết quả chính",
+  "title": "Tiêu đề ngắn gọn (dưới 15 từ)",
+  "summary": "Tóm tắt tổng quan 2-3 câu, tập trung diễn biến chính và kết luận",
   "key_points": [
-    {{"text": "Nội dung ngắn gọn", "speaker": "Ai nói", "refs": [0]}}
+    {{"text": "Nội dung", "speaker": "Ai nói", "refs": [0, 3]}}
   ],
   "decisions": [
-    {{"text": "Quyết định đã chốt (không phải thảo luận)", "refs": [5]}}
+    {{"text": "Quyết định", "refs": [12]}}
   ],
   "action_items": [
-    {{"text": "Việc cần làm", "assignee": "Ai chịu trách nhiệm", "deadline": "mốc thời gian hoặc null", "refs": [10]}}
+    {{"text": "Việc cần làm", "assignee": "Ai", "deadline": "khi nào hoặc null", "refs": [15]}}
   ],
   "open_issues": [
-    {{"text": "Vấn đề đang bàn chưa có kết luận", "refs": [15]}}
+    {{"text": "Vấn đề chưa giải quyết", "refs": [20]}}
   ],
-  "conclusion": "Kết luận cuối (string hoặc null)"
+  "conclusion": "Kết luận cuối cuộc họp (string hoặc null)"
 }}
 
-refs = mảng số nguyên (đoạn). Section rỗng → []. Gộp ý trùng nếu có nhiều phần."""
+Quy tắc: refs = mảng số nguyên (đoạn). Section rỗng → []. conclusion = string hoặc null.
+Nếu trích xuất có nhiều phần: gộp ý trùng, ưu tiên phần sau."""
 
 # JSON Schema cho constrained decoding (llama-cpp-python response_format)
 SUMMARY_JSON_SCHEMA = {

@@ -376,6 +376,7 @@ async function renderAdminConfig(el) {
     const summModel = config.summarizer_ollama_model || 'qwen3.5:4b';
 
     let html = '';
+    const isOllama = summPath.startsWith('http');
 
     // === Summarizer Section ===
     html += '<div class="admin-section">';
@@ -392,36 +393,51 @@ async function renderAdminConfig(el) {
     if (summEnabled) {
         if (summStatus.available) {
             statusHtml = '<span style="color:var(--success)">San sang</span>';
-        } else if (summPath && summPath.startsWith('http')) {
+        } else if (isOllama) {
             statusHtml = '<span style="color:var(--warning)">Ollama: kiem tra ket noi...</span>';
         } else if (summPath) {
-            statusHtml = '<span style="color:var(--danger)">Model khong tim thay: ' + escapeHtml(summPath) + '</span>';
+            statusHtml = '<span style="color:var(--danger)">Model khong tim thay</span>';
         } else {
-            statusHtml = '<span style="color:var(--warning)">Chua cau hinh model. Nhan "Tai model" hoac nhap duong dan.</span>';
+            statusHtml = '<span style="color:var(--warning)">Chua cau hinh. Nhan "Tai model" hoac chon file.</span>';
         }
     } else {
         statusHtml = '<span style="color:var(--text-secondary)">Da tat</span>';
     }
     html += '<div class="form-group form-row"><label>Trang thai:</label> ' + statusHtml + '</div>';
 
-    // Model path
+    // Backend radio
     html += '<div class="form-group">';
-    html += '<label>Model path / Ollama URL</label>';
-    html += '<input type="text" id="cfg-summ-path" value="' + escapeHtml(summPath) + '" placeholder="models/Qwen3.5-4B-Q4_K_M.gguf hoac http://localhost:11434" style="width:100%">';
-    html += '<div class="form-hint">File GGUF local (uu tien, dung llama.cpp) hoac URL Ollama server</div>';
+    html += '<label>Backend:</label><br>';
+    html += '<label class="form-check" style="margin-bottom:4px"><input type="radio" name="cfg-summ-backend" value="llama" ' + (!isOllama ? 'checked' : '') + ' onchange="adminToggleSummBackend()"> llama.cpp (GGUF local — nhanh, chinh xac)</label><br>';
+    html += '<label class="form-check"><input type="radio" name="cfg-summ-backend" value="ollama" ' + (isOllama ? 'checked' : '') + ' onchange="adminToggleSummBackend()"> Ollama (goi API server)</label>';
     html += '</div>';
 
-    // Ollama model name
+    // llama.cpp section
+    html += '<div id="cfg-summ-llama" style="' + (isOllama ? 'display:none' : '') + '">';
     html += '<div class="form-group">';
-    html += '<label>Ten model Ollama</label>';
-    html += '<input type="text" id="cfg-summ-model" value="' + escapeHtml(summModel) + '" placeholder="qwen3.5:4b" style="width:200px">';
-    html += '<div class="form-hint">Chi dung khi tro toi Ollama URL</div>';
+    html += '<label>File GGUF</label>';
+    html += '<input type="text" id="cfg-summ-path" value="' + escapeHtml(isOllama ? '' : summPath) + '" placeholder="Duong dan file .gguf" style="width:100%">';
     html += '</div>';
-
-    // Buttons
     html += '<div class="admin-form-actions">';
-    html += '<button class="btn btn-primary" onclick="adminSaveConfig()">Luu cau hinh</button>';
     html += '<button class="btn" id="btn-dl-model" onclick="adminDownloadModel()">Tai model Qwen3.5-4B (~2.7 GB)</button>';
+    html += '</div>';
+    html += '</div>';
+
+    // Ollama section
+    html += '<div id="cfg-summ-ollama" style="' + (!isOllama ? 'display:none' : '') + '">';
+    html += '<div class="form-group">';
+    html += '<label>Ollama URL</label>';
+    html += '<input type="text" id="cfg-summ-ollama-url" value="' + escapeHtml(isOllama ? summPath : 'http://localhost:11434') + '" placeholder="http://localhost:11434" style="width:100%">';
+    html += '</div>';
+    html += '<div class="form-group">';
+    html += '<label>Ten model</label>';
+    html += '<input type="text" id="cfg-summ-model" value="' + escapeHtml(summModel) + '" placeholder="qwen3.5:4b" style="width:200px">';
+    html += '</div>';
+    html += '</div>';
+
+    // Save
+    html += '<div class="admin-form-actions" style="margin-top:12px">';
+    html += '<button class="btn btn-primary" onclick="adminSaveConfig()">Luu cau hinh</button>';
     html += '</div>';
 
     html += '<div id="cfg-summ-msg" class="form-hint" style="margin-top:8px"></div>';
@@ -457,10 +473,24 @@ async function renderAdminConfig(el) {
     el.innerHTML = html;
 }
 
+function adminToggleSummBackend() {
+    const isOllama = document.querySelector('input[name="cfg-summ-backend"][value="ollama"]').checked;
+    document.getElementById('cfg-summ-llama').style.display = isOllama ? 'none' : '';
+    document.getElementById('cfg-summ-ollama').style.display = isOllama ? '' : 'none';
+}
+
 async function adminSaveConfig() {
     const enabled = document.getElementById('cfg-summ-enabled').checked;
-    const path = document.getElementById('cfg-summ-path').value.trim();
-    const model = document.getElementById('cfg-summ-model').value.trim();
+    const isOllama = document.querySelector('input[name="cfg-summ-backend"][value="ollama"]').checked;
+
+    let path, model;
+    if (isOllama) {
+        path = (document.getElementById('cfg-summ-ollama-url').value.trim()) || 'http://localhost:11434';
+        model = (document.getElementById('cfg-summ-model').value.trim()) || 'qwen3.5:4b';
+    } else {
+        path = document.getElementById('cfg-summ-path').value.trim();
+        model = 'qwen3.5:4b';
+    }
 
     try {
         await apiFetch('/api/admin/config', {
@@ -468,7 +498,7 @@ async function adminSaveConfig() {
             body: JSON.stringify({
                 summarizer_enabled: enabled ? '1' : '0',
                 summarizer_model_path: path,
-                summarizer_ollama_model: model || 'qwen3.5:4b',
+                summarizer_ollama_model: model,
             }),
         });
         showToast('Da luu cau hinh tom tat');
@@ -510,8 +540,12 @@ async function adminDownloadModel() {
         msg.style.color = 'var(--success)';
         btn.textContent = 'Da tai xong';
         // Auto-fill path
+        // Auto-fill path vào field GGUF
         const pathEl = document.getElementById('cfg-summ-path');
         if (pathEl && resp.path) pathEl.value = resp.path;
+        // Đảm bảo đang chọn llama.cpp backend
+        const llamaRadio = document.querySelector('input[name="cfg-summ-backend"][value="llama"]');
+        if (llamaRadio) { llamaRadio.checked = true; adminToggleSummBackend(); }
     } catch (e) {
         msg.textContent = 'Loi: ' + e.message;
         msg.style.color = 'var(--danger)';
