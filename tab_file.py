@@ -1281,6 +1281,7 @@ class FileProcessingTab(QWidget):
             "speaker_model": self.combo_speaker_model.currentData(),
             "save_ram": self.check_save_ram.isChecked(),
             "preprocess_rms_normalize": self.check_rms_normalize.isChecked(),
+            "resample_quality": "soxr_hq",
         }
 
     def _on_save_ram_changed(self, state):

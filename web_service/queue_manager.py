@@ -57,14 +57,16 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
 
         if progress_callback and total_duration > 0:
             # Dùng Popen + -progress pipe:1 để parse tiến độ realtime
+            # stderr=DEVNULL tránh deadlock khi buffer đầy (file dài > 15 phút trên Windows)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
+                "-vn", "-ac", "1",
                 "-acodec", "pcm_s16le",
                 "-progress", "pipe:1",
                 output_path,
             ]
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
             )
 
             last_pct = -1
@@ -80,15 +82,14 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
                     except (ValueError, ZeroDivisionError):
                         pass
 
-            proc.wait(timeout=300)
+            proc.wait(timeout=600)
             if proc.returncode != 0:
-                stderr_text = proc.stderr.read() if proc.stderr else ""
-                logger.error(f"ffmpeg error: {stderr_text[:500]}")
                 raise RuntimeError(f"ffmpeg failed with code {proc.returncode}")
         else:
             # Fallback: blocking call không có progress (file WAV hoặc không cần)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
+                "-vn", "-ac", "1",
                 "-acodec", "pcm_s16le",
                 output_path,
             ]
