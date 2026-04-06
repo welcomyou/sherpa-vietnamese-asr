@@ -149,8 +149,6 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 - [WeSpeaker](https://github.com/wenet-e2e/wespeaker) — ResNet34-LM Speaker Embedding
 - [Silero VAD](https://github.com/snakers4/silero-vad) — Voice Activity Detection
 - [DNSMOS](https://github.com/microsoft/DNS-Challenge) — Audio Quality Assessment
-- [NARA-WPE](https://github.com/fgnt/nara_wpe) — Speech Dereverberation
-- [Segment-Any-Text (SAT)](https://huggingface.co/segment-any-text/sat-12l-sm) — Sentence Segmentation
 
 ### Papers
 
@@ -158,8 +156,6 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 - Bredin et al., "Pyannote.audio 2.1" — *arXiv* 2023 ([2310.00032](https://arxiv.org/abs/2310.00032)) — Speaker diarization pipeline
 - Chen et al., "3D-Speaker" — *arXiv* 2024 ([2403.19971](https://arxiv.org/abs/2403.19971)) — CAM++ spectral clustering
 - Prabhavalkar et al., "Automatic gain control and multi-style training for robust ASR" — *ICASSP* 2015 ([pdf](https://research.google.com/pubs/archive/43289.pdf)) — Per-segment RMS normalization
-- Drude et al., "NARA-WPE: weighted prediction error dereverberation" — *IEEE TASLP* 2024 ([doi](https://dl.acm.org/doi/10.1109/TASLP.2024.3440003)) — Speech dereverberation
-- TruCLeS, "Confidence Estimation for LLM-based ASR error correction" — *Interspeech* 2025 — ASR confidence scoring
 
 ## License
 
