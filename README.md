@@ -138,13 +138,28 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 
 ## Ghi nhận
 
+### Thư viện & Models
+
 - [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) — ASR Engine
-- [hynt/Zipformer-30M-RNNT-6000h](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) — Vietnamese ASR Model
-- [csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20](https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20) — Vietnamese ASR Model
+- [hynt/Zipformer-30M-RNNT-6000h](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) — Vietnamese ASR Model (30M)
+- [csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20](https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20) — Vietnamese ASR Model (68M)
 - [ViBERT-capu](https://huggingface.co/dragonSwing/vibert-capu) — Punctuation Restoration
-- [Pyannote](https://github.com/pyannote/pyannote-audio) — Speaker Diarization
+- [Pyannote](https://github.com/pyannote/pyannote-audio) — Speaker Diarization Pipeline
 - [3D-Speaker](https://github.com/modelscope/3D-Speaker) — CAM++ Speaker Embedding
-- [DNSMOS](https://github.com/microsoft/DNS-Challenge) — Audio Quality
+- [WeSpeaker](https://github.com/wenet-e2e/wespeaker) — ResNet34-LM Speaker Embedding
+- [Silero VAD](https://github.com/snakers4/silero-vad) — Voice Activity Detection
+- [DNSMOS](https://github.com/microsoft/DNS-Challenge) — Audio Quality Assessment
+- [NARA-WPE](https://github.com/fgnt/nara_wpe) — Speech Dereverberation
+- [Segment-Any-Text (SAT)](https://huggingface.co/segment-any-text/sat-12l-sm) — Sentence Segmentation
+
+### Papers
+
+- Cychosz et al., "Natural conversational turn-taking" — *Scientific Reports* 2025 ([doi](https://www.nature.com/articles/s41598-025-24381-1)) — NaturalTurn backchannel detection
+- Bredin et al., "Pyannote.audio 2.1" — *arXiv* 2023 ([2310.00032](https://arxiv.org/abs/2310.00032)) — Speaker diarization pipeline
+- Chen et al., "3D-Speaker" — *arXiv* 2024 ([2403.19971](https://arxiv.org/abs/2403.19971)) — CAM++ spectral clustering
+- Prabhavalkar et al., "Automatic gain control and multi-style training for robust ASR" — *ICASSP* 2015 ([pdf](https://research.google.com/pubs/archive/43289.pdf)) — Per-segment RMS normalization
+- Drude et al., "NARA-WPE: weighted prediction error dereverberation" — *IEEE TASLP* 2024 ([doi](https://dl.acm.org/doi/10.1109/TASLP.2024.3440003)) — Speech dereverberation
+- TruCLeS, "Confidence Estimation for LLM-based ASR error correction" — *Interspeech* 2025 — ASR confidence scoring
 
 ## License
 
