@@ -90,4 +90,10 @@ amthanhhoitruong.txt
 *.dll
 generate_bpe_vocab.py
 *.db
+*.db-shm
+*.db-wal
 .claude/settings.json
+
+# Secrets & certs
+web_service/certs/
+web_service/data/.jwt_secret
