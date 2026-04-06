@@ -682,3 +682,15 @@ class ThreeDSpeakerCamppDiarizer:
             progress_callback(100)
 
         return segments
+
+    def unload(self):
+        """Giải phóng ONNX sessions khỏi RAM."""
+        import gc
+        if self.emb_sess is not None:
+            del self.emb_sess
+            self.emb_sess = None
+        if self.vad_sess is not None:
+            del self.vad_sess
+            self.vad_sess = None
+        gc.collect()
+        print("[3DSpeaker-CAM++] Model unloaded")

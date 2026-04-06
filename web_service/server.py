@@ -306,12 +306,19 @@ def _get_models_sync():
 
     models_dir = os.path.join(BASE_DIR, "models")
     asr_models = []
-    # Chỉ 2 model: Zipformer 6000h (chính) và ROVER (6000h + 2025)
     from core.asr_engine import ROVER_MODEL_ID, ROVER_MODEL_IDS
-    primary_path = os.path.join(models_dir, ROVER_MODEL_IDS[0])
-    if os.path.isdir(primary_path):
-        asr_models.append({"id": ROVER_MODEL_IDS[0], "name": "hynt/Zipformer-30M (nhanh)"})
 
+    # Zipformer 30M (nhanh)
+    path_30m = os.path.join(models_dir, "zipformer-30m-rnnt-6000h")
+    if os.path.isdir(path_30m):
+        asr_models.append({"id": "zipformer-30m-rnnt-6000h", "name": "hynt/Zipformer-30M (nhanh)"})
+
+    # Zipformer 2025 68M (mặc định, chính xác hơn)
+    path_68m = os.path.join(models_dir, "sherpa-onnx-zipformer-vi-2025-04-20")
+    if os.path.isdir(path_68m):
+        asr_models.append({"id": "sherpa-onnx-zipformer-vi-2025-04-20", "name": "Zipformer-Vi 2025 (68M)"})
+
+    # ROVER (kết hợp 2 model, chậm nhưng chính xác nhất)
     rover_available = all(
         os.path.isdir(os.path.join(models_dir, mid)) for mid in ROVER_MODEL_IDS
     )
@@ -329,6 +336,7 @@ def _get_models_sync():
                 "id": model_id,
                 "name": info.get("name", model_id),
                 "default_threshold": int(SpeakerDiarizer.get_default_threshold(model_id) * 100),
+                "has_threshold": info.get("has_threshold", True),
             })
 
     return {
@@ -347,7 +355,7 @@ async def get_defaults():
         "punctuation_confidence": int(server_config.get("default_punctuation_confidence")),
         "case_confidence": int(server_config.get("default_case_confidence")),
         "diarization_threshold": int(server_config.get("default_diarization_threshold")),
-        "merge_short_speaker": True,
+        # merge_short_speaker removed — NaturalTurn luôn bật
         "max_upload_mb": int(server_config.get("max_upload_mb")),
         "offline_download_url": server_config.get("offline_download_url"),
     }
@@ -582,7 +590,6 @@ async def process_file(
                                     int(server_config.get("default_case_confidence"))),
         "diarization_threshold": body.get("diarization_threshold",
                                           int(server_config.get("default_diarization_threshold"))),
-        "merge_short_speaker": body.get("merge_short_speaker", True),
 
         "rms_normalize": body.get("rms_normalize", False),
     }

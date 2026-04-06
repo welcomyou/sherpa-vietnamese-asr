@@ -60,6 +60,10 @@ EXCLUDE_MODELS_ONLINE = {
     'cem-retrain',
     # Legacy diarization (pure ORT replaces)
     'speaker_embedding', 'speaker_diarization',
+    # Unused diarization variants
+    'diarizen',                    # 278MB wavlm-large — not used in runtime
+    'ecapa-wespeaker',             # not referenced in code
+    'campp-wespeaker',             # campp_pure_ort not in model registry
     # Not used
     'gtcrn',
     # Summary/LLM models (chưa hoàn thiện)
@@ -200,6 +204,13 @@ def copy_venv_packages_services():
         pth.unlink()
     for pth in dst_site.glob("*distutils-precedence*.pth"):
         pth.unlink()
+
+    # Clean CUDA DLLs from llama_cpp (server is CPU only, saves ~300MB)
+    llama_lib = dst_site / "llama_cpp" / "lib"
+    if llama_lib.exists():
+        for cuda_dll in list(llama_lib.glob("cuda*.dll")) + list(llama_lib.glob("cublas*.dll")):
+            cuda_dll.unlink()
+            print(f"  [CLEAN] Removed CUDA DLL: {cuda_dll.name}")
 
     # Create stubs (same as desktop build)
     from build_portable import _create_stubs
@@ -584,6 +595,11 @@ def main():
 
         clean_build()
 
+        # Xóa .opt files — máy target sẽ tự tạo lần đầu chạy (phụ thuộc ORT version + CPU)
+        for opt_file in DIST_DIR_ONLINE.rglob("*.opt"):
+            opt_file.unlink()
+            print(f"  [DEL] {opt_file.relative_to(DIST_DIR_ONLINE)} (ORT cache, auto-generated on target)")
+
         # Post-build validation
         print()
         print("[CHECK] Validating build...")
@@ -600,6 +616,8 @@ def main():
             "core/config.py",
             "core/asr_engine.py",
             "core/speaker_diarization.py",
+            "core/speaker_diarization_pure_ort.py",
+            "core/speaker_diarization_3dspeaker_campp.py",
             "web_service/__init__.py",
             "web_service/server.py",
             "web_service/config.py",

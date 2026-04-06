@@ -393,21 +393,36 @@ function populateModels(models, defaults) {
         }
     }
 
-    // Tu dong dieu chinh threshold khi doi speaker model (giong desktop)
+    // Luu has_threshold info
+    window._speakerModelHasThreshold = {};
+    for (const m of models.speaker_models) {
+        window._speakerModelHasThreshold[m.id] = m.has_threshold !== false;
+    }
+
+    // Tu dong dieu chinh threshold + an/hien khi doi speaker model
     spkSelect.addEventListener('change', () => {
         const modelId = spkSelect.value;
         const newThreshold = window._speakerModelThresholds[modelId] || 70;
         document.getElementById('cfg-threshold').value = newThreshold;
         updateSliderLabels();
+        // An/hien threshold row
+        const thresholdRow = document.getElementById('threshold-row');
+        if (thresholdRow) {
+            thresholdRow.style.display = window._speakerModelHasThreshold[modelId] ? '' : 'none';
+        }
     });
+
+    // Apply has_threshold cho model mac dinh
+    const defaultModelId = spkSelect.value;
+    const thresholdRow = document.getElementById('threshold-row');
+    if (thresholdRow && defaultModelId) {
+        thresholdRow.style.display = window._speakerModelHasThreshold[defaultModelId] !== false ? '' : 'none';
+    }
 
     // Apply defaults
     document.getElementById('cfg-punct').value = defaults.punctuation_confidence;
     document.getElementById('cfg-case').value = defaults.case_confidence;
     document.getElementById('cfg-threshold').value = defaults.diarization_threshold;
-    if (defaults.merge_short_speaker !== undefined) {
-        document.getElementById('cfg-merge-short-speaker').checked = defaults.merge_short_speaker;
-    }
     updateSliderLabels();
 }
 
@@ -538,7 +553,6 @@ function getASRConfig() {
         punctuation_confidence: parseInt(document.getElementById('cfg-punct').value),
         case_confidence: parseInt(document.getElementById('cfg-case').value),
         diarization_threshold: parseInt(document.getElementById('cfg-threshold').value),
-        merge_short_speaker: document.getElementById('cfg-merge-short-speaker').checked,
         gap_recover: false,
         rms_normalize: document.getElementById('cfg-rms-normalize').checked,
     };

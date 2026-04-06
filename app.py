@@ -251,6 +251,8 @@ class MainWindow(QMainWindow):
                 index = file_tab.combo_speaker_model.findData(speaker_model)
                 if index >= 0:
                     file_tab.combo_speaker_model.setCurrentIndex(index)
+                # Force update threshold visibility (signal may not fire if index unchanged)
+                file_tab.on_speaker_model_changed(file_tab.combo_speaker_model.currentIndex())
                 
                 save_ram = file_settings.getboolean('save_ram', True)
                 file_tab.check_save_ram.setChecked(save_ram)

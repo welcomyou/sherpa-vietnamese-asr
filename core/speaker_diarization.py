@@ -118,17 +118,6 @@ SPEAKER_EMBEDDING_MODELS = {
         "has_threshold": False,  # spectral clustering tự detect, không dùng threshold
         "description": "3D-Speaker pipeline — CAM++ 192-dim + Silero VAD + spectral clustering (arXiv 2403.19971)"
     },
-    "3dspeaker_ecapa": {
-        "name": "ECAPA-TDNN 192-dim (Spectral Clustering)",
-        "file": "3dspeaker_ecapa",
-        "size": "~25 MB",
-        "language": "Multilingual (EN)",
-        "speed": "Nhanh gấp 8x",
-        "accuracy": "Tốt",
-        "sample_rate": 16000,
-        "has_threshold": False,
-        "description": "SpeechBrain pipeline — ECAPA-TDNN 192-dim + Silero VAD + spectral clustering (Interspeech 2021)"
-    },
 }
 
 
@@ -158,11 +147,6 @@ def get_available_models(base_dir: str = None) -> Dict[str, str]:
             vad_path = os.path.join(base_dir, "models", "silero-vad", "silero_vad_16k_op15.onnx")
             if os.path.exists(campp_path) and os.path.exists(vad_path):
                 available[model_id] = "3dspeaker_campp"
-        elif model_id == "3dspeaker_ecapa":
-            ecapa_path = os.path.join(base_dir, "models", "ecapa-wespeaker", "voxceleb_ECAPA512_LM.onnx")
-            vad_path = os.path.join(base_dir, "models", "silero-vad", "silero_vad_16k_op15.onnx")
-            if os.path.exists(ecapa_path) and os.path.exists(vad_path):
-                available[model_id] = "3dspeaker_ecapa"
         else:
             model_path = os.path.join(models_dir, info["file"])
             if os.path.exists(model_path):
@@ -328,8 +312,7 @@ class SpeakerDiarizer:
                  threshold: float = 0.6,
                  min_duration_on: float = 0.3, # updated to realistic defaults
                  min_duration_off: float = 0.0,
-                 auth_token: str = None,
-                 merge_short_speaker: bool = True):
+                 auth_token: str = None):
         """
         Initialize speaker diarizer
         
@@ -360,13 +343,11 @@ class SpeakerDiarizer:
         self.model_info = None  # Store model info for reference
         self._pyannote_backend = None  # Community1Diarizer instance
         self.auth_token = auth_token or os.environ.get('HF_TOKEN', None)
-        self.merge_short_speaker = merge_short_speaker
         
     # Default thresholds for each model
     MODEL_DEFAULT_THRESHOLDS = {
         "community1_pure_ort": 0.7,
         "3dspeaker_campp": 0.5,
-        "3dspeaker_ecapa": 0.5,
     }
 
     @classmethod
@@ -530,8 +511,7 @@ class SpeakerDiarizer:
         segments = self._resolve_fragment_zones(segments, short_thresh=0.5, min_zone_size=3)
 
         # 3. NaturalTurn: floor-holding detection + secondary speech absorption
-        if self.merge_short_speaker:
-            segments = self._natural_turn_merge(segments, max_pause=1.5, asr_words=asr_words)
+        segments = self._natural_turn_merge(segments, max_pause=1.5, asr_words=asr_words)
 
         # 4. Final merge
         segments = self._merge_segments_with_gap(segments, max_gap=0.3)
@@ -1337,21 +1317,19 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
     emit("PHASE:Diarization|Đang khởi tạo model|0")
 
     # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
-    if speaker_model_id in ("3dspeaker_campp", "3dspeaker_ecapa"):
-        if speaker_model_id == "3dspeaker_campp":
-            from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
-            diarizer_3d = ThreeDSpeakerCamppDiarizer(
-                num_speakers=num_speakers, num_threads=num_threads)
-            label = "3D-Speaker CAM++"
-        else:
-            from core.speaker_diarization_3dspeaker_ecapa import ThreeDSpeakerEcapaDiarizer
-            diarizer_3d = ThreeDSpeakerEcapaDiarizer(
-                num_speakers=num_speakers, num_threads=num_threads)
-            label = "ECAPA-TDNN"
+    if speaker_model_id == "3dspeaker_campp":
+        from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
+        diarizer_3d = ThreeDSpeakerCamppDiarizer(
+            num_speakers=num_speakers, num_threads=num_threads)
+        label = "3D-Speaker CAM++"
         diarizer_3d.initialize()
 
+        def campp_progress(pct):
+            emit(f"PHASE:Diarization|Đang phân tách Người nói ({label})|{int(pct)}")
+
         emit(f"PHASE:Diarization|Đang phân tách Người nói ({label})|10")
-        raw_dict_segments = diarizer_3d.process(audio_file=audio_file)
+        raw_dict_segments = diarizer_3d.process(
+            audio_file=audio_file, progress_callback=campp_progress)
 
         speaker_segments_raw = [
             {
@@ -1369,7 +1347,7 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
         raw_segments = [Segment(s['start'], s['end'], s['speaker']) for s in raw_dict_segments]
 
         # NaturalTurn + fragment zone post-processing (same as pyannote pipeline)
-        merger = SpeakerDiarizer(merge_short_speaker=True)
+        merger = SpeakerDiarizer()
         raw_segments = merger._post_process_diarization_segments(raw_segments)
 
         # Update speaker_segments_raw with post-processed segments
@@ -1389,6 +1367,10 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
             transcribed_segments=segments,
             speaker_segments=raw_segments
         )
+
+        # Giải phóng model — chỉ dùng kết quả data từ đây
+        diarizer_3d.unload()
+        del diarizer_3d, merger
 
         elapsed = _time.time() - start_time
         emit("PHASE:Diarization|Hoàn thành|100")
@@ -1438,6 +1420,10 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
         transcribed_segments=segments,
         speaker_segments=raw_segments
     )
+
+    # Giải phóng model — chỉ dùng kết quả data từ đây
+    diarizer.unload()
+    del diarizer
 
     elapsed = _time.time() - start_time
     emit("PHASE:Diarization|Hoàn thành|100")

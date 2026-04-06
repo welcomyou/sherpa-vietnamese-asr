@@ -826,7 +826,7 @@ def _get_cached_restorer(device, confidence, case_confidence, prefer_int8=False)
 
 
 def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
-                          threshold, auth_token=None, merge_short_speaker=True):
+                          threshold, auth_token=None):
     """Lấy SpeakerDiarizer từ cache hoặc tạo mới + initialize.
 
     Chiến lược cache:
@@ -851,7 +851,7 @@ def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
                 # Sherpa: chỉ reuse nếu num_clusters cũng khớp
                 old_nc = _diarizer_cache_key[3] if len(_diarizer_cache_key) > 3 else None
                 if old_nc == num_clusters:
-                    _diarizer_cache.merge_short_speaker = merge_short_speaker
+                    # NaturalTurn luôn bật
                     logger.info(f"[ModelCache] Reusing SpeakerDiarizer sherpa "
                                 f"({embedding_model_id})")
                     return _diarizer_cache
@@ -859,7 +859,6 @@ def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
             else:
                 # Pyannote/Altunenes: update num_speakers per-call, không reload model
                 _update_diarizer_speakers(_diarizer_cache, num_clusters)
-                _diarizer_cache.merge_short_speaker = merge_short_speaker
                 logger.info(f"[ModelCache] Reusing SpeakerDiarizer pyannote "
                             f"({embedding_model_id}, speakers={num_clusters})")
                 return _diarizer_cache
@@ -878,7 +877,6 @@ def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
         num_threads=num_threads,
         threshold=threshold,
         auth_token=auth_token,
-        merge_short_speaker=merge_short_speaker,
     )
     diarizer.initialize()
     _diarizer_cache = diarizer
@@ -2349,22 +2347,26 @@ class TranscriberPipeline:
                     self._emit("PHASE:Diarization|Đang tải model phân tách|5")
 
                     # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
-                    if speaker_model_id in ("3dspeaker_campp", "3dspeaker_ecapa"):
-                        if speaker_model_id == "3dspeaker_campp":
-                            from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
-                            diarizer_3d = ThreeDSpeakerCamppDiarizer(
-                                num_speakers=num_speakers,
-                                num_threads=self.config.get("cpu_threads", 4))
-                        else:
-                            from core.speaker_diarization_3dspeaker_ecapa import ThreeDSpeakerEcapaDiarizer
-                            diarizer_3d = ThreeDSpeakerEcapaDiarizer(
-                                num_speakers=num_speakers,
-                                num_threads=self.config.get("cpu_threads", 4))
+                    if speaker_model_id == "3dspeaker_campp":
+                        from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
+                        diarizer_3d = ThreeDSpeakerCamppDiarizer(
+                            num_speakers=num_speakers,
+                            num_threads=self.config.get("cpu_threads", 4))
                         diarizer_3d.initialize()
+
+                        def campp_progress(pct):
+                            # CAM++ pct: 5=VAD, 15=VAD done, 30-80=embedding, 80=emb done, 90=clustering, 100=done
+                            self._emit(f"PHASE:Diarization|Đang phân tách (3D-Speaker CAM++)|{int(pct)}")
 
                         self._emit("PHASE:Diarization|Đang phân tách (3D-Speaker CAM++)|10")
                         raw_dict_segs = diarizer_3d.process(
-                            audio_file=None, audio_data=audio, audio_sample_rate=16000)
+                            audio_file=None, audio_data=audio, audio_sample_rate=16000,
+                            progress_callback=campp_progress)
+
+                        # Giải phóng 3D-Speaker model ngay — chỉ cần kết quả raw_dict_segs
+                        if self.config.get("save_ram", False):
+                            diarizer_3d.unload()
+                        del diarizer_3d
 
                         from core.speaker_diarization import Segment, SpeakerDiarizer
                         raw_segments = [Segment(s['start'], s['end'], s['speaker'])
@@ -2377,7 +2379,7 @@ class TranscriberPipeline:
                         ]
 
                         # NaturalTurn + fragment zone post-processing
-                        merger = SpeakerDiarizer(merge_short_speaker=True)
+                        merger = SpeakerDiarizer()
                         raw_segments = merger._post_process_diarization_segments(raw_segments)
 
                         speaker_segments_raw = [
@@ -2401,7 +2403,6 @@ class TranscriberPipeline:
                             num_threads=self.config.get("cpu_threads", 4),
                             threshold=self.config.get("diarization_threshold", 0.6),
                             auth_token=hf_token,
-                            merge_short_speaker=self.config.get("merge_short_speaker", True),
                         )
 
                         if self._is_cancelled():
@@ -2539,11 +2540,21 @@ class TranscriberPipeline:
                     restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence,
                                                         prefer_int8=self.config.get("save_ram", False))
 
+                    # GecBERT runs 3 iterations, each calls progress 0-100
+                    # Wrap to show overall progress across all iterations
+                    _punct_iter = [0]  # mutable counter
+                    _punct_n_iters = 3  # GecBERT default iterations
+
                     def punct_progress_cb(current, total):
                         if self._is_cancelled():
                             raise Exception("Cancelled by user")
-                        percent = int((current / max(1, total)) * 100)
-                        self._emit(f"PHASE:Punctuation|Đang thêm dấu câu ({current}/{total})|{percent}")
+                        # Detect iteration boundary: current==total → iteration done
+                        iter_pct = int((current / max(1, total)) * 100)
+                        if current >= total:
+                            _punct_iter[0] += 1
+                        overall = int((_punct_iter[0] * 100 + iter_pct) / _punct_n_iters)
+                        overall = min(overall, 99)  # cap at 99, 100 sent after restore
+                        self._emit(f"PHASE:Punctuation|Đang thêm dấu câu (bước {_punct_iter[0]+1}/{_punct_n_iters})|{overall}")
 
                     full_text = restorer.restore(
                         full_text, progress_callback=punct_progress_cb,
@@ -2708,11 +2719,18 @@ class TranscriberPipeline:
                                                         prefer_int8=self.config.get("save_ram", False))
                     logger.info("[DEBUG] PunctuationRestorer ready")
 
+                    _punct_iter2 = [0]
+                    _punct_n_iters2 = 3
+
                     def punct_progress_cb(current, total):
                         if self._is_cancelled():
                             raise Exception("Cancelled by user")
-                        percent = int((current / max(1, total)) * 100)
-                        self._emit(f"PHASE:Punctuation|Đang thêm dấu câu ({current}/{total})|{percent}")
+                        iter_pct = int((current / max(1, total)) * 100)
+                        if current >= total:
+                            _punct_iter2[0] += 1
+                        overall = int((_punct_iter2[0] * 100 + iter_pct) / _punct_n_iters2)
+                        overall = min(overall, 99)
+                        self._emit(f"PHASE:Punctuation|Đang thêm dấu câu (bước {_punct_iter2[0]+1}/{_punct_n_iters2})|{overall}")
 
                     # Tính pause_hints từ word timestamps để gợi ý model thêm dấu
                     pause_hints = None

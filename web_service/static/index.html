@@ -166,17 +166,12 @@
                             <label>Model người nói:</label>
                             <select id="cfg-speaker-model"></select>
                         </div>
-                        <div class="config-row">
+                        <div class="config-row" id="threshold-row">
                             <label>Ngưỡng:</label>
                             <input type="range" id="cfg-threshold" min="10" max="150" value="70" step="1">
                             <span id="cfg-threshold-label">0.70</span>
                         </div>
-                        <div class="config-row full-width">
-                            <label>
-                                <input type="checkbox" id="cfg-merge-short-speaker" checked>
-                                Gộp các đoạn đổi người nói ngắn
-                            </label>
-                        </div>
+                        <!-- merge_short_speaker removed — NaturalTurn luôn bật -->
                     </div>
                 </div>
             </div>

@@ -906,3 +906,19 @@ class PureOrtDiarizer:
             self.speaker_centroids = reindexed
 
         return segments
+
+    def unload(self):
+        """Giải phóng ONNX sessions khỏi RAM."""
+        import gc
+        if self.seg_sess is not None:
+            del self.seg_sess
+            self.seg_sess = None
+        if self.emb_sess is not None:
+            del self.emb_sess
+            self.emb_sess = None
+        self.emb_W = None
+        self.emb_b = None
+        self.plda_data = None
+        self.speaker_centroids = None
+        gc.collect()
+        print("[PureORT] Model unloaded")

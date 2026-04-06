@@ -109,6 +109,26 @@ MODELS_CONFIG = {
         "check_file": "embedding_model.onnx"
     },
     
+    # 3DSpeaker CAM++ (192-dim, dùng bởi speaker_diarization_3dspeaker_campp.py)
+    "campp_3dspeaker": {
+        "type": "huggingface_file",
+        "repo_id": "3D-Speaker/3D-Speaker",
+        "filename": "campplus_cn_en_common_200k.onnx",
+        "local_dir": "campp-3dspeaker",
+        "description": "CAM++ 192-dim Speaker Embedding (3D-Speaker, 27MB)",
+        "check_file": "campplus_cn_en_common_200k.onnx"
+    },
+
+    # Silero VAD (dùng bởi 3dspeaker_campp diarization)
+    "silero_vad": {
+        "type": "huggingface_file",
+        "repo_id": "snakers4/silero-vad",
+        "filename": "files/silero_vad_16k_op15.onnx",
+        "local_dir": "silero-vad",
+        "description": "Silero VAD 16kHz ONNX (1.3MB)",
+        "check_file": "silero_vad_16k_op15.onnx"
+    },
+
     # Audio Quality Model
     "dnsmos": {
         "type": "direct_download",

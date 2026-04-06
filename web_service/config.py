@@ -31,8 +31,8 @@ class ServerConfig:
         "anonymous_timeout_minutes": "120",
         "storage_per_user_gb": "5",
         "max_sessions": "100",
-        "default_asr_model": "zipformer-30m-rnnt-6000h",
-        "default_speaker_model": "community1_pure_ort",
+        "default_asr_model": "sherpa-onnx-zipformer-vi-2025-04-20",
+        "default_speaker_model": "3dspeaker_campp",
         "default_punctuation_confidence": "7",
         "default_case_confidence": "6",
         "default_diarization_threshold": "70",
@@ -63,6 +63,18 @@ class ServerConfig:
         for key, default in self.DEFAULTS.items():
             if not self._config.has_option("ServerSettings", key):
                 self._config.set("ServerSettings", key, default)
+
+        # Migration: update deprecated model IDs
+        old_speaker = self._config.get("ServerSettings", "default_speaker_model", fallback="")
+        if old_speaker in ("community1_onnx", "titanet_small", "campp_pure_ort"):
+            self._config.set("ServerSettings", "default_speaker_model", self.DEFAULTS["default_speaker_model"])
+
+        old_asr = self._config.get("ServerSettings", "default_asr_model", fallback="")
+        if old_asr == "zipformer-30m-rnnt-6000h":
+            # Upgrade to 68M if model exists
+            models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
+            if os.path.isdir(os.path.join(models_dir, self.DEFAULTS["default_asr_model"])):
+                self._config.set("ServerSettings", "default_asr_model", self.DEFAULTS["default_asr_model"])
 
     def save(self):
         """Ghi config.ini (giu nguyen cac section khac)"""

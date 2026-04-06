@@ -720,6 +720,10 @@ def copy_data():
         # Legacy diarization (replaced by pure ORT)
         'speaker_embedding',           # nemo titanet — not needed for pure ORT
         'speaker_diarization',         # sherpa-onnx segmentation — not needed for pure ORT
+        # Unused diarization variants
+        'diarizen',                    # 278MB wavlm-large — not used in runtime
+        'ecapa-wespeaker',             # not referenced in code
+        'campp-wespeaker',             # campp_pure_ort not in model registry
         # Audio enhancement not used
         'gtcrn',
         # Summary/LLM models (chưa hoàn thiện)

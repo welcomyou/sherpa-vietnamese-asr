@@ -449,26 +449,34 @@ class FileProcessingTab(QWidget):
         diarization_thresh_layout = QHBoxLayout()
         diarization_thresh_layout.addWidget(self.slider_diarization_threshold)
         diarization_thresh_layout.addWidget(self.label_diarization_threshold)
-        
-        form_config.addRow("  └─ Ngưỡng phân biệt:", diarization_thresh_layout)
+
+        # Wrap threshold row vào widget để ẩn/hiện toàn bộ
+        self.threshold_row_widget = QWidget()
+        thresh_vbox = QVBoxLayout(self.threshold_row_widget)
+        thresh_vbox.setContentsMargins(0, 0, 0, 0)
+        thresh_vbox.setSpacing(2)
+        thresh_label_row = QHBoxLayout()
+        self.threshold_row_label = QLabel("  └─ Ngưỡng phân biệt:")
+        thresh_label_row.addWidget(self.threshold_row_label)
+        thresh_label_row.addLayout(diarization_thresh_layout)
+        thresh_vbox.addLayout(thresh_label_row)
         self.label_diarization_threshold_tip = QLabel("Cao (1.00) = Gộp nhiều | Thấp (0.30) = Tách kỹ | ONNX: 0.80-1.20")
         self.label_diarization_threshold_tip.setStyleSheet(f"font-size: 9px; color: {COLORS['text_secondary']}; font-style: italic; margin-left: 4px;")
-        form_config.addRow("", self.label_diarization_threshold_tip)
+        thresh_vbox.addWidget(self.label_diarization_threshold_tip)
+        form_config.addRow(self.threshold_row_widget)
         
         # Model embedding extraction + Rerun button
         embedding_layout = QHBoxLayout()
         
         self.combo_speaker_model = QComboBox()
-        self.combo_speaker_model.addItem("Pyannote Community-1 (ResNet34+PLDA+VBx) — Chính xác nhất", "community1_pure_ort")
-        self.combo_speaker_model.addItem("3D-Speaker CAM++ 192-dim (Spectral) — Nhanh 5-6x", "3dspeaker_campp")
-        self.combo_speaker_model.addItem("ECAPA-TDNN 192-dim (Spectral) — Nhanh 8x", "3dspeaker_ecapa")
+        self.combo_speaker_model.addItem("Pyannote Community-1 (ResNet34+PLDA+VBx)", "community1_pure_ort")
+        self.combo_speaker_model.addItem("3D-Speaker CAM++ 192-dim (Spectral)", "3dspeaker_campp")
         self.combo_speaker_model.setCurrentIndex(0)
         self.combo_speaker_model.setEnabled(False)
         self.combo_speaker_model.setToolTip(
             "Chọn model phân đoạn người nói:\n"
-            "• Community-1: ResNet34-LM + PLDA + VBx — chính xác nhất\n"
-            "• CAM++ 3D-Speaker: spectral clustering — nhanh 5-6x\n"
-            "• ECAPA-TDNN: spectral clustering — nhanh 8x"
+            "• Community-1: ResNet34-LM + PLDA + VBx\n"
+            "• CAM++ 3D-Speaker: spectral clustering"
         )
         self.combo_speaker_model.currentIndexChanged.connect(self.on_speaker_model_changed)
         
@@ -502,14 +510,7 @@ class FileProcessingTab(QWidget):
         form_config.addRow("  └─ Model embedding:", embedding_layout)
 
         # Merge short speaker islands
-        self.check_merge_short_speaker = QCheckBox("Gộp các đoạn đổi người nói ngắn")
-        self.check_merge_short_speaker.setChecked(True)
-        self.check_merge_short_speaker.setEnabled(False)
-        self.check_merge_short_speaker.setToolTip(
-            "Gộp các đoạn ngắn (< 1.5 giây) nằm giữa cùng 1 người nói.\n"
-            "Giúp kết quả phân tách gọn hơn, tránh bị ngắt vụn."
-        )
-        form_config.addRow(self.check_merge_short_speaker)
+        # NaturalTurn luôn bật — merge_short_speaker luôn True, không cần UI
 
         # RMS Normalize Option
         self.check_rms_normalize = QCheckBox("Chuẩn hóa âm lượng từng đoạn (RMS)")
@@ -836,9 +837,8 @@ class FileProcessingTab(QWidget):
         model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {})
         has_threshold = model_info.get("has_threshold", True)
 
-        # Spectral clustering models don't use threshold slider
-        self.slider_diarization_threshold.setEnabled(has_threshold)
-        self.slider_diarization_threshold.setVisible(has_threshold)
+        # Spectral clustering models don't use threshold
+        self.threshold_row_widget.setVisible(has_threshold)
 
         default_threshold = SpeakerDiarizer.get_default_threshold(model_id)
         slider_value = int(default_threshold * 100)
@@ -851,8 +851,12 @@ class FileProcessingTab(QWidget):
         self.spin_num_speakers.setEnabled(is_checked)
         self.combo_speaker_model.setEnabled(is_checked)
         self.check_show_speaker_labels.setEnabled(is_checked)
-        self.slider_diarization_threshold.setEnabled(is_checked)
-        self.check_merge_short_speaker.setEnabled(is_checked)
+
+        # Threshold: chỉ hiện nếu model hỗ trợ
+        model_id = self.combo_speaker_model.currentData()
+        model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {})
+        has_threshold = model_info.get("has_threshold", True)
+        self.threshold_row_widget.setVisible(has_threshold)
         self.btn_rerun_diarization.setEnabled(is_checked and bool(self.segments))
 
     def on_show_speaker_labels_changed(self, state):
@@ -1275,7 +1279,6 @@ class FileProcessingTab(QWidget):
             "speaker_diarization": self.check_speaker_diarization.isChecked() and DIARIZATION_AVAILABLE,
             "num_speakers": -1 if self.spin_num_speakers.currentIndex() == 0 else int(self.spin_num_speakers.currentText()),
             "speaker_model": self.combo_speaker_model.currentData(),
-            "merge_short_speaker": self.check_merge_short_speaker.isChecked(),
             "save_ram": self.check_save_ram.isChecked(),
             "preprocess_rms_normalize": self.check_rms_normalize.isChecked(),
         }

@@ -107,6 +107,40 @@ def install_sherpa():
         subprocess.run([str(venv_python), "-m", "pip", "install", "sherpa-onnx"])
 
 
+def install_llama_cpp():
+    """Build and install llama-cpp-python from source (Gemma 4 support)"""
+    print("[3.5/4] Building llama-cpp-python from source (Gemma 4 support)...")
+    venv_python = get_venv_python()
+
+    # Dependencies cho llama-cpp-python
+    for dep in ["jinja2", "typing-extensions", "numpy", "diskcache"]:
+        subprocess.run([str(venv_python), "-m", "pip", "install", dep],
+                       capture_output=True)
+
+    # Build from git source (upstream latest — có Gemma 4)
+    print("      Building from source (cần GCC/MSVC, mất 5-15 phút)...")
+    result = subprocess.run(
+        [str(venv_python), "-m", "pip", "install",
+         "git+https://github.com/abetlen/llama-cpp-python.git",
+         "--no-cache-dir"],
+        capture_output=True, text=True, timeout=1200,
+    )
+    if result.returncode == 0:
+        print("      ✓ llama-cpp-python built from source (Gemma 4 ready)")
+    else:
+        # Fallback: pip install bản release (có thể chưa có Gemma 4)
+        print("      ⚠ Build from source failed, trying pip release...")
+        print(f"      Error: {result.stderr[-500:]}")
+        result2 = subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "llama-cpp-python"],
+            capture_output=True, text=True,
+        )
+        if result2.returncode == 0:
+            print("      ✓ llama-cpp-python installed from pip (may lack Gemma 4)")
+        else:
+            print("      ⚠ llama-cpp-python install failed — summarizer disabled")
+
+
 def test_imports():
     """Test if all imports work"""
     print("[4/4] Testing imports...")
@@ -121,10 +155,16 @@ import soundfile
 import PyQt6
 import psutil
 import sherpa_onnx
+try:
+    import llama_cpp
+    llama_ok = llama_cpp.__version__
+except ImportError:
+    llama_ok = "NOT INSTALLED"
 print("All imports OK!")
 print(f"numpy: {numpy.__version__}")
 print(f"torch: {torch.__version__}")
 print(f"sherpa_onnx: {hasattr(sherpa_onnx, 'OfflineRecognizer')}")
+print(f"llama_cpp: {llama_ok}")
 """
     result = subprocess.run([str(venv_python), "-c", test_code], 
                            capture_output=True, text=True)
@@ -143,6 +183,7 @@ def main():
         create_venv()
         install_packages()
         install_sherpa()
+        install_llama_cpp()
         test_imports()
         
         print()
