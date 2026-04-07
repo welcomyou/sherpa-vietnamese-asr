@@ -609,8 +609,8 @@ Văn phòng Thành ủy Thành phố Hồ Chí Minh.</p>
 
 <p style='color: #cccccc; margin: 8px 0;'><b>Lập trình:</b> Claude và những người bạn</p>
 
-<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 2.0<br>
-Ngày 30 tháng 03 năm 2026</p>
+<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 2.1<br>
+Ngày 07 tháng 04 năm 2026</p>
 
 <p style='color: #ffd700; margin: 15px 0; font-weight: bold; text-align: center;'>
 PHẦN MỀM SỬ DỤNG TRONG MÔI TRƯỜNG GIÁO DỤC, HÀNH CHÍNH CÔNG, TỔ CHỨC ĐẢNG, ĐOÀN THỂ.<br>
@@ -620,18 +620,22 @@ KHÔNG SỬ DỤNG CHO MỤC ĐÍCH THƯƠNG MẠI.
 <p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CHỨC NĂNG:</p>
 <p style='color: #cccccc; margin: 5px 0;'>
 • Chuyển ghi âm thành văn bản tiếng Việt (offline)<br>
-• Phân tách người nói (Speaker Diarization)<br>
+• 3 model ASR: Zipformer 30M, 68M, ROVER<br>
+• Phân tách người nói: Pyannote Community-1, Senko CAM++<br>
+• NaturalTurn: nhận diện lượt nói tự nhiên<br>
 • Tự động thêm dấu câu, viết hoa<br>
 • Nhận dạng real-time qua microphone<br>
-• Hỗ trợ hotwords (từ khóa tùy chỉnh)
+• Hỗ trợ hotwords (từ khóa tùy chỉnh)<br>
+• Đánh giá chất lượng âm thanh (DNSMOS)
 </p>
 
 <p style='color: #28a745; margin: 10px 0; font-weight: bold;'>CÔNG NGHỆ:</p>
 <ul style='color: #cccccc; margin: 5px 0; padding-left: 20px;'>
-<li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T</li>
-<li><b>Diarization:</b> Pyannote Community-1 (Pure ONNX Runtime)</li>
+<li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T (30M + 68M)</li>
+<li><b>Diarization:</b> Pyannote Community-1 + Senko CAM++ (Pure ONNX Runtime)</li>
 <li><b>Dấu câu:</b> ViBERT-capu (ONNX)</li>
-<li><b>VAD:</b> Silero VAD (ONNX)</li>
+<li><b>VAD:</b> Pyannote Segmentation (ONNX)</li>
+<li><b>Resampling:</b> SoXR HQ</li>
 <li><b>Giao diện:</b> PyQt6</li>
 </ul>
 """

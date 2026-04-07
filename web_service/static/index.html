@@ -480,7 +480,7 @@
             <div class="modal-body about-body">
                 <div class="about-hero">
                     <div class="about-app-name">sherpa-vietnamese-asr</div>
-                    <div class="about-version">Phiên bản 2.0 &mdash; 30/03/2026</div>
+                    <div class="about-version">Phiên bản 2.1 &mdash; 07/04/2026</div>
                 </div>
 
                 <div class="about-info-grid">
@@ -504,21 +504,27 @@
                     <summary>Chức năng</summary>
                     <ul>
                         <li>Chuyển ghi âm thành văn bản tiếng Việt (offline)</li>
-                        <li>Phân tách người nói (Speaker Diarization)</li>
+                        <li>3 model ASR: Zipformer 30M, 68M, ROVER</li>
+                        <li>Phân tách người nói: Pyannote Community-1, Senko CAM++</li>
+                        <li>NaturalTurn: nhận diện lượt nói tự nhiên</li>
                         <li>Tự động thêm dấu câu, viết hoa</li>
-                        <li>Nhận dạng real-time qua microphone</li>
+                        <li>Tóm tắt cuộc họp (Gemma 4 E2B)</li>
                         <li>Hỗ trợ hotwords (từ khóa tùy chỉnh)</li>
+                        <li>Đánh giá chất lượng âm thanh (DNSMOS)</li>
+                        <li>PWA — cài trên mobile/desktop như app native</li>
                     </ul>
                 </details>
 
                 <details class="about-details">
                     <summary>Công nghệ</summary>
                     <ul>
-                        <li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T</li>
-                        <li><b>Diarization:</b> Pyannote Community-1 (Pure ONNX Runtime)</li>
+                        <li><b>ASR:</b> Sherpa-ONNX, Zipformer RNN-T (30M + 68M)</li>
+                        <li><b>Diarization:</b> Pyannote Community-1 + Senko CAM++ (Pure ONNX Runtime)</li>
                         <li><b>Dấu câu:</b> ViBERT-capu (ONNX)</li>
-                        <li><b>VAD:</b> Silero VAD (ONNX)</li>
-                        <li><b>Web:</b> FastAPI, WebSocket</li>
+                        <li><b>VAD:</b> Pyannote Segmentation (ONNX)</li>
+                        <li><b>Summarizer:</b> Gemma 4 E2B (GGUF, llama-cpp-python)</li>
+                        <li><b>Resampling:</b> SoXR VHQ</li>
+                        <li><b>Web:</b> FastAPI, WebSocket, SQLite</li>
                     </ul>
                 </details>
             </div>
