@@ -47,6 +47,7 @@ class FastJSONLoadThread(QThread):
             self.result_speaker_mapping = speaker_mapping
             self.result_speaker_colors = speaker_colors
             self.result_has_speakers = has_speakers
+            self.result_speaker_diarization_text = data.get('speaker_diarization_text', '')
 
             self.finished_loading.emit()
 
@@ -469,14 +470,16 @@ class FileProcessingTab(QWidget):
         embedding_layout = QHBoxLayout()
         
         self.combo_speaker_model = QComboBox()
-        self.combo_speaker_model.addItem("Pyannote Community-1 (ResNet34+PLDA+VBx)", "community1_pure_ort")
-        self.combo_speaker_model.addItem("3D-Speaker CAM++ 192-dim (Spectral)", "3dspeaker_campp")
+        self.combo_speaker_model.addItem("Pyannote Community-1 (ResNet34+PLDA+VBx - Chậm, chính xác)", "community1_pure_ort")
+        self.combo_speaker_model.addItem("Senko CAM++ (Optimized - Nhanh)", "senko_campp_optimized")
+        self.combo_speaker_model.addItem("Senko CAM++ (Tiết kiệm RAM)", "senko_campp")
         self.combo_speaker_model.setCurrentIndex(0)
         self.combo_speaker_model.setEnabled(False)
         self.combo_speaker_model.setToolTip(
             "Chọn model phân đoạn người nói:\n"
-            "• Community-1: ResNet34-LM + PLDA + VBx\n"
-            "• CAM++ 3D-Speaker: spectral clustering"
+            "• Community-1: Chính xác nhất, chậm nhất\n"
+            "• Senko Optimized: Nhanh gấp 6-7x, tốn thêm ~200MB RAM\n"
+            "• Senko Tiết kiệm RAM: Nhanh gấp 3x, tiết kiệm RAM hơn"
         )
         self.combo_speaker_model.currentIndexChanged.connect(self.on_speaker_model_changed)
         
@@ -1038,7 +1041,16 @@ class FileProcessingTab(QWidget):
         self.has_speaker_diarization = thread.result_has_speakers
         self.current_highlight_index = -1
         self._last_rendered_highlight = -1
-        
+
+        # Hiển thị tab Người nói từ JSON
+        spk_text = getattr(thread, 'result_speaker_diarization_text', '')
+        if spk_text:
+            self.text_speaker_raw_output.setPlainText(spk_text)
+        elif self.has_speaker_diarization:
+            self.text_speaker_raw_output.setPlainText("Dữ liệu người nói có trong nội dung, nhưng không có thông tin RAW/FINAL.")
+        else:
+            self.text_speaker_raw_output.setPlainText("Không có dữ liệu phân tách Người nói.")
+
         # Dọn dẹp an toàn Thread bằng deleteLater()
         thread.deleteLater()
         if getattr(self, '_json_load_thread', None) == thread:
@@ -1740,6 +1752,12 @@ class FileProcessingTab(QWidget):
                 model_type='file',
                 duration_sec=duration_sec
             )
+
+            # Lưu nội dung tab Người nói vào JSON
+            speaker_tab_text = self.text_speaker_raw_output.toPlainText()
+            if speaker_tab_text and speaker_tab_text != "Không có dữ liệu phân tách Người nói.":
+                json_data['speaker_diarization_text'] = speaker_tab_text
+
             _save_asr_json_file(json_path, json_data)
             
             # Mark as saved
@@ -1820,6 +1838,11 @@ class FileProcessingTab(QWidget):
             self.has_speaker_diarization = has_speakers
             self.current_highlight_index = -1
             self._last_rendered_highlight = -1
+
+            # Hiển thị tab Người nói từ JSON
+            spk_text = data.get('speaker_diarization_text', '')
+            if spk_text:
+                self.text_speaker_raw_output.setPlainText(spk_text)
 
             # Render
             self.render_text_content(immediate=True)
@@ -2756,21 +2779,6 @@ class FileProcessingTab(QWidget):
                 lines.append(f"{i:<4} {spk:<14} {fmt_time(start):<12} {fmt_time(end):<12} {dur:>6.2f}s")
 
             lines.append("")
-
-            # Thống kê
-            final_stats = {}
-            for spk, start, end in groups:
-                dur = end - start
-                if spk not in final_stats:
-                    final_stats[spk] = {'count': 0, 'total_time': 0}
-                final_stats[spk]['count'] += 1
-                final_stats[spk]['total_time'] += dur
-
-            lines.append("Thống kê:")
-            for spk, stats in sorted(final_stats.items()):
-                lines.append(f"  {spk}: {stats['count']} lượt, tổng {stats['total_time']:.1f}s")
-
-            lines.append("")
             lines.append("")
 
         # ═══ RAW (trước post-processing) ═══
@@ -2793,21 +2801,6 @@ class FileProcessingTab(QWidget):
             end = seg.get('end', 0)
             duration = end - start
             lines.append(f"{i:<4} {speaker:<14} {fmt_time(start):<12} {fmt_time(end):<12} {duration:>6.2f}s")
-
-        lines.append("")
-        lines.append("Thống kê:")
-
-        speaker_stats = {}
-        for seg in sorted_segments:
-            speaker = seg.get('speaker', 'Unknown')
-            duration = seg.get('end', 0) - seg.get('start', 0)
-            if speaker not in speaker_stats:
-                speaker_stats[speaker] = {'count': 0, 'total_time': 0}
-            speaker_stats[speaker]['count'] += 1
-            speaker_stats[speaker]['total_time'] += duration
-
-        for speaker, stats in sorted(speaker_stats.items()):
-            lines.append(f"  {speaker}: {stats['count']} đoạn, tổng {stats['total_time']:.1f}s")
 
         lines.append("=" * 70)
 
@@ -2877,19 +2870,40 @@ class FileProcessingTab(QWidget):
             # Sort segments theo thớigian để đảm bảo index khớp với thứ tự hiển thị
             self.segments.sort(key=lambda x: x.get('start', 0))
             if self.paragraphs:
-                new_paragraphs = []
-                seg_idx = 0
+                # Tính time-range cho mỗi paragraph
+                para_ranges = []
                 for para in self.paragraphs:
-                    para_sents = para.get('sentences', [])
-                    new_para_sents = []
-                    for _ in para_sents:
-                        if seg_idx < len(merged_segments):
-                            new_para_sents.append(merged_segments[seg_idx])
-                            seg_idx += 1
-                    if new_para_sents:
+                    sents = para.get('sentences', [])
+                    if sents:
+                        p_start = min(s.get('start', 0) for s in sents)
+                        p_end = max(s.get('end', 0) for s in sents)
+                        para_ranges.append((p_start, p_end))
+                    else:
+                        para_ranges.append((0, 0))
+
+                # Gán segments mới vào paragraph theo time overlap
+                new_para_sents_list = [[] for _ in self.paragraphs]
+                for seg in merged_segments:
+                    seg_mid = (seg.get('start', 0) + seg.get('end', 0)) / 2
+                    best_pi = 0
+                    best_dist = float('inf')
+                    for pi, (p_start, p_end) in enumerate(para_ranges):
+                        if p_start <= seg_mid <= p_end:
+                            best_pi = pi
+                            best_dist = 0
+                            break
+                        dist = min(abs(seg_mid - p_start), abs(seg_mid - p_end))
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_pi = pi
+                    new_para_sents_list[best_pi].append(seg)
+
+                new_paragraphs = []
+                for sents in new_para_sents_list:
+                    if sents:
                         new_paragraphs.append({
-                            'text': ' '.join(s.get('text', '') for s in new_para_sents),
-                            'sentences': new_para_sents
+                            'text': ' '.join(s.get('text', '') for s in sents),
+                            'sentences': sents
                         })
                 self.paragraphs = new_paragraphs
         

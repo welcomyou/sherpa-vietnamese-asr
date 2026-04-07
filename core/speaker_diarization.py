@@ -98,7 +98,7 @@ def _setup_ffmpeg_path():
 # Speaker embedding model registry
 SPEAKER_EMBEDDING_MODELS = {
     "community1_pure_ort": {
-        "name": "Pyannote Community-1 (ResNet34-LM + PLDA + VBx)",
+        "name": "Pyannote Community-1 (ResNet34-LM + PLDA + VBx - Chậm, chính xác)",
         "file": "community1_pure_ort",
         "size": "~32 MB",
         "language": "Multilingual",
@@ -107,16 +107,27 @@ SPEAKER_EMBEDDING_MODELS = {
         "sample_rate": 16000,
         "description": "Pyannote Community-1 via ONNX Runtime — ResNet34-LM + PLDA + VBx, no PyTorch"
     },
-    "3dspeaker_campp": {
-        "name": "3D-Speaker CAM++ 192-dim (Spectral Clustering)",
-        "file": "3dspeaker_campp",
-        "size": "~28 MB",
+    "senko_campp": {
+        "name": "Senko CAM++ (Tiết kiệm RAM)",
+        "file": "senko_campp",
+        "size": "~27 MB",
         "language": "Multilingual (ZH+EN)",
-        "speed": "Nhanh gấp 5-6x",
+        "speed": "Nhanh gấp 3x",
         "accuracy": "Tốt",
         "sample_rate": 16000,
-        "has_threshold": False,  # spectral clustering tự detect, không dùng threshold
-        "description": "3D-Speaker pipeline — CAM++ 192-dim + Silero VAD + spectral clustering (arXiv 2403.19971)"
+        "has_threshold": False,
+        "description": "Senko pipeline — CAM++ 192-dim + pyannote VAD + spectral + mer_cos merge (github.com/narcotic-sh/senko)"
+    },
+    "senko_campp_optimized": {
+        "name": "Senko CAM++ (Optimized - Nhanh)",
+        "file": "senko_campp_optimized",
+        "size": "~27 MB",
+        "language": "Multilingual (ZH+EN)",
+        "speed": "Nhanh gấp 6-7x",
+        "accuracy": "Tốt",
+        "sample_rate": 16000,
+        "has_threshold": False,
+        "description": "Senko optimized — batch inference + fbank once + VAD step 5s, 2.5x nhanh hơn bản thường"
     },
 }
 
@@ -142,11 +153,11 @@ def get_available_models(base_dir: str = None) -> Dict[str, str]:
             enc_path = os.path.join(onnx_model_dir, "embedding_encoder.onnx")
             if os.path.exists(seg_path) and (os.path.exists(emb_path) or os.path.exists(enc_path)):
                 available[model_id] = "pure_ort"
-        elif model_id == "3dspeaker_campp":
+        elif model_id in ("senko_campp", "senko_campp_optimized"):
             campp_path = os.path.join(base_dir, "models", "campp-3dspeaker", "campplus_cn_en_common_200k.onnx")
-            vad_path = os.path.join(base_dir, "models", "silero-vad", "silero_vad_16k_op15.onnx")
-            if os.path.exists(campp_path) and os.path.exists(vad_path):
-                available[model_id] = "3dspeaker_campp"
+            seg_path = os.path.join(base_dir, "models", "pyannote-onnx", "segmentation-community-1.onnx")
+            if os.path.exists(campp_path) and os.path.exists(seg_path):
+                available[model_id] = model_id
         else:
             model_path = os.path.join(models_dir, info["file"])
             if os.path.exists(model_path):
@@ -347,7 +358,8 @@ class SpeakerDiarizer:
     # Default thresholds for each model
     MODEL_DEFAULT_THRESHOLDS = {
         "community1_pure_ort": 0.7,
-        "3dspeaker_campp": 0.5,
+        "senko_campp": 0.5,
+        "senko_campp_optimized": 0.5,
     }
 
     @classmethod
@@ -388,7 +400,7 @@ class SpeakerDiarizer:
             max_speakers=max_spk,
         )
         self._pyannote_backend.initialize()
-        self.model_info = get_model_info("campp_pure_ort")
+        self.model_info = get_model_info("senko_campp")
 
     def _init_pure_ort(self):
         """Initialize Pure ORT backend (no PyTorch/pyannote dependency)"""
@@ -511,7 +523,7 @@ class SpeakerDiarizer:
         segments = self._resolve_fragment_zones(segments, short_thresh=0.5, min_zone_size=3)
 
         # 3. NaturalTurn: floor-holding detection + secondary speech absorption
-        segments = self._natural_turn_merge(segments, max_pause=1.5, asr_words=asr_words)
+        segments = self._natural_turn_merge(segments, max_pause=2.0, asr_words=asr_words)
 
         # 4. Final merge
         segments = self._merge_segments_with_gap(segments, max_gap=0.3)
@@ -541,7 +553,7 @@ class SpeakerDiarizer:
              Nếu không → dùng duration-only (pre-ASR fallback)
           4. Gán lại segments: chỉ BACKCHANNEL → speaker của primary turn
 
-        Ví dụ (max_pause=1.5s):
+        Ví dụ (max_pause=2.0s):
           A(0-10s) → B(10.5-11s) → A(11.5-20s)
           Step 1: A turn = [0-20s] (gap 1.5s < max_pause), B turn = [10.5-11s]
           Step 2: B turn [10.5-11s] nằm trong A turn [0-20s] → secondary
@@ -613,7 +625,7 @@ class SpeakerDiarizer:
         # === Step 3: Classify + Reassign secondary turns ===
         # Paper: BACKCHANNEL nếu word_count <= 3 + match backchannel cues
         # Implementation: duration < 0.8s VÀ word_count <= 3 (nếu có ASR text)
-        max_backchannel_dur = 0.8
+        max_backchannel_dur = 2.0  # tiếng Việt backchannel có thể tới ~2s
         backchannel_word_max = 3
 
         def _count_words_in_range(start, end):
@@ -1284,6 +1296,125 @@ def test_all_models(audio_file: str = None):
     return results
 
 
+def _remap_speakers_to_sentences(original_segments, word_speaker_map):
+    """
+    Gán lại speaker labels từ word-level mapping vào các câu đã tách sẵn.
+    Nếu 1 câu chứa words từ nhiều speakers → split câu tại ranh giới speaker.
+    """
+    results = []
+    for sent_seg in original_segments:
+        raw_words = sent_seg.get("raw_words", [])
+        if not raw_words:
+            results.append(dict(sent_seg))
+            continue
+
+        # Group consecutive words by speaker
+        word_groups = []
+        cur_spk = None
+        cur_spk_id = None
+        cur_words = []
+
+        for w in raw_words:
+            info = word_speaker_map.get(id(w))
+            if info:
+                spk, spk_id = info
+            else:
+                spk = cur_spk or "Người nói 1"
+                spk_id = cur_spk_id if cur_spk_id is not None else 0
+
+            if spk_id != cur_spk_id:
+                if cur_words:
+                    word_groups.append((cur_spk, cur_spk_id, cur_words))
+                cur_spk = spk
+                cur_spk_id = spk_id
+                cur_words = [w]
+            else:
+                cur_words.append(w)
+
+        if cur_words:
+            word_groups.append((cur_spk, cur_spk_id, cur_words))
+
+        if len(word_groups) <= 1:
+            seg_copy = dict(sent_seg)
+            if word_groups:
+                seg_copy["speaker"] = word_groups[0][0]
+                seg_copy["speaker_id"] = word_groups[0][1]
+            results.append(seg_copy)
+        else:
+            punct_words = sent_seg.get("text", "").split()
+            total_raw = len(raw_words)
+            punct_idx = 0
+
+            for i, (spk, spk_id, group_words) in enumerate(word_groups):
+                g_start = group_words[0].get("start", 0)
+                g_end = group_words[-1].get("end", 0)
+
+                if i == len(word_groups) - 1:
+                    g_punct = punct_words[punct_idx:]
+                else:
+                    num_punct = int(round(len(group_words) / float(total_raw) * len(punct_words)))
+                    if num_punct == 0 and punct_idx < len(punct_words):
+                        num_punct = 1
+                    g_punct = punct_words[punct_idx:punct_idx + num_punct]
+                    punct_idx += num_punct
+
+                seg_copy = dict(sent_seg)
+                seg_copy.update({
+                    "text": " ".join(g_punct),
+                    "start": g_start,
+                    "end": g_end,
+                    "speaker": spk,
+                    "speaker_id": spk_id,
+                    "raw_words": group_words,
+                })
+                results.append(seg_copy)
+
+    return results
+
+
+def _diarize_and_remap(diarizer_instance, audio_file, segments, raw_segments):
+    """
+    Chạy word-level speaker assignment trên TOÀN BỘ raw_words (giống initial pipeline),
+    rồi remap kết quả về các câu đã tách sẵn.
+    """
+    all_raw_words = []
+    for seg in segments:
+        all_raw_words.extend(seg.get("raw_words", []))
+
+    if not all_raw_words:
+        return diarizer_instance.process_with_transcription(
+            audio_file=audio_file,
+            transcribed_segments=segments,
+            speaker_segments=raw_segments
+        )
+
+    all_raw_words.sort(key=lambda w: w.get("start", 0))
+    one_seg = [{
+        "text": " ".join(w.get("text", "") for w in all_raw_words),
+        "start": all_raw_words[0].get("start", 0),
+        "end": all_raw_words[-1].get("end", 0),
+        "raw_words": all_raw_words,
+    }]
+
+    diar_results = diarizer_instance.process_with_transcription(
+        audio_file=audio_file,
+        transcribed_segments=one_seg,
+        speaker_segments=raw_segments
+    )
+
+    if len(segments) <= 1:
+        return diar_results
+
+    word_speaker_map = {}
+    for dseg in diar_results:
+        spk = dseg.get("speaker")
+        spk_id = dseg.get("speaker_id")
+        for w in dseg.get("raw_words", []):
+            word_speaker_map[id(w)] = (spk, spk_id)
+
+    return _remap_speakers_to_sentences(segments, word_speaker_map)
+
+
 def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_threads,
                     threshold=0.6, progress_callback=None, cancel_check=None):
     """
@@ -1316,12 +1447,18 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
 
     emit("PHASE:Diarization|Đang khởi tạo model|0")
 
-    # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
-    if speaker_model_id == "3dspeaker_campp":
-        from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
-        diarizer_3d = ThreeDSpeakerCamppDiarizer(
-            num_speakers=num_speakers, num_threads=num_threads)
-        label = "3D-Speaker CAM++"
+    # --- CAM++ Senko pipeline (best for all audio lengths) ---
+    if speaker_model_id in ("senko_campp", "senko_campp_optimized"):
+        if speaker_model_id == "senko_campp_optimized":
+            from core.speaker_diarization_senko_campp_optimized import SenkoCamppDiarizerOptimized
+            diarizer_3d = SenkoCamppDiarizerOptimized(
+                num_speakers=num_speakers, num_threads=num_threads)
+            label = "Senko CAM++ OPT"
+        else:
+            from core.speaker_diarization_senko_campp import SenkoCamppDiarizer
+            diarizer_3d = SenkoCamppDiarizer(
+                num_speakers=num_speakers, num_threads=num_threads)
+            label = "Senko CAM++"
         diarizer_3d.initialize()
 
         def campp_progress(pct):
@@ -1345,12 +1482,9 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
         emit("PHASE:Diarization|Đang gán nhãn Người nói|90")
 
         raw_segments = [Segment(s['start'], s['end'], s['speaker']) for s in raw_dict_segments]
-
-        # NaturalTurn + fragment zone post-processing (same as pyannote pipeline)
         merger = SpeakerDiarizer()
         raw_segments = merger._post_process_diarization_segments(raw_segments)
 
-        # Update speaker_segments_raw with post-processed segments
         speaker_segments_raw = [
             {
                 "speaker": f"Người nói {seg.speaker + 1}",
@@ -1362,15 +1496,7 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
             for seg in raw_segments
         ]
 
-        results = merger.process_with_transcription(
-            audio_file=audio_file,
-            transcribed_segments=segments,
-            speaker_segments=raw_segments
-        )
-
-        # Giải phóng model — chỉ dùng kết quả data từ đây
-        diarizer_3d.unload()
-        del diarizer_3d, merger
+        results = _diarize_and_remap(merger, audio_file, segments, raw_segments)
 
         elapsed = _time.time() - start_time
         emit("PHASE:Diarization|Hoàn thành|100")
@@ -1415,11 +1541,7 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
 
     emit("PHASE:Diarization|Đang gán nhãn Người nói|90")
 
-    results = diarizer.process_with_transcription(
-        audio_file=audio_file,
-        transcribed_segments=segments,
-        speaker_segments=raw_segments
-    )
+    results = _diarize_and_remap(diarizer, audio_file, segments, raw_segments)
 
     # Giải phóng model — chỉ dùng kết quả data từ đây
     diarizer.unload()

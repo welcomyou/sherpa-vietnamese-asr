@@ -32,7 +32,7 @@ class ServerConfig:
         "storage_per_user_gb": "5",
         "max_sessions": "100",
         "default_asr_model": "sherpa-onnx-zipformer-vi-2025-04-20",
-        "default_speaker_model": "3dspeaker_campp",
+        "default_speaker_model": "senko_campp_optimized",
         "default_punctuation_confidence": "7",
         "default_case_confidence": "6",
         "default_diarization_threshold": "70",
@@ -66,7 +66,7 @@ class ServerConfig:
 
         # Migration: update deprecated model IDs
         old_speaker = self._config.get("ServerSettings", "default_speaker_model", fallback="")
-        if old_speaker in ("community1_onnx", "titanet_small", "campp_pure_ort"):
+        if old_speaker in ("community1_onnx", "titanet_small", "campp_pure_ort", "3dspeaker_campp", "nemo_pipeline"):
             self._config.set("ServerSettings", "default_speaker_model", self.DEFAULTS["default_speaker_model"])
 
         old_asr = self._config.get("ServerSettings", "default_asr_model", fallback="")

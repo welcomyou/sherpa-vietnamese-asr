@@ -2346,27 +2346,27 @@ class TranscriberPipeline:
 
                     self._emit("PHASE:Diarization|Đang tải model phân tách|5")
 
-                    # --- 3D-Speaker pipelines (CAM++ / ECAPA) ---
-                    if speaker_model_id == "3dspeaker_campp":
-                        from core.speaker_diarization_3dspeaker_campp import ThreeDSpeakerCamppDiarizer
-                        diarizer_3d = ThreeDSpeakerCamppDiarizer(
-                            num_speakers=num_speakers,
-                            num_threads=self.config.get("cpu_threads", 4))
+                    # --- CAM++ Senko pipeline (best for all audio lengths) ---
+                    if speaker_model_id in ("senko_campp", "senko_campp_optimized"):
+                        if speaker_model_id == "senko_campp_optimized":
+                            from core.speaker_diarization_senko_campp_optimized import SenkoCamppDiarizerOptimized
+                            diarizer_3d = SenkoCamppDiarizerOptimized(
+                                num_speakers=num_speakers,
+                                num_threads=self.config.get("cpu_threads", 4))
+                        else:
+                            from core.speaker_diarization_senko_campp import SenkoCamppDiarizer
+                            diarizer_3d = SenkoCamppDiarizer(
+                                num_speakers=num_speakers,
+                                num_threads=self.config.get("cpu_threads", 4))
                         diarizer_3d.initialize()
 
                         def campp_progress(pct):
-                            # CAM++ pct: 5=VAD, 15=VAD done, 30-80=embedding, 80=emb done, 90=clustering, 100=done
                             self._emit(f"PHASE:Diarization|Đang phân tách (3D-Speaker CAM++)|{int(pct)}")
 
                         self._emit("PHASE:Diarization|Đang phân tách (3D-Speaker CAM++)|10")
                         raw_dict_segs = diarizer_3d.process(
                             audio_file=None, audio_data=audio, audio_sample_rate=16000,
                             progress_callback=campp_progress)
-
-                        # Giải phóng 3D-Speaker model ngay — chỉ cần kết quả raw_dict_segs
-                        if self.config.get("save_ram", False):
-                            diarizer_3d.unload()
-                        del diarizer_3d
 
                         from core.speaker_diarization import Segment, SpeakerDiarizer
                         raw_segments = [Segment(s['start'], s['end'], s['speaker'])
@@ -2378,10 +2378,8 @@ class TranscriberPipeline:
                             for s in raw_dict_segs
                         ]
 
-                        # NaturalTurn + fragment zone post-processing
                         merger = SpeakerDiarizer()
                         raw_segments = merger._post_process_diarization_segments(raw_segments)
-
                         speaker_segments_raw = [
                             {"speaker": f"Người nói {seg.speaker+1}", "speaker_id": seg.speaker,
                              "start": seg.start, "end": seg.end, "duration": seg.duration}
@@ -2395,7 +2393,7 @@ class TranscriberPipeline:
                             self.file_path, one_seg, speaker_segments=raw_segments)
 
                     else:
-                        # --- Pyannote Community-1 pipeline (default) ---
+                        # --- Pyannote Community-1 pipeline (ResNet34) ---
                         logger.info("[DEBUG] Getting cached diarizer")
                         diarizer = _get_cached_diarizer(
                             embedding_model_id=speaker_model_id,
@@ -2676,6 +2674,7 @@ class TranscriberPipeline:
                     if progress >= last_align_progress + 10:
                         self._emit(f"PHASE:Align|Đang căn chỉnh thời gian|{progress}")
                         last_align_progress = progress
+                        time.sleep(0)  # Yield GIL → UI thread xử lý events
 
                 restore_duration = time.time() - punct_start
                 timing_details["punctuation"] = restore_duration
@@ -2912,6 +2911,7 @@ class TranscriberPipeline:
                     if progress >= last_align_progress + 10:
                         self._emit(f"PHASE:Align|Đang căn chỉnh thời gian|{progress}")
                         last_align_progress = progress
+                        time.sleep(0)  # Yield GIL → UI thread xử lý events
 
                 timing_details["alignment"] = time.time() - align_start
 

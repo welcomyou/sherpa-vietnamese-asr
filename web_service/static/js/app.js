@@ -746,14 +746,11 @@ function renderASRResult(data) {
     setPlayerSegments(segments);
 
     const contentEl = document.getElementById('result-content');
-    const speakersEl = document.getElementById('result-speakers');
 
     if (hasSpeakers) {
         contentEl.innerHTML = renderSpeakerView(segments, speakerNames);
-        speakersEl.innerHTML = renderRawSpeakers(segments, speakerNames);
     } else {
         contentEl.innerHTML = renderPlainView(segments);
-        speakersEl.innerHTML = '<p style="color:var(--text-secondary)">Không có dữ liệu người nói</p>';
     }
 
     document.getElementById('result-panel').style.display = 'flex';
@@ -960,12 +957,10 @@ function renderRawSpeakers(segments, speakerNames) {
 function switchTab(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('result-content').style.display = 'none';
-    document.getElementById('result-speakers').style.display = 'none';
     document.getElementById('result-summary').style.display = 'none';
 
     const tabMap = {
         content: { el: 'result-content', idx: 0 },
-        speakers: { el: 'result-speakers', idx: 1 },
         summary: { el: 'result-summary', btn: 'tab-summary' },
     };
     const info = tabMap[tab];

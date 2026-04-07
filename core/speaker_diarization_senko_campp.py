@@ -1,11 +1,13 @@
 """
-3D-Speaker Diarization Pipeline with CAM++ Embeddings (192-dim)
-===============================================================
-Implements the 3D-Speaker approach EXACTLY (arXiv 2403.19971, 2025):
-  - Silero VAD (ONNX) for speech detection (paper uses FSMN, Silero is equivalent)
-  - Sliding window (1.5s window, 0.75s step) on speech regions
-  - CAM++ 192-dim embedding (speech_campplus_sv_zh_en_16k-common_advanced, 200k speakers)
-  - Spectral clustering with cosine affinity (pval=0.032, min_cluster_size=4)
+Senko-style Speaker Diarization with CAM++ 192-dim
+===================================================
+EXACT implementation of Senko (github.com/narcotic-sh/senko, March 2026):
+  1. Pyannote segmentation ONNX as VAD
+  2. Sliding window 1.5s, shift 0.6s, povey window, 80-dim fbank
+  3. CAM++ 192-dim embedding (3D-Speaker, 200k speakers)
+  4. < 20min: spectral clustering (pval=0.012, max_spks=15)
+     >= 20min: UMAP+HDBSCAN (n_neighbors=40, metric=cosine, min_cluster=10)
+  5. Post: filter_minor_cluster + merge_by_cos(0.875) + gap<=4s + remove<=0.78s + re-rank
 
 Model: models/campp-3dspeaker/campplus_cn_en_common_200k.onnx (27MB, 192-dim)
 VAD:   models/silero-vad/silero_vad_16k_op15.onnx (1.3MB)
@@ -33,7 +35,7 @@ _knf_emb_opts = None
 def _compute_fbank(audio, sr=SAMPLE_RATE):
     """Compute 80-dim fbank matching WeSpeaker's compute_fbank:
     - Scale waveform by 32768 (int16 range)
-    - Hamming window
+    - Povey window (Senko exact)
     - Per-utterance mean normalization (CMVN)
     """
     global _knf_emb_opts
@@ -45,11 +47,11 @@ def _compute_fbank(audio, sr=SAMPLE_RATE):
         _knf_emb_opts.frame_opts.samp_freq = sr
         _knf_emb_opts.frame_opts.frame_length_ms = 25.0
         _knf_emb_opts.frame_opts.frame_shift_ms = 10.0
-        _knf_emb_opts.frame_opts.window_type = "hamming"
+        _knf_emb_opts.frame_opts.window_type = "povey"  # Senko exact
         _knf_emb_opts.mel_opts.num_bins = 80
         _knf_emb_opts.mel_opts.low_freq = 20.0
         _knf_emb_opts.mel_opts.high_freq = 0.0  # Nyquist
-        _knf_emb_opts.energy_floor = 0.0
+        _knf_emb_opts.energy_floor = 1.0  # Senko exact — prevent log(0)
     scaled_audio = audio * np.float32(32768.0)
     fb = knf.OnlineFbank(_knf_emb_opts)
     fb.accept_waveform(sr, scaled_audio)
@@ -142,189 +144,177 @@ def _energy_vad(audio, sr=SAMPLE_RATE, frame_ms=25.0, hop_ms=10.0,
 
 
 # ══════════════════════════════════════════════════════════════
-# Spectral Clustering (3D-Speaker paper)
+# Senko Clustering — EXACT from github.com/narcotic-sh/senko
+# SpectralCluster (short audio) + UmapHdbscan (long audio)
+# + filter_minor_cluster + merge_by_cos
 # ══════════════════════════════════════════════════════════════
 
-def _spectral_cluster(embeddings, pval=0.02, min_cluster_size=4,
-                      max_speakers=10, min_speakers=1, min_pnum=6):
-    """Spectral clustering — EXACT 3D-Speaker implementation.
+def _cosine_similarity(X, Y=None):
+    """Cosine similarity matrix — replaces sklearn.metrics.pairwise.cosine_similarity."""
+    if Y is None:
+        Y = X
+    X_norm = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-10)
+    Y_norm = Y / (np.linalg.norm(Y, axis=1, keepdims=True) + 1e-10)
+    return X_norm @ Y_norm.T
 
-    Source: github.com/modelscope/3D-Speaker/speakerlab/process/cluster.py
-    Verified against source code line-by-line.
-    """
-    N = embeddings.shape[0]
-    if N == 0:
-        return np.array([], dtype=np.int32)
-    if N == 1:
-        return np.array([0], dtype=np.int32)
 
-    # 1. Cosine similarity matrix
-    S = embeddings @ embeddings.T
+def _senko_spectral(X, min_num_spks=1, max_num_spks=10, pval=0.02, min_pnum=6, oracle_num=None):
+    """Senko SpectralCluster — exact copy."""
+    N = X.shape[0]
+    """Senko SpectralCluster — exact."""
+    if N <= 1:
+        return np.zeros(N, dtype=np.int32)
 
-    # 2. Per-row pruning (exact 3D-Speaker p_pruning)
-    # n_elems = int((1 - pval) * N), capped to keep at least min_pnum
+    # get_sim_mat
+    M = _cosine_similarity(X)
+
+    # p_pruning
     n_elems = int((1 - pval) * N)
     n_elems = min(n_elems, N - min_pnum)
     n_elems = max(n_elems, 0)
     for i in range(N):
-        low_idx = np.argsort(S[i])[:n_elems]
-        S[i, low_idx] = 0.0
+        low_idx = np.argsort(M[i])[:n_elems]
+        M[i, low_idx] = 0
 
-    # 3. Symmetrize: average (NOT max) — exact 3D-Speaker
-    S = 0.5 * (S + S.T)
+    # symmetrize
+    M = 0.5 * (M + M.T)
 
-    # 4. Unnormalized Laplacian: L = D - S
-    np.fill_diagonal(S, 0.0)
-    D = np.abs(S).sum(axis=1)
-    L = -S.copy()
-    np.fill_diagonal(L, D)
+    # get_laplacian (unnormalized)
+    np.fill_diagonal(M, 0)
+    D = np.abs(M).sum(axis=1)
+    L = np.diag(D) - M
 
-    # 5. Eigendecompose (smallest eigenvalues)
-    n_eig = min(max_speakers + 1, N)
-    eigenvalues, eigenvectors = eigh(L, subset_by_index=[0, n_eig - 1])
+    # get_spec_embs
+    lambdas, eig_vecs = np.linalg.eigh(L)
+    if oracle_num is not None:
+        num_of_spk = oracle_num
+    else:
+        sub = lambdas[min_num_spks - 1:max_num_spks + 1]
+        gaps = [float(sub[i + 1]) - float(sub[i]) for i in range(len(sub) - 1)]
+        if not gaps:
+            return np.zeros(N, dtype=np.int32)
+        num_of_spk = int(np.argmax(gaps)) + min_num_spks
+    num_of_spk = max(1, min(num_of_spk, N))
+    emb = eig_vecs[:, :num_of_spk]
 
-    # 6. Eigengap — search ONLY in range [min_speakers-1 : max_speakers+1]
-    # Exact 3D-Speaker: lambdas[min_num_spks-1 : max_num_spks+1]
-    lo = max(min_speakers - 1, 0)
-    hi = min(max_speakers + 1, len(eigenvalues))
-    sub_evals = eigenvalues[lo:hi]
-    if len(sub_evals) < 2:
-        return np.zeros(N, dtype=np.int32)
-    sub_gaps = [float(sub_evals[i+1]) - float(sub_evals[i]) for i in range(len(sub_evals)-1)]
-    k = int(np.argmax(sub_gaps)) + min_speakers
-    k = max(min_speakers, min(k, max_speakers, N))
+    # cluster_embs (KMeans)
+    from sklearn.cluster import KMeans
+    labels = KMeans(n_clusters=num_of_spk, random_state=0).fit_predict(emb)
+    return labels.astype(np.int32)
 
-    # 7. Raw eigenvectors — NO row normalization (unnormalized Laplacian)
-    V = eigenvectors[:, :k]
 
-    # 8. K-means
-    labels = _kmeans(V, k, max_iter=300)
+def _senko_umap_hdbscan(X, n_neighbors=20, n_components=60, min_samples=20,
+                         min_cluster_size=10, metric='euclidean'):
+    """Senko UmapHdbscan — exact copy."""
+    import umap
+    import hdbscan
 
-    # 9. Merge minor clusters (per-embedding, <= threshold)
-    labels = _merge_small_clusters(labels, embeddings, min_cluster_size)
+    n_comp = min(n_components, X.shape[0] - 2)
+    n_comp = max(n_comp, 2)
+    umap_X = umap.UMAP(
+        n_neighbors=n_neighbors, min_dist=0.0,
+        n_components=n_comp, metric=metric
+    ).fit_transform(X)
+    labels = hdbscan.HDBSCAN(
+        min_samples=min_samples, min_cluster_size=min_cluster_size
+    ).fit_predict(umap_X)
+    return labels.astype(np.int32)
+
+
+def _senko_cluster(X, cluster_type='umap_hdbscan', cluster_line=10,
+                    mer_cos=0.875, min_cluster_size=4, **kwargs):
+    """Senko CommonClustering — exact logic.
+
+    1. If N < cluster_line → all same speaker
+    2. Run clustering (spectral or umap_hdbscan)
+    3. filter_minor_cluster
+    4. merge_by_cos
+    """
+    N = X.shape[0]
+    if N < cluster_line:
+        return np.ones(N, dtype=np.int32)
+
+    if cluster_type == 'umap_hdbscan':
+        labels = _senko_umap_hdbscan(X, min_cluster_size=min_cluster_size, **kwargs)
+    else:
+        labels = _senko_spectral(X, **kwargs)
+
+    # filter_minor_cluster (exact Senko)
+    cset = np.unique(labels)
+    csize = np.array([(labels == i).sum() for i in cset])
+    minor_idx = np.where(csize < min_cluster_size)[0]
+    if len(minor_idx) > 0:
+        minor_cset = cset[minor_idx]
+        major_idx = np.where(csize >= min_cluster_size)[0]
+        if len(major_idx) > 0:
+            major_cset = cset[major_idx]
+            major_center = np.stack([X[labels == i].mean(0) for i in major_cset])
+            for i in range(len(labels)):
+                if labels[i] in minor_cset:
+                    cos_sim = _cosine_similarity(X[i:i+1], major_center)
+                    labels[i] = major_cset[cos_sim.argmax()]
+        else:
+            labels = np.zeros(N, dtype=np.int32)
+
+    # merge_by_cos (exact Senko)
+    if mer_cos is not None and mer_cos > 0:
+        while True:
+            cset = np.unique(labels)
+            if len(cset) <= 1:
+                break
+            centers = np.stack([X[labels == i].mean(0) for i in cset])
+            affinity = _cosine_similarity(centers, centers)
+            affinity = np.triu(affinity, 1)
+            idx = np.unravel_index(np.argmax(affinity), affinity.shape)
+            if affinity[idx] < mer_cos:
+                break
+            c1, c2 = cset[np.array(idx)]
+            labels[labels == c2] = c1
 
     # Relabel
-    unique_labels = np.unique(labels)
-    label_map = {old: new for new, old in enumerate(unique_labels)}
-    labels = np.array([label_map[l] for l in labels], dtype=np.int32)
-
-    return labels
-
-
-def _kmeans(X, k, max_iter=300, n_init=10):
-    """Simple k-means with multiple random initializations."""
-    N, D = X.shape
-    best_labels = np.zeros(N, dtype=np.int32)
-    best_inertia = np.inf
-
-    for _ in range(n_init):
-        # K-means++ initialization
-        centers = np.empty((k, D), dtype=X.dtype)
-        idx = np.random.randint(N)
-        centers[0] = X[idx]
-        for c in range(1, k):
-            dists = np.min(np.sum((X[:, None, :] - centers[None, :c, :]) ** 2, axis=2), axis=1)
-            probs = dists / (dists.sum() + 1e-10)
-            idx = np.random.choice(N, p=probs)
-            centers[c] = X[idx]
-
-        # Iterate
-        labels = np.zeros(N, dtype=np.int32)
-        for _ in range(max_iter):
-            # Assign
-            dists = np.sum((X[:, None, :] - centers[None, :, :]) ** 2, axis=2)  # (N, k)
-            new_labels = np.argmin(dists, axis=1)
-            if np.array_equal(new_labels, labels):
-                break
-            labels = new_labels
-            # Update centers
-            for c in range(k):
-                mask = labels == c
-                if mask.any():
-                    centers[c] = X[mask].mean(axis=0)
-
-        inertia = 0.0
-        for c in range(k):
-            mask = labels == c
-            if mask.any():
-                inertia += np.sum((X[mask] - centers[c]) ** 2)
-
-        if inertia < best_inertia:
-            best_inertia = inertia
-            best_labels = labels.copy()
-
-    return best_labels
-
-
-def _merge_small_clusters(labels, embeddings, min_cluster_size):
-    """Merge minor clusters — EXACT 3D-Speaker filter_minor_cluster.
-
-    Per-EMBEDDING reassignment (not per-cluster centroid).
-    Threshold: <= (not <).
-    """
-    unique, counts = np.unique(labels, return_counts=True)
-    minor = set(unique[counts <= min_cluster_size])  # <= not <
-    major = unique[counts > min_cluster_size]
-
-    if len(major) == 0:
-        return np.zeros(len(labels), dtype=np.int32)
-
-    # Compute centroids of major clusters, L2 normalize
-    major_centers = np.stack([embeddings[labels == m].mean(axis=0) for m in major])
-    cnorms = np.linalg.norm(major_centers, axis=1, keepdims=True)
-    cnorms[cnorms < 1e-10] = 1.0
-    major_centers /= cnorms
-
-    # Per-embedding reassignment (exact 3D-Speaker)
-    for i in range(len(labels)):
-        if labels[i] in minor:
-            emb = embeddings[i]
-            norm = np.linalg.norm(emb)
-            if norm > 1e-10:
-                emb = emb / norm
-            sims = major_centers @ emb
-            labels[i] = major[np.argmax(sims)]
-
-    return labels
+    unique = np.unique(labels)
+    remap = {old: new for new, old in enumerate(unique)}
+    return np.array([remap[l] for l in labels], dtype=np.int32)
 
 
 # ══════════════════════════════════════════════════════════════
 # Main Diarizer Class
 # ══════════════════════════════════════════════════════════════
 
-class ThreeDSpeakerCamppDiarizer:
-    """3D-Speaker diarization pipeline with CAM++ 192-dim embeddings.
+class SenkoCamppDiarizer:
+    """Senko-style diarization — EXACT implementation.
 
-    Pipeline (EXACTLY per paper arXiv 2403.19971):
-      1. Silero VAD (ONNX) for speech region detection
-      2. Sliding window (1.5s, 0.75s step) on speech regions
-      3. CAM++ 192-dim embedding extraction (200k speakers, 3D-Speaker)
-      4. Spectral clustering with cosine affinity (pval=0.032)
+    Pipeline (github.com/narcotic-sh/senko):
+      1. Pyannote segmentation ONNX as VAD (min_silence=0.1s)
+      2. Sliding window 1.5s, step 0.6s, povey window, energy_floor=1.0
+      3. CAM++ 192-dim embedding (3D-Speaker, 200k speakers)
+      4. < 20min: spectral (pval=0.012, max=15) | >= 20min: UMAP+HDBSCAN
+      5. filter_minor_cluster + merge_by_cos(0.875)
+      6. merge gap<=4s + remove<=0.78s + re-rank by speaking time
     """
 
     def __init__(self, model_dir=None, num_threads=6, max_speakers=10,
                  min_speakers=1, num_speakers=-1,
-                 pval=0.032, min_cluster_size=4,
-                 window=1.5, step=0.75, min_duration_off=0.0):
+                 mer_cos=0.875,
+                 window=1.5, step=0.6, min_duration_off=0.0):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         # CAM++ 192-dim from 3D-Speaker (exact paper model)
         self.model_path = (
             os.path.join(model_dir, "campplus_cn_en_common_200k.onnx") if model_dir
             else os.path.join(base, "models", "campp-3dspeaker", "campplus_cn_en_common_200k.onnx")
         )
-        # Silero VAD ONNX
-        self.vad_path = os.path.join(base, "models", "silero-vad", "silero_vad_16k_op15.onnx")
+        # Pyannote segmentation ONNX (dùng làm VAD — chính xác hơn Silero)
+        self.seg_path = os.path.join(base, "models", "pyannote-onnx", "segmentation-community-1.onnx")
         self.num_threads = num_threads
         self.max_speakers = max_speakers
         self.min_speakers = max(1, min_speakers)
         self.num_speakers = num_speakers  # -1 = auto
-        self.pval = pval
-        self.min_cluster_size = min_cluster_size
+        self.mer_cos = mer_cos
         self.window = window  # seconds
         self.step = step  # seconds
         self.min_duration_off = min_duration_off
         self.emb_sess = None
-        self.vad_sess = None
+        self.seg_sess = None
 
     def initialize(self):
         """Load CAM++ 192-dim ONNX + Silero VAD ONNX."""
@@ -350,88 +340,102 @@ class ThreeDSpeakerCamppDiarizer:
         dummy = np.zeros((1, 150, 80), dtype=np.float32)
         self.emb_sess.run(['embs'], {'feats': dummy})
 
-        # Load Silero VAD
-        vad_opts = ort.SessionOptions()
-        vad_opts.intra_op_num_threads = 1
-        vad_opts.log_severity_level = 3
-        vad_opts.enable_cpu_mem_arena = False
-        self.vad_sess = ort.InferenceSession(
-            self.vad_path, vad_opts, providers=['CPUExecutionProvider']
-        )
+        # Load pyannote segmentation as VAD
+        seg_opts = ort.SessionOptions()
+        seg_opts.intra_op_num_threads = compute_ort_threads(self.num_threads)
+        seg_opts.inter_op_num_threads = 1
+        seg_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        seg_opts.log_severity_level = 3
+        seg_opts.enable_cpu_mem_arena = False
+        seg_opts.optimized_model_filepath = self.seg_path + ".opt"
+        self.seg_sess = ort.InferenceSession(
+            self.seg_path, seg_opts, providers=['CPUExecutionProvider'])
 
-        print(f"[3DSpeaker-CAM++] Loaded CAM++ 192-dim + Silero VAD"
-              f" | pval={self.pval}, window={self.window}s, step={self.step}s")
+        vad_name = "pyannote segmentation"
+        print(f"[Senko-CAM++] Loaded CAM++ 192-dim + {vad_name}"
+              f" | window={self.window}s, step={self.step}s, mer_cos={self.mer_cos}")
 
-    def _silero_vad(self, audio, sr=SAMPLE_RATE, threshold=0.2,
-                    min_speech=0.25, min_silence=0.3):
-        """Silero VAD — neural speech detection matching paper quality.
+    def _pyannote_vad(self, audio, sr=SAMPLE_RATE, min_speech=0.25, min_silence=0.1):
+        """Pyannote segmentation as VAD — detect speech regions from powerset output."""
+        chunk_samples = int(10.0 * sr)
+        step_samples = int(1.0 * sr)
+        total = len(audio)
 
-        Processes audio in 512-sample (32ms) chunks through Silero ONNX model.
-        Returns list of (start_sec, end_sec) speech regions.
-        """
-        window_size = 512  # Silero processes 512 samples at 16kHz
-        context_size = 64  # Silero needs 64 samples context prefix
-        n_samples = len(audio)
-        if n_samples < window_size:
-            return [(0.0, n_samples / sr)]
+        starts = []
+        s = 0
+        while s < total:
+            starts.append(s)
+            if s + chunk_samples >= total:
+                break
+            s += step_samples
 
-        # Silero v5 state: [2, batch, 128]
-        state = np.zeros((2, 1, 128), dtype=np.float32)
-        sr_tensor = np.array(sr, dtype=np.int64)
-        context = np.zeros(context_size, dtype=np.float32)
+        # Batch inference
+        all_logits = []
+        for b in range(0, len(starts), 32):
+            be = min(b + 32, len(starts))
+            batch = np.zeros((be - b, 1, chunk_samples), dtype=np.float32)
+            for i, idx in enumerate(range(b, be)):
+                cs = starts[idx]
+                ce = min(cs + chunk_samples, total)
+                batch[i, 0, :ce - cs] = audio[cs:ce]
+            logits = self.seg_sess.run(None, {"input_values": batch})[0]
+            all_logits.append(logits)
+        seg_logits = np.concatenate(all_logits, axis=0)
 
-        # Get speech probabilities per chunk
-        num_windows = n_samples // window_size
-        probs = []
-        for i in range(num_windows):
-            chunk = audio[i * window_size:(i + 1) * window_size]
-            # Silero input = [context(64) + chunk(512)] = 576 samples
-            input_data = np.concatenate([context, chunk]).reshape(1, -1).astype(np.float32)
-            out, state = self.vad_sess.run(
-                None, {'input': input_data, 'state': state, 'sr': sr_tensor}
-            )
-            probs.append(float(out[0][0]))
-            context = chunk[-context_size:]  # last 64 samples as next context
+        # Powerset decode → any speaker active = speech
+        POWERSET_MAP = np.array([
+            [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+            [1, 1, 0], [1, 0, 1], [0, 1, 1]], dtype=np.float32)
+        binarized = POWERSET_MAP[np.argmax(seg_logits, axis=-1)]
+        n_seg_frames = binarized.shape[1]
+        frame_dur = 10.0 / n_seg_frames
+        total_dur = total / sr
 
-        if not probs:
-            return []
+        # Aggregate: frame-level speech probability across overlapping chunks
+        n_out = int(total_dur / frame_dur) + 1
+        speech_count = np.zeros(n_out, dtype=np.float32)
+        total_count = np.zeros(n_out, dtype=np.float32)
+        for c_idx, cs in enumerate(starts):
+            t0 = cs / sr
+            for f in range(n_seg_frames):
+                out_f = int((t0 + f * frame_dur) / frame_dur)
+                if 0 <= out_f < n_out:
+                    if binarized[c_idx, f].sum() > 0:
+                        speech_count[out_f] += 1
+                    total_count[out_f] += 1
 
-        # Convert to speech regions
-        chunk_dur = window_size / sr
+        with np.errstate(divide='ignore', invalid='ignore'):
+            speech_prob = np.where(total_count > 0, speech_count / total_count, 0)
+        is_speech = speech_prob > 0.5
+
+        # Convert to regions
         regions = []
         in_speech = False
         start_t = 0.0
-
-        for i, p in enumerate(probs):
-            t = i * chunk_dur
-            if p >= threshold and not in_speech:
+        for f in range(len(is_speech)):
+            t = f * frame_dur
+            if is_speech[f] and not in_speech:
                 start_t = t
                 in_speech = True
-            elif p < threshold and in_speech:
-                end_t = t + chunk_dur
-                if end_t - start_t >= min_speech:
-                    regions.append((start_t, end_t))
+            elif not is_speech[f] and in_speech:
+                if t - start_t >= min_speech:
+                    regions.append((start_t, t))
                 in_speech = False
-
         if in_speech:
-            end_t = len(probs) * chunk_dur
-            if end_t - start_t >= min_speech:
-                regions.append((start_t, end_t))
+            t = len(is_speech) * frame_dur
+            if t - start_t >= min_speech:
+                regions.append((start_t, min(t, total_dur)))
 
-        # Merge close regions
         if not regions:
-            return []
+            return [(0.0, total_dur)]
         merged = [regions[0]]
         for s, e in regions[1:]:
             if s - merged[-1][1] < min_silence:
                 merged[-1] = (merged[-1][0], e)
             else:
                 merged.append((s, e))
+        return merged if merged else [(0.0, total_dur)]
 
-        # Clip to audio
-        audio_dur = n_samples / sr
-        merged = [(max(0, s), min(e, audio_dur)) for s, e in merged]
-        return merged
 
     def _extract_embedding(self, audio_segment):
         """Extract a single 192-dim L2-normalized embedding from an audio segment.
@@ -482,22 +486,23 @@ class ThreeDSpeakerCamppDiarizer:
             region_len = end_sample - start_sample
 
             if region_len < window_samples:
-                # Region shorter than window: use entire region as one window
-                all_windows.append((start_sample, end_sample))
+                # Senko: pull back start to fill window (always 1.5s)
+                pulled_start = max(0, end_sample - window_samples)
+                all_windows.append((pulled_start, pulled_start + window_samples))
             else:
                 pos = start_sample
-                while pos + window_samples <= end_sample:
+                while pos + window_samples < end_sample:  # strict < (Senko exact)
                     all_windows.append((pos, pos + window_samples))
                     pos += step_samples
-                # Handle remaining tail if significant (> 50% of window)
-                if pos < end_sample and (end_sample - pos) > window_samples * 0.5:
-                    all_windows.append((pos, end_sample))
+                # Senko: always add tail, pull back to fill window
+                tail_start = max(start_sample, end_sample - window_samples)
+                all_windows.append((tail_start, tail_start + window_samples))
 
         total_windows = len(all_windows)
         if total_windows == 0:
             return np.empty((0, 192), dtype=np.float32), []
 
-        logger.info(f"[3DSpeaker-CAM++] Extracting {total_windows} window embeddings")
+        logger.info(f"[Senko-CAM++] Extracting {total_windows} window embeddings")
 
         for idx, (ws, we) in enumerate(all_windows):
             segment = audio[ws:we]
@@ -596,10 +601,10 @@ class ThreeDSpeakerCamppDiarizer:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
 
         duration = len(audio) / SAMPLE_RATE
-        logger.info(f"[3DSpeaker-CAM++] Audio: {duration:.1f}s")
+        logger.info(f"[Senko-CAM++] Audio: {duration:.1f}s")
 
         if duration < 0.5:
-            logger.warning("[3DSpeaker-CAM++] Audio too short (< 0.5s), returning empty")
+            logger.warning("[Senko-CAM++] Audio too short (< 0.5s), returning empty")
             return []
 
         if progress_callback:
@@ -607,15 +612,15 @@ class ThreeDSpeakerCamppDiarizer:
 
         # ─── 2. Silero VAD (neural, paper-quality) ──────────────
         t0 = time.perf_counter()
-        speech_regions = self._silero_vad(audio, SAMPLE_RATE)
+        speech_regions = self._pyannote_vad(audio, SAMPLE_RATE)
         t_vad = time.perf_counter() - t0
 
         if not speech_regions:
-            logger.warning("[3DSpeaker-CAM++] No speech detected by VAD, using full audio")
+            logger.warning("[Senko-CAM++] No speech detected by VAD, using full audio")
             speech_regions = [(0.0, duration)]
 
         total_speech = sum(e - s for s, e in speech_regions)
-        logger.info(f"[3DSpeaker-CAM++] VAD: {len(speech_regions)} regions, "
+        logger.info(f"[Senko-CAM++] VAD: {len(speech_regions)} regions, "
                      f"{total_speech:.1f}s speech / {duration:.1f}s total ({t_vad:.3f}s)")
 
         if progress_callback:
@@ -632,10 +637,10 @@ class ThreeDSpeakerCamppDiarizer:
         del audio
 
         n_embs = embeddings.shape[0]
-        logger.info(f"[3DSpeaker-CAM++] Embeddings: {n_embs} x 192 ({t_emb:.3f}s)")
+        logger.info(f"[Senko-CAM++] Embeddings: {n_embs} x 192 ({t_emb:.3f}s)")
 
         if n_embs == 0:
-            logger.warning("[3DSpeaker-CAM++] No embeddings extracted")
+            logger.warning("[Senko-CAM++] No embeddings extracted")
             return []
 
         if progress_callback:
@@ -653,28 +658,104 @@ class ThreeDSpeakerCamppDiarizer:
             min_spk = self.min_speakers
             max_spk = self.max_speakers
 
-        # Edge case: very few embeddings
+        # Senko clustering: spectral (<20min) or UMAP+HDBSCAN (>=20min)
         if n_embs <= 2:
             labels = np.zeros(n_embs, dtype=np.int32)
         else:
-            labels = _spectral_cluster(
-                embeddings, pval=self.pval,
-                min_cluster_size=self.min_cluster_size,
-                max_speakers=max_spk, min_speakers=min_spk
-            )
+            audio_duration = duration  # seconds
+            if audio_duration < 1200.0:  # < 20 minutes → spectral
+                labels = _senko_cluster(
+                    embeddings,
+                    cluster_type='spectral',
+                    cluster_line=10,
+                    mer_cos=self.mer_cos,
+                    min_cluster_size=4,  # Senko spectral.yaml
+                    # Senko spectral.yaml exact params
+                    min_num_spks=min_spk, max_num_spks=15,
+                    pval=0.012,
+                )
+            else:  # >= 20 minutes → UMAP+HDBSCAN
+                labels = _senko_cluster(
+                    embeddings,
+                    cluster_type='umap_hdbscan',
+                    cluster_line=10,
+                    mer_cos=self.mer_cos,
+                    min_cluster_size=10,  # Senko umap_hdbscan.yaml
+                    # Senko umap_hdbscan.yaml exact params
+                    n_neighbors=40, n_components=60,
+                    min_samples=20, metric='cosine',
+                )
 
         n_speakers = len(np.unique(labels))
         t_clust = time.perf_counter() - t0
-        logger.info(f"[3DSpeaker-CAM++] Clustering: {n_speakers} speakers ({t_clust:.3f}s)")
+        logger.info(f"[Senko-CAM++] Clustering: {n_speakers} speakers ({t_clust:.3f}s)")
 
         if progress_callback:
             progress_callback(90)
 
+        # mer_cos merge already done inside _senko_cluster
+
         # ─── 5. Build output segments ────────────────────────────
         segments = self._segments_from_labels(window_times, labels)
 
+        # Resolve overlapping segments (from window overlap)
+        if len(segments) > 1:
+            for i in range(len(segments) - 1):
+                if segments[i]['end'] > segments[i + 1]['start']:
+                    mid = (segments[i]['end'] + segments[i + 1]['start']) / 2
+                    segments[i]['end'] = mid
+                    segments[i + 1]['start'] = mid
+
+        # ─── 7. Senko post-processing ────────────────────────────
+        # 7a. Merge adjacent same-speaker with gap <= 4s
+        if len(segments) > 1:
+            merged_segs = [segments[0]]
+            for seg in segments[1:]:
+                prev = merged_segs[-1]
+                if seg['speaker'] == prev['speaker'] and seg['start'] - prev['end'] <= 4.0:
+                    prev['end'] = seg['end']
+                else:
+                    merged_segs.append(seg)
+            segments = merged_segs
+
+        # 7b. Remove segments <= 0.78s (Senko: bridge same speaker, remove different)
+        if len(segments) > 1:
+            filtered = []
+            for i, seg in enumerate(segments):
+                if seg['end'] - seg['start'] > 0.78:
+                    filtered.append(seg)
+                else:
+                    # Short segment sandwiched by same speaker → bridge (extend prev)
+                    prev_spk = filtered[-1]['speaker'] if filtered else None
+                    next_spk = segments[i + 1]['speaker'] if i + 1 < len(segments) else None
+                    if prev_spk is not None and prev_spk == next_spk:
+                        filtered[-1]['end'] = seg['end']  # bridge
+                    # else: drop (different speakers on both sides)
+            if filtered:
+                segments = filtered
+
+        # 7c. Final merge adjacent same-speaker
+        if len(segments) > 1:
+            final = [segments[0]]
+            for seg in segments[1:]:
+                if seg['speaker'] == final[-1]['speaker']:
+                    final[-1]['end'] = seg['end']
+                else:
+                    final.append(seg)
+            segments = final
+
+        # 7d. Senko: re-rank speakers by total speaking time (SPEAKER_01 = most talkative)
+        spk_dur = {}
+        for seg in segments:
+            spk_dur[seg['speaker']] = spk_dur.get(seg['speaker'], 0) + (seg['end'] - seg['start'])
+        ranked = sorted(spk_dur.keys(), key=lambda s: spk_dur[s], reverse=True)
+        rerank = {old: new for new, old in enumerate(ranked)}
+        for seg in segments:
+            seg['speaker'] = rerank[seg['speaker']]
+
         t_total_elapsed = time.perf_counter() - t_total
-        logger.info(f"[3DSpeaker-CAM++] Done: {len(segments)} segments, "
+        n_speakers = len(set(s['speaker'] for s in segments))
+        logger.info(f"[Senko-CAM++] Done: {len(segments)} segments, "
                      f"{n_speakers} speakers, {t_total_elapsed:.3f}s total "
                      f"(VAD={t_vad:.3f}s, emb={t_emb:.3f}s, clust={t_clust:.3f}s)")
 
@@ -689,8 +770,8 @@ class ThreeDSpeakerCamppDiarizer:
         if self.emb_sess is not None:
             del self.emb_sess
             self.emb_sess = None
-        if self.vad_sess is not None:
-            del self.vad_sess
-            self.vad_sess = None
+        if self.seg_sess is not None:
+            del self.seg_sess
+            self.seg_sess = None
         gc.collect()
-        print("[3DSpeaker-CAM++] Model unloaded")
+        print("[Senko-CAM++] Model unloaded")

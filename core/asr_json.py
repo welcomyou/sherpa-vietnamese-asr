@@ -66,12 +66,12 @@ def serialize_segments(segments, speaker_name_mapping=None, speaker_colors=None,
                 'timestamp': seg_end
             })
 
-        # Serialize raw_words (word-level prob cho low-confidence highlighting)
+        # Serialize raw_words (suspect highlighting)
         raw_words_data = None
         if seg.get('raw_words'):
             raw_words_data = []
             for w in seg['raw_words']:
-                wd = {'text': w.get('text', ''), 'prob': round(w.get('prob', 1.0), 3)}
+                wd = {'text': w.get('text', '')}
                 if w.get('gap_after_ms'):
                     wd['gap_after_ms'] = w['gap_after_ms']
                 if w.get('gap_before_ms'):
