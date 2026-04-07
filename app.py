@@ -201,7 +201,6 @@ class MainWindow(QMainWindow):
                 file_tab.slider_case_conf, file_tab.check_speaker_diarization, file_tab.check_show_speaker_labels,
                 file_tab.spin_num_speakers, file_tab.combo_speaker_model, file_tab.check_save_ram,
                 file_tab.check_rms_normalize,
-                file_tab.slider_diarization_threshold
             ]
             for w in widgets_to_block:
                 w.blockSignals(True)
@@ -231,10 +230,6 @@ class MainWindow(QMainWindow):
                 file_tab.check_speaker_diarization.setChecked(speaker_diarization)
                 file_tab.on_speaker_diarization_changed(file_tab.check_speaker_diarization.checkState().value)
                 
-                diarization_threshold = file_settings.getint('diarization_threshold', 70)  # Default 0.70
-                file_tab.slider_diarization_threshold.setValue(diarization_threshold)
-                file_tab.on_diarization_threshold_changed(diarization_threshold)
-                
                 show_speaker_labels = file_settings.getboolean('show_speaker_labels', True)
                 file_tab.check_show_speaker_labels.setChecked(show_speaker_labels)
                 
@@ -251,7 +246,6 @@ class MainWindow(QMainWindow):
                 index = file_tab.combo_speaker_model.findData(speaker_model)
                 if index >= 0:
                     file_tab.combo_speaker_model.setCurrentIndex(index)
-                # Force update threshold visibility (signal may not fire if index unchanged)
                 file_tab.on_speaker_model_changed(file_tab.combo_speaker_model.currentIndex())
                 
                 save_ram = file_settings.getboolean('save_ram', True)
@@ -337,7 +331,6 @@ class MainWindow(QMainWindow):
             self.config['FileSettings']['save_ram'] = str(file_tab.check_save_ram.isChecked())
             self.config['FileSettings']['rms_normalize'] = str(file_tab.check_rms_normalize.isChecked())
 
-            self.config['FileSettings']['diarization_threshold'] = str(file_tab.slider_diarization_threshold.value())
             self.save_config()
         finally:
             # Reconnect signals
@@ -495,7 +488,7 @@ class MainWindow(QMainWindow):
         file_tab.check_save_ram.stateChanged.connect(self.save_file_config)
         file_tab.check_rms_normalize.stateChanged.connect(self.save_file_config)
 
-        file_tab.slider_diarization_threshold.valueChanged.connect(self.save_file_config)
+        # threshold slider removed from UI — no signal to connect
     
     def _disconnect_file_signals(self):
         """Disconnect File tab signals temporarily"""
@@ -541,7 +534,7 @@ class MainWindow(QMainWindow):
         except:
             pass
         try:
-            file_tab.slider_diarization_threshold.valueChanged.disconnect(self.save_file_config)
+            pass  # threshold slider removed from UI
         except:
             pass
     

@@ -393,31 +393,12 @@ function populateModels(models, defaults) {
         }
     }
 
-    // Luu has_threshold info
-    window._speakerModelHasThreshold = {};
-    for (const m of models.speaker_models) {
-        window._speakerModelHasThreshold[m.id] = m.has_threshold !== false;
-    }
-
-    // Tu dong dieu chinh threshold + an/hien khi doi speaker model
+    // Update threshold default when model changes (internal, hidden from user)
     spkSelect.addEventListener('change', () => {
         const modelId = spkSelect.value;
         const newThreshold = window._speakerModelThresholds[modelId] || 70;
         document.getElementById('cfg-threshold').value = newThreshold;
-        updateSliderLabels();
-        // An/hien threshold row
-        const thresholdRow = document.getElementById('threshold-row');
-        if (thresholdRow) {
-            thresholdRow.style.display = window._speakerModelHasThreshold[modelId] ? '' : 'none';
-        }
     });
-
-    // Apply has_threshold cho model mac dinh
-    const defaultModelId = spkSelect.value;
-    const thresholdRow = document.getElementById('threshold-row');
-    if (thresholdRow && defaultModelId) {
-        thresholdRow.style.display = window._speakerModelHasThreshold[defaultModelId] !== false ? '' : 'none';
-    }
 
     // Apply defaults
     document.getElementById('cfg-punct').value = defaults.punctuation_confidence;
@@ -430,7 +411,6 @@ function initSliders() {
     const sliderLabels = {
         'cfg-punct': { el: 'cfg-punct-label', fmt: (v) => getConfLabel(v) + ` (${v})` },
         'cfg-case': { el: 'cfg-case-label', fmt: (v) => getConfLabel(v) + ` (${v})` },
-        'cfg-threshold': { el: 'cfg-threshold-label', fmt: (v) => (v / 100).toFixed(2) },
     };
 
     for (const [sliderId, info] of Object.entries(sliderLabels)) {

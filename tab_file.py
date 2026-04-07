@@ -420,51 +420,16 @@ class FileProcessingTab(QWidget):
         
         form_config.addRow("  └─ Số Người nói:", speaker_settings_layout)
         
-        # Diarization Threshold Slider
+        # Diarization threshold — hidden from user, kept as internal default
+        # Threshold only used by ResNet34 (AHC clustering), Senko uses auto-tune
         self.slider_diarization_threshold = QSlider(Qt.Orientation.Horizontal)
-        self.slider_diarization_threshold.setRange(10, 150)  # 0.10 to 1.50, step 0.01
-        self.slider_diarization_threshold.setValue(70)  # Default 0.70
-        self.slider_diarization_threshold.setEnabled(False)
-        self.slider_diarization_threshold.setStyleSheet(f"""
-            QSlider::groove:horizontal {{
-                border: 1px solid {COLORS['border']};
-                height: 6px;
-                background: {COLORS['bg_dark']};
-                border-radius: 3px;
-            }}
-            QSlider::handle:horizontal {{
-                background: {COLORS['accent']};
-                width: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {COLORS['accent']};
-                border-radius: 3px;
-            }}
-        """)
-        self.label_diarization_threshold = QLabel("0.70")  # Default display
-        self.label_diarization_threshold.setStyleSheet(f"color: {COLORS['text_secondary']}; min-width: 30px; padding-bottom: 4px;")
-        self.slider_diarization_threshold.valueChanged.connect(self.on_diarization_threshold_changed)
-        
-        diarization_thresh_layout = QHBoxLayout()
-        diarization_thresh_layout.addWidget(self.slider_diarization_threshold)
-        diarization_thresh_layout.addWidget(self.label_diarization_threshold)
-
-        # Wrap threshold row vào widget để ẩn/hiện toàn bộ
+        self.slider_diarization_threshold.setRange(10, 150)
+        self.slider_diarization_threshold.setValue(70)
+        self.slider_diarization_threshold.setVisible(False)
+        self.label_diarization_threshold = QLabel("0.70")
+        self.label_diarization_threshold.setVisible(False)
         self.threshold_row_widget = QWidget()
-        thresh_vbox = QVBoxLayout(self.threshold_row_widget)
-        thresh_vbox.setContentsMargins(0, 0, 0, 0)
-        thresh_vbox.setSpacing(2)
-        thresh_label_row = QHBoxLayout()
-        self.threshold_row_label = QLabel("  └─ Ngưỡng phân biệt:")
-        thresh_label_row.addWidget(self.threshold_row_label)
-        thresh_label_row.addLayout(diarization_thresh_layout)
-        thresh_vbox.addLayout(thresh_label_row)
-        self.label_diarization_threshold_tip = QLabel("Cao (1.00) = Gộp nhiều | Thấp (0.30) = Tách kỹ | ONNX: 0.80-1.20")
-        self.label_diarization_threshold_tip.setStyleSheet(f"font-size: 9px; color: {COLORS['text_secondary']}; font-style: italic; margin-left: 4px;")
-        thresh_vbox.addWidget(self.label_diarization_threshold_tip)
-        form_config.addRow(self.threshold_row_widget)
+        self.threshold_row_widget.setVisible(False)
         
         # Model embedding extraction + Rerun button
         embedding_layout = QHBoxLayout()
@@ -819,47 +784,21 @@ class FileProcessingTab(QWidget):
         self.label_threads.setText(str(value))
 
     def on_diarization_threshold_changed(self, value):
-        threshold = value / 100.0  # 2 decimal places: 50 -> 0.50
-        self.label_diarization_threshold.setText(f"{threshold:.2f}")  # Show 0.50, 0.70...
-        
-        if threshold >= 1.0:
-            tip = "Rất cao (Gộp nhiều) - dùng cho ONNX"
-        elif threshold >= 0.7:
-            tip = "Cao (Gộp nhiều)"
-        elif threshold <= 0.4:
-            tip = "Thấp (Tách kỹ)"
-        else:
-            tip = "Trung bình"
-        self.label_diarization_threshold.setToolTip(f"Ngưỡng hiện tại: {threshold} - {tip}")
+        """Kept for compatibility — threshold hidden from user."""
+        pass
 
     def on_speaker_model_changed(self, index):
-        """Update threshold + visibility when speaker model changes"""
-        from core.speaker_diarization import SpeakerDiarizer, SPEAKER_EMBEDDING_MODELS
-
+        """Update when speaker model changes. Threshold always hidden."""
+        from core.speaker_diarization import SpeakerDiarizer
         model_id = self.combo_speaker_model.currentData()
-        model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {})
-        has_threshold = model_info.get("has_threshold", True)
-
-        # Spectral clustering models don't use threshold
-        self.threshold_row_widget.setVisible(has_threshold)
-
         default_threshold = SpeakerDiarizer.get_default_threshold(model_id)
-        slider_value = int(default_threshold * 100)
-        self.slider_diarization_threshold.setValue(slider_value)
-
-        print(f"[Config] Model changed to {model_id}, threshold={default_threshold}, has_threshold={has_threshold}")
+        self.slider_diarization_threshold.setValue(int(default_threshold * 100))
 
     def on_speaker_diarization_changed(self, state):
         is_checked = (state == Qt.CheckState.Checked.value or state == 2)
         self.spin_num_speakers.setEnabled(is_checked)
         self.combo_speaker_model.setEnabled(is_checked)
         self.check_show_speaker_labels.setEnabled(is_checked)
-
-        # Threshold: chỉ hiện nếu model hỗ trợ
-        model_id = self.combo_speaker_model.currentData()
-        model_info = SPEAKER_EMBEDDING_MODELS.get(model_id, {})
-        has_threshold = model_info.get("has_threshold", True)
-        self.threshold_row_widget.setVisible(has_threshold)
         self.btn_rerun_diarization.setEnabled(is_checked and bool(self.segments))
 
     def on_show_speaker_labels_changed(self, state):

@@ -166,11 +166,8 @@
                             <label>Model người nói:</label>
                             <select id="cfg-speaker-model"></select>
                         </div>
-                        <div class="config-row" id="threshold-row">
-                            <label>Ngưỡng:</label>
-                            <input type="range" id="cfg-threshold" min="10" max="150" value="70" step="1">
-                            <span id="cfg-threshold-label">0.70</span>
-                        </div>
+                        <!-- Threshold removed — auto-tuned internally by clustering algorithm -->
+                        <input type="hidden" id="cfg-threshold" value="70">
                         <!-- merge_short_speaker removed — NaturalTurn luôn bật -->
                     </div>
                 </div>
