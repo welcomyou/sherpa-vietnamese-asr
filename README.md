@@ -17,32 +17,42 @@
 
 ## Tính năng
 
+### Chung (Desktop & Web)
+
 - **Chuyển giọng nói thành văn bản** — MP3, WAV, M4A, FLAC, AAC, OGG, MP4, MKV, AVI, MOV, WEBM...
 - **3 model ASR** — Zipformer 30M (nhanh), Zipformer 68M (chính xác), ROVER (bỏ phiếu 2 model)
-- **Phân tách người nói** (Speaker Diarization) — 2 backend Pure ONNX Runtime, không cần PyTorch:
+- **Phân tách người nói** (Speaker Diarization) — Pure ONNX Runtime, không cần PyTorch:
   - Pyannote Community-1 (ResNet34-LM + PLDA + VBx)
-  - 3D-Speaker CAM++ 192-dim (spectral clustering, nhanh hơn 5-6x)
+  - Senko CAM++ 192-dim (spectral clustering / UMAP+HDBSCAN, nhanh hơn)
+  - Senko CAM++ Optimized (batch inference, 2.5x nhanh hơn bản thường)
 - **NaturalTurn** — thuật toán nhận diện lượt nói tự nhiên, gộp backchannel vào người nói chính (Cychosz et al., Scientific Reports 2025)
 - **Tự động thêm dấu câu, viết hoa** — ViBERT-capu (ONNX) + pause hints
-- **Tóm tắt cuộc họp** (Web) — Gemma 4 E2B qua llama-cpp-python (GGUF, chạy CPU)
-- **Thu âm trực tiếp** (Desktop) — real-time streaming, phím 1-9 đánh dấu người nói
-- **Click câu để tua** — phát lại đồng bộ với văn bản
 - **Hỗ trợ hotwords** — tên riêng, thuật ngữ chuyên ngành (Aho-Corasick)
 - **Đánh giá chất lượng** — DNSMOS + ASR confidence
 - **Resampling chất lượng cao** — SoXR HQ (desktop) / VHQ (web service)
-- **PWA** (Web) — cài trên mobile/desktop như app native
-- **Admin GUI** (Web) — quản lý server, session, queue, user
-- **Windows Service** (Web) — chạy headless hoặc cài service
+
+### Desktop App
+
+- **Thu âm trực tiếp** — real-time streaming, phím 1-9 đánh dấu người nói
+- **Click câu để tua** — phát lại đồng bộ với văn bản
+- **Đổi tên / gộp / tách người nói** — chỉnh sửa kết quả diarization trực tiếp trên UI
+
+### Web Service
+
+- **Tóm tắt cuộc họp** — Gemma 4 E2B qua llama-cpp-python (GGUF, chạy CPU)
+- **PWA** — cài trên mobile/desktop như app native
+- **Admin GUI** — quản lý server, session, queue, user
+- **Windows Service** — chạy headless hoặc cài service
 
 ## Công nghệ
 
 | Thành phần | Công nghệ |
 |-----------|-----------|
 | ASR | Sherpa-ONNX, Zipformer RNN-T (30M + 68M) |
-| Diarization | Pyannote Community-1 + 3D-Speaker CAM++ (Pure ONNX Runtime) |
+| Diarization | Pyannote Community-1 + Senko CAM++ (Pure ONNX Runtime) |
 | NaturalTurn | Backchannel detection (Cychosz et al. 2025) |
 | Dấu câu | ViBERT-capu (ONNX) |
-| VAD | Silero VAD (ONNX) |
+| VAD | Pyannote Segmentation (ONNX) |
 | Summarizer | Gemma 4 E2B (GGUF, llama-cpp-python) |
 | Resampling | SoXR (HQ/VHQ) |
 | Desktop GUI | PyQt6 |
@@ -111,7 +121,8 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 │   ├── vad_utils.py              # Silero VAD (ONNX)
 │   ├── speaker_diarization.py    # Diarization dispatcher + NaturalTurn
 │   ├── speaker_diarization_pure_ort.py   # Pure ORT diarization (ResNet34)
-│   ├── speaker_diarization_3dspeaker_campp.py  # 3D-Speaker CAM++ diarization
+│   ├── speaker_diarization_senko_campp.py      # Senko CAM++ diarization
+│   ├── speaker_diarization_senko_campp_optimized.py  # Senko CAM++ optimized
 │   ├── punctuation_restorer_improved.py  # Dấu câu (ViBERT + pause)
 │   ├── gec_model.py              # GEC ONNX inference
 │   ├── audio_analyzer.py         # DNSMOS quality analysis
@@ -144,11 +155,12 @@ Output trong `dist/`. Copy folder sang máy đích, double-click `.bat` để ch
 - [hynt/Zipformer-30M-RNNT-6000h](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) — Vietnamese ASR Model (30M)
 - [csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20](https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20) — Vietnamese ASR Model (68M)
 - [ViBERT-capu](https://huggingface.co/dragonSwing/vibert-capu) — Punctuation Restoration
-- [Pyannote](https://github.com/pyannote/pyannote-audio) — Speaker Diarization Pipeline
-- [3D-Speaker](https://github.com/modelscope/3D-Speaker) — CAM++ Speaker Embedding
+- [Senko](https://github.com/narcotic-sh/senko) — Speaker Diarization Pipeline (CAM++ + spectral/UMAP+HDBSCAN clustering)
+- [Pyannote](https://github.com/pyannote/pyannote-audio) — Speaker Diarization Pipeline (Community-1)
+- [altunenes/speaker-diarization-community-1-onnx](https://huggingface.co/altunenes/speaker-diarization-community-1-onnx) — ONNX models cho Pyannote Community-1 (segmentation + embedding)
+- [3D-Speaker](https://github.com/modelscope/3D-Speaker) — CAM++ 192-dim Speaker Embedding
 - [WeSpeaker](https://github.com/wenet-e2e/wespeaker) — ResNet34-LM Speaker Embedding
-- [Silero VAD](https://github.com/snakers4/silero-vad) — Voice Activity Detection
-- [DNSMOS](https://github.com/microsoft/DNS-Challenge) — Audio Quality Assessment
+- [Microsoft DNSMOS](https://github.com/microsoft/DNS-Challenge) — Audio Quality Assessment
 
 ### Papers
 
