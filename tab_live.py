@@ -894,7 +894,8 @@ class LiveProcessingTab(QWidget):
                 
                 # FIX: Dùng display_name làm speaker_id trong link để tránh nhầm lẫn
                 # và dùng block_index để xác định chính xác speaker block
-                sep_html = f"<div style='display: block; margin-top: 12px; margin-bottom: 4px; font-weight: bold; color: {COLORS['accent']}; border-left: 3px solid {COLORS['accent']}; padding-left: 8px;'><a href='spk_{speaker_block_count}' style='color: {COLORS['accent']}; text-decoration: none;'>{display_name}:</a></div>"
+                display_name_safe = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                sep_html = f"<div style='display: block; margin-top: 12px; margin-bottom: 4px; font-weight: bold; color: {COLORS['accent']}; border-left: 3px solid {COLORS['accent']}; padding-left: 8px;'><a href='spk_{speaker_block_count}' style='color: {COLORS['accent']}; text-decoration: none;'>{display_name_safe}:</a></div>"
                 html_parts.append(sep_html)
                 speaker_block_count += 1
             elif seg.get('type') == 'partial':

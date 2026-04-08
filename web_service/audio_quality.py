@@ -24,6 +24,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DNSMOS_DIR = os.path.join(BASE_DIR, "models", "dnsmos")
 DNSMOS_MODEL_NAME = "sig_bak_ovr.onnx"
 DNSMOS_URL = "https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+DNSMOS_SHA256 = "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd"
 SAMPLE_RATE = 16000
 
 # Cache ONNX sessions
@@ -41,10 +42,20 @@ def _load_dnsmos_session():
     if not os.path.exists(model_path):
         # Auto-download
         try:
-            import urllib.request
+            import urllib.request, hashlib
             os.makedirs(DNSMOS_DIR, exist_ok=True)
+            tmp_path = model_path + ".tmp"
             logger.info("Downloading DNSMOS model...")
-            urllib.request.urlretrieve(DNSMOS_URL, model_path)
+            urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
+            sha256 = hashlib.sha256()
+            with open(tmp_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    sha256.update(chunk)
+            if sha256.hexdigest() != DNSMOS_SHA256:
+                os.remove(tmp_path)
+                logger.error("DNSMOS SHA-256 mismatch — file corrupted or tampered")
+                return None
+            os.rename(tmp_path, model_path)
             logger.info("DNSMOS model downloaded.")
         except Exception as e:
             logger.error(f"Failed to download DNSMOS: {e}")

@@ -57,64 +57,106 @@ class FastJSONLoadThread(QThread):
             self.error_occurred.emit(str(e))
 
 class BackgroundAudioConvertThread(QThread):
-    finished_converting = pyqtSignal(str) # -> Trả về đường dẫn file wav
+    finished_converting = pyqtSignal(str) # -> Trả về đường dẫn file wav 16kHz mono
 
     def __init__(self, audio_path, parent=None):
         super().__init__(parent)
         self.audio_path = audio_path
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def _is_wav_16k_mono(self, path):
+        """Check WAV header: đã 16kHz mono chưa?"""
+        try:
+            import soundfile as sf
+            info = sf.info(path)
+            return info.samplerate == 16000 and info.channels == 1
+        except Exception:
+            return False
+
+    def _get_ffmpeg_path(self):
+        import sys
+        if getattr(sys, 'frozen', False):
+            p = os.path.join(os.path.dirname(sys.executable), 'ffmpeg', 'bin', 'ffmpeg.exe')
+            if os.path.exists(p):
+                return p
+        else:
+            from common import BASE_DIR
+            p = os.path.join(BASE_DIR, 'ffmpeg.exe')
+            if os.path.exists(p):
+                return p
+            p = os.path.join(BASE_DIR, 'ffmpeg', 'bin', 'ffmpeg.exe')
+            if os.path.exists(p):
+                return p
+        return 'ffmpeg'
 
     def run(self):
         try:
-            import os
-            import subprocess
-            import tempfile
-            
+            if self._cancelled:
+                return
+
             file_ext = os.path.splitext(self.audio_path)[1].lower()
-            if file_ext == '.wav':
+
+            # WAV đã 16kHz mono → dùng trực tiếp, không convert
+            if file_ext == '.wav' and self._is_wav_16k_mono(self.audio_path):
                 self.finished_converting.emit(self.audio_path)
                 return
-                
+
+            if self._cancelled:
+                return
+
+            import tempfile
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
             temp_path = temp_file.name
             temp_file.close()
 
-            import sys
-            if getattr(sys, 'frozen', False):
-                ffmpeg_path = os.path.join(os.path.dirname(sys.executable), 'ffmpeg', 'bin', 'ffmpeg.exe')
-                if not os.path.exists(ffmpeg_path):
-                    ffmpeg_path = 'ffmpeg' # fallback to system ffmpeg
-            else:
-                from common import BASE_DIR
-                ffmpeg_path = os.path.join(BASE_DIR, 'ffmpeg', 'bin', 'ffmpeg.exe')
-                if not os.path.exists(ffmpeg_path):
-                    ffmpeg_path = 'ffmpeg'
-            
-            # ffmpeg -i file -vn -ac 1 -c:a pcm_s16le -y temp
+            ffmpeg_path = self._get_ffmpeg_path()
+
+            # Convert sang WAV 16kHz mono bằng ffmpeg + soxr
+            # Dùng chung cho cả playback (QMediaPlayer seek chính xác)
+            # và pipeline ASR/diarization (load_audio sf.read trực tiếp)
             command = [
                 ffmpeg_path,
                 '-i', self.audio_path,
                 '-vn',
+                '-af', 'aresample=resampler=soxr:precision=20',
+                '-ar', '16000',
                 '-ac', '1',
                 '-c:a', 'pcm_s16le',
                 '-loglevel', 'quiet',
                 '-y',
                 temp_path
             ]
-            
-            # Try FFmpeg directly
+
             try:
-                subprocess.run(command, check=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-                self.finished_converting.emit(temp_path)
+                import subprocess
+                subprocess.run(command, check=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                if not self._cancelled:
+                    self.finished_converting.emit(temp_path)
+                else:
+                    # Cancelled giữa chừng, xóa temp
+                    try:
+                        os.unlink(temp_path)
+                    except Exception:
+                        pass
             except Exception as ffmpeg_err:
-                print(f"[BackgroundAudioConvertThread] FFmpeg pipe failed: {ffmpeg_err}. Falling back to pydub...")
+                print(f"[AudioConvert] FFmpeg failed: {ffmpeg_err}. Falling back to pydub...")
+                if self._cancelled:
+                    return
                 from pydub import AudioSegment
                 audio = AudioSegment.from_file(self.audio_path)
+                audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
                 audio.export(temp_path, format='wav')
-                self.finished_converting.emit(temp_path)
-            
+                if not self._cancelled:
+                    self.finished_converting.emit(temp_path)
+
         except Exception as e:
-            print(f"[BackgroundAudioConvertThread] Lỗi chuyển đổi: {e}")
-            self.finished_converting.emit(self.audio_path) # Fallback to original
+            print(f"[AudioConvert] Error: {e}")
+            if not self._cancelled:
+                self.finished_converting.emit(self.audio_path)  # Fallback to original
 
 
 class FileProcessingTab(QWidget):
@@ -846,10 +888,17 @@ class FileProcessingTab(QWidget):
             return file_path
 
     def cleanup_temp_files(self):
-        """Dừng nhạc, nhả file lock và xoá toàn bộ file temp cũ"""
+        """Dừng nhạc, nhả file lock, stop convert thread, xoá toàn bộ file temp cũ"""
         self.player.stop()
         self.player.setSource(QUrl())
-        
+
+        # Stop background convert thread nếu đang chạy
+        if hasattr(self, '_bg_audio_thread') and self._bg_audio_thread is not None:
+            if self._bg_audio_thread.isRunning():
+                self._bg_audio_thread.cancel()
+                self._bg_audio_thread.wait(3000)  # chờ tối đa 3s
+            self._bg_audio_thread = None
+
         retained_cache = {}
         for orig_path, tmp_path in self._playback_cache.items():
             if os.path.exists(tmp_path):
@@ -1141,13 +1190,14 @@ class FileProcessingTab(QWidget):
                 display_name = self.speaker_name_mapping[speaker_id_str]
             else:
                 display_name = current_speaker
+            display_name_safe = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
             spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
             html_content = f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
 
             if self.check_show_speaker_labels.isChecked():
                 anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
-                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name_safe}</a>:</div>"
 
             html_content += f"<div style='text-align: justify; line-height:1.6; color:{COLORS['text_primary']};'>"
 
@@ -1374,15 +1424,75 @@ class FileProcessingTab(QWidget):
         else:
             config["_text_only_mode"] = False
         
-        # Sử dụng WAV cache nếu có để xử lý nhanh hơn và nhất quán
-        audio_file_for_processing = self.selected_file
+        # Lưu lại để _start_pipeline_with_audio dùng
+        self._pending_model_path = model_path
+        self._pending_config = config
+
+        import time as _time
+        self._convert_start_time = _time.time()
+
+        # Kiểm tra: đã có WAV 16kHz trong cache chưa?
         if self.selected_file in self._playback_cache:
             cached_wav = self._playback_cache[self.selected_file]
             if os.path.exists(cached_wav):
-                audio_file_for_processing = cached_wav
-                print(f"[Process] Using cached WAV: {cached_wav}")
+                print(f"[Process] Using cached WAV 16kHz: {cached_wav}")
+                self._start_pipeline_with_audio(cached_wav)
+                return
 
-        self.transcriber = TranscriberThread(audio_file_for_processing, model_path, config)
+        # Chưa có cache — cần convert?
+        file_ext = os.path.splitext(self.selected_file)[1].lower()
+        needs_convert = True
+        if file_ext in ('.wav', '.flac'):
+            try:
+                import soundfile as sf
+                info = sf.info(self.selected_file)
+                if info.samplerate == 16000 and info.channels == 1:
+                    needs_convert = False  # WAV 16kHz mono → dùng trực tiếp
+            except Exception:
+                pass
+
+        if not needs_convert:
+            print(f"[Process] WAV 16kHz mono, no conversion needed")
+            self._start_pipeline_with_audio(self.selected_file)
+            return
+
+        # Nếu background convert đang chạy (từ set_file khi có JSON) → chờ nó xong
+        if hasattr(self, '_bg_audio_thread') and self._bg_audio_thread is not None and self._bg_audio_thread.isRunning():
+            print(f"[Process] Waiting for background audio conversion...")
+            self.current_progress_text = "Đang chuyển đổi audio (ffmpeg soxr)..."
+            # Disconnect tất cả slot cũ (tránh double-fire với _on_audio_converted từ set_file)
+            try:
+                self._bg_audio_thread.finished_converting.disconnect()
+            except TypeError:
+                pass
+            self._bg_audio_thread.finished_converting.connect(self._on_convert_then_start)
+            return
+
+        # Cần convert mới — spawn thread, chờ xong rồi start pipeline
+        print(f"[Process] Converting audio to WAV 16kHz mono (ffmpeg soxr)...")
+        self.current_progress_text = "Đang chuyển đổi audio (ffmpeg soxr)..."
+        self._bg_audio_thread = BackgroundAudioConvertThread(self.selected_file)
+        self._bg_audio_thread.finished_converting.connect(self._on_convert_then_start)
+        self._bg_audio_thread.start()
+
+    def _on_convert_then_start(self, converted_path):
+        """Callback khi convert xong → cache + start pipeline."""
+        if converted_path != self.selected_file:
+            self._playback_cache[self.selected_file] = converted_path
+            print(f"[Process] Audio converted: {converted_path}")
+        self._start_pipeline_with_audio(converted_path)
+
+    def _start_pipeline_with_audio(self, audio_file_path):
+        """Start transcription pipeline với file audio đã chuẩn bị."""
+        import time as _time
+        model_path = self._pending_model_path
+        config = self._pending_config
+
+        # Tính thời gian convert, truyền vào config để pipeline cộng vào upload_convert
+        convert_elapsed = _time.time() - getattr(self, '_convert_start_time', _time.time())
+        config["_pre_convert_time"] = convert_elapsed
+
+        self.transcriber = TranscriberThread(audio_file_path, model_path, config)
         self.transcriber.progress.connect(self.update_progress)
         self.transcriber.finished.connect(self.on_finished)
         self.transcriber.error.connect(self.on_error)
@@ -1609,7 +1719,11 @@ class FileProcessingTab(QWidget):
                 pass
 
             if self.selected_file and os.path.exists(self.selected_file):
-                playback_path = self._get_playback_path(self.selected_file)
+                # Dùng WAV 16kHz cache (đã convert trước pipeline) thay vì _get_playback_path (pydub)
+                if self.selected_file in self._playback_cache:
+                    playback_path = self._playback_cache[self.selected_file]
+                else:
+                    playback_path = self.selected_file  # WAV gốc đã 16kHz mono
                 url = QUrl.fromLocalFile(os.path.abspath(playback_path))
                 self.player.setSource(url)
                 self.player_container.setVisible(True)
@@ -2504,15 +2618,16 @@ class FileProcessingTab(QWidget):
                         display_name = self.speaker_name_mapping[speaker_id_str]
                     else:
                         display_name = current_speaker
+                    display_name_safe = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                     if DEBUG_LOGGING:
                         print(f"[RENDER DEBUG] Block {block_idx}: speaker_id={speaker_id}({type(speaker_id).__name__}), speaker_id_str='{speaker_id_str}', current_speaker='{current_speaker}', display_name='{display_name}', mapping={self.speaker_name_mapping}")
-                    
+
                     spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
                     html_content += f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
 
                     if self.check_show_speaker_labels.isChecked():
                         anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
-                        html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+                        html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name_safe}</a>:</div>"
 
                     html_content += f"<div style='text-align: justify; line-height:1.6;'>"
 
@@ -2586,13 +2701,14 @@ class FileProcessingTab(QWidget):
                 display_name = self.speaker_name_mapping[speaker_id_str]
             else:
                 display_name = current_speaker
-            
+            display_name_safe = display_name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
             spk_color = self.speaker_colors.get(speaker_id_str, COLORS['accent'])
             html_content += f"<div style='padding: 4px 10px; background-color: {COLORS['bg_elevated']}; border-left: 3px solid {spk_color}; border-radius: 0 4px 4px 0;'>"
 
             if self.check_show_speaker_labels.isChecked():
                 anchor_style = f"text-decoration:none; color:{spk_color}; cursor:pointer;"
-                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name}</a>:</div>"
+                html_content += f"<div style='font-weight:bold; margin-bottom:2px; font-size:13px;'><a href='spk_{speaker_id_str}_{block_idx}' style='{anchor_style}'>{display_name_safe}</a>:</div>"
 
             html_content += f"<div style='text-align: justify; line-height:1.6;'>"
 

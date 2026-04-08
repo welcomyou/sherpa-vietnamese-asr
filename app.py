@@ -191,8 +191,10 @@ class MainWindow(QMainWindow):
         self._applying_config = True
         
         print(f"[Config] Applying config from {CONFIG_FILE}")
-        print(f"[Config] FileSettings: {dict(self.config['FileSettings'])}")
-        print(f"[Config] LiveSettings: {dict(self.config['LiveSettings'])}")
+        _SENSITIVE_KEYS = {'hf_token', 'api_key', 'secret', 'password', 'token'}
+        _safe = lambda section: {k: ('***' if k.lower() in _SENSITIVE_KEYS else v) for k, v in dict(self.config[section]).items()}
+        print(f"[Config] FileSettings: {_safe('FileSettings')}")
+        print(f"[Config] LiveSettings: {_safe('LiveSettings')}")
         
         try:
             # Apply File tab settings

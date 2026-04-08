@@ -230,9 +230,13 @@ def download_github_tar(model_id: str) -> bool:
         print("   Đang download...")
         urllib.request.urlretrieve(config['url'], tar_path)
         
-        # Extract
+        # Extract (with path traversal protection)
         print("   Đang giải nén...")
         with tarfile.open(tar_path, 'r:bz2') as tar:
+            for member in tar.getmembers():
+                member_path = (temp_dir / member.name).resolve()
+                if not str(member_path).startswith(str(temp_dir.resolve())):
+                    raise ValueError(f"Path traversal detected in archive: {member.name}")
             tar.extractall(path=temp_dir)
         
         # Move model file to correct location

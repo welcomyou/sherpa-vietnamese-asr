@@ -139,9 +139,11 @@ class ServerConfig:
     def admin_password_hash(self) -> str:
         return self.get("admin_password_hash")
 
+    _CONFIG_HIDDEN = {"admin_password_hash"}
+
     def to_dict(self) -> dict:
         """Tra ve dict cau hinh (cho API admin/config)"""
-        return {key: self.get(key) for key in self.DEFAULTS}
+        return {key: self.get(key) for key in self.DEFAULTS if key not in self._CONFIG_HIDDEN}
 
 
 # Singleton

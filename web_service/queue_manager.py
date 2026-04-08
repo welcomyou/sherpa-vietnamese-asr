@@ -18,19 +18,37 @@ logger = logging.getLogger("asr.queue")
 
 
 def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], None]] = None) -> str:
-    """Convert audio/video sang WAV bằng ffmpeg (giữ nguyên sample rate gốc).
-    Việc resample sang 16kHz mono sẽ do librosa xử lý trong load_audio()
-    để đảm bảo chất lượng resampling cao (soxr_vhq), giống pipeline desktop.
+    """Convert audio/video sang WAV 16kHz mono bằng ffmpeg + soxr resampler.
+    Output WAV 16kHz mono để load_audio() dùng sf.read() trực tiếp (không qua librosa resample),
+    giảm peak RAM từ ~6.7GB xuống ~1GB cho file 3hr.
 
     Args:
         progress_callback: Optional callback(percent: int) nhận % tiến độ 0-99
     """
+    # Kiểm tra WAV đã 16kHz mono → dùng trực tiếp
     if input_path.lower().endswith(".wav"):
-        return input_path
+        try:
+            import soundfile as sf
+            info = sf.info(input_path)
+            if info.samplerate == 16000 and info.channels == 1:
+                return input_path
+            # WAV nhưng cần convert (44.1kHz stereo, etc.) → output khác tên để không ghi đè gốc
+            output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
+        except Exception:
+            # Không đọc được header → vẫn thử convert
+            output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
+    else:
+        output_path = input_path.rsplit(".", 1)[0] + ".wav"
 
-    output_path = input_path.rsplit(".", 1)[0] + ".wav"
+    # Đã convert trước đó → dùng lại
     if os.path.exists(output_path):
-        return output_path
+        try:
+            import soundfile as sf
+            info = sf.info(output_path)
+            if info.samplerate == 16000 and info.channels == 1:
+                return output_path
+        except Exception:
+            pass  # File hỏng → convert lại
 
     # Tim ffmpeg
     from core.asr_engine import setup_ffmpeg_path
@@ -60,7 +78,9 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
             # stderr=DEVNULL tránh deadlock khi buffer đầy (file dài > 15 phút trên Windows)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
-                "-vn", "-ac", "1",
+                "-vn",
+                "-af", "aresample=resampler=soxr:precision=20",
+                "-ar", "16000", "-ac", "1",
                 "-acodec", "pcm_s16le",
                 "-progress", "pipe:1",
                 output_path,
@@ -89,7 +109,9 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
             # Fallback: blocking call không có progress (file WAV hoặc không cần)
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
-                "-vn", "-ac", "1",
+                "-vn",
+                "-af", "aresample=resampler=soxr:precision=20",
+                "-ar", "16000", "-ac", "1",
                 "-acodec", "pcm_s16le",
                 output_path,
             ]
@@ -420,6 +442,10 @@ class QueueManager:
                     asr_result_json=json.dumps(asr_json, ensure_ascii=False))
 
             logger.info(f"Completed file_id={file_id}")
+
+            # Thu hồi RAM (audio arrays, intermediate data) — không ảnh hưởng session/DB
+            import gc
+            gc.collect()
 
             # Thông báo hoàn thành
             self._send_ws(session_id, {

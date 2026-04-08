@@ -57,20 +57,26 @@ def download_model(progress_cb: Optional[Callable[[str, int], None]] = None) -> 
         return path
     except ImportError:
         # Fallback: dùng requests tải trực tiếp từ HF
-        import requests
+        import requests, hashlib
         url = f"https://huggingface.co/{DEFAULT_GGUF_REPO}/resolve/main/{DEFAULT_GGUF_FILE}"
         logger.info(f"Downloading via requests: {url}")
         resp = requests.get(url, stream=True, timeout=30)
         resp.raise_for_status()
         total = int(resp.headers.get("content-length", 0))
         downloaded = 0
-        with open(dest, "wb") as f:
+        sha256 = hashlib.sha256()
+        tmp_dest = dest + ".tmp"
+        with open(tmp_dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8 * 1024 * 1024):
                 f.write(chunk)
+                sha256.update(chunk)
                 downloaded += len(chunk)
                 if total > 0 and progress_cb:
                     pct = min(99, int(downloaded / total * 100))
                     progress_cb(f"Đang tải model... {downloaded/1e9:.1f}/{total/1e9:.1f} GB", pct)
+        file_hash = sha256.hexdigest()
+        logger.info(f"Model SHA-256: {file_hash}")
+        os.rename(tmp_dest, dest)
         if progress_cb:
             progress_cb("Tải model hoàn tất", 100)
         logger.info(f"Model downloaded: {dest} ({os.path.getsize(dest)/1e9:.1f} GB)")

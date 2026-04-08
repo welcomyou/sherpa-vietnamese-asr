@@ -952,8 +952,9 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
     # Cache optimized graph: lần 2+ load nhanh hơn, giảm disk I/O
     opts_enc.optimized_model_filepath = encoder + ".opt"
 
-    # Decoder/Joiner: Z//3 (benchmark: nhanh 7% vs 1 thread)
-    dec_joi_threads = max(1, Z // 3)
+    # Decoder/Joiner: 2 threads (benchmark sweet spot)
+    # dec=1 chậm hơn, dec>=3 gây thread scheduling overhead cho model nhỏ
+    dec_joi_threads = min(2, Z)
     opts_small = ort.SessionOptions()
     opts_small.intra_op_num_threads = dec_joi_threads
     opts_small.inter_op_num_threads = 1
@@ -2010,6 +2011,8 @@ class TranscriberPipeline:
                            res_type=self.config.get("resample_quality", "soxr_hq"))
 
         timing_details["upload_convert"] = time.time() - load_audio_start
+        # Cộng thời gian ffmpeg pre-convert (nếu có, từ BackgroundAudioConvertThread)
+        timing_details["upload_convert"] += self.config.get("_pre_convert_time", 0.0)
         self._emit(f"PHASE:LoadAudio|Đã tải audio ({timing_details['upload_convert']:.1f}s)|100")
 
         # Segment audio
@@ -2139,7 +2142,7 @@ class TranscriberPipeline:
 
         # Entropy đã tính trong decode_chunk (1-pass beam search) — không cần setup riêng
 
-        # Transcribe each chunk (trên concat_audio)
+        # Transcribe chunks
         chunk_results = []
         phase_label = "Đang chuyển thành văn bản (ROVER)" if is_rover else "Đang chuyển thành văn bản"
         self._emit(f"PHASE:Transcription|{phase_label}|0")
@@ -2147,15 +2150,14 @@ class TranscriberPipeline:
         rover_raw_a = []
         rover_raw_b = []
 
-        for i, (actual_start, actual_end, overlap_at_start) in enumerate(chunk_plan):
-            if self._is_cancelled():
-                return None
-
+        # ── Helper: process 1 chunk ──
+        def _process_single_chunk(rec, i, actual_start, actual_end, overlap_at_start,
+                                  use_wpe=False, shared_fbank=None):
+            """Decode 1 chunk, map timestamps. Thread-safe (no shared mutable state)."""
             chunk_audio = concat_audio[actual_start:actual_end]
             concat_time_offset = actual_start / 16000.0
 
-            # WPE dereverberation per-chunk (nếu bật)
-            if self.config.get("preprocess_wpe", False):
+            if use_wpe:
                 try:
                     from core.audio_preprocessing import apply_wpe_dereverberation, adaptive_peak_limit
                     chunk_audio = apply_wpe_dereverberation(chunk_audio)
@@ -2163,49 +2165,237 @@ class TranscriberPipeline:
                 except Exception as e:
                     logger.warning(f"[WPE] Chunk {i} error (skipping): {e}")
 
-            # Decode — timestamps ở concat space
-            # Tính fbank 1 lần, dùng chung cho cả 2 model (ROVER)
-            shared_fbank = compute_fbank_ort(chunk_audio, 16000) if is_rover else None
-            chunk_words = decode_chunk(recognizer, chunk_audio, concat_time_offset,
+            chunk_words = decode_chunk(rec, chunk_audio, concat_time_offset,
                                        precomputed_features=shared_fbank)
+            for w in chunk_words:
+                w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                w["end"] = map_concat_time_to_original(w["end"], offset_map)
 
-            if is_rover and rover_recognizer is not None:
-                # Model B: beam=4 (tối ưu cho 2025, entropy đáng tin cậy hơn greedy)
-                chunk_words_b = decode_chunk(rover_recognizer, chunk_audio, concat_time_offset,
-                                             precomputed_features=shared_fbank)
-
-                # Map timestamps từ concat space → original audio space
-                for w in chunk_words:
-                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
-                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
-                for w in chunk_words_b:
-                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
-                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
-
-                rover_raw_a.append(chunk_words)
-                rover_raw_b.append(chunk_words_b)
-                chunk_words_for_result = chunk_words
-            else:
-                # Entropy đã tính trong decode_chunk (1-pass)
-
-                # Map timestamps
-                for w in chunk_words:
-                    w["start"] = map_concat_time_to_original(w["start"], offset_map)
-                    w["end"] = map_concat_time_to_original(w["end"], offset_map)
-
-                chunk_words_for_result = chunk_words
-
-            chunk_results.append({
-                "text": " ".join(w["text"] for w in chunk_words_for_result) if chunk_words_for_result else "",
-                "words": chunk_words_for_result,
+            return {
+                "text": " ".join(w["text"] for w in chunk_words) if chunk_words else "",
+                "words": chunk_words,
                 "audio_start_abs": concat_time_offset,
                 "audio_end_abs": actual_end / 16000.0,
                 "overlap_sec": overlap_at_start / 16000.0,
                 "vad_group": 0,
-            })
+            }
 
-            percent = int((i + 1) / num_chunks * 100)
-            self._emit(f"PHASE:Transcription|{phase_label}|{percent}")
+        use_wpe = self.config.get("preprocess_wpe", False)
+
+        # ── Parallel 2-worker ASR (>= 4 chunks, >= 4 physical cores) ──
+        # Benchmark (6C/12T, 1h audio):
+        #   Non-ROVER: 129.9s → 77.1s (1.68x), CPU 75→83%
+        #   ROVER:     288.2s → 169.0s (1.70x), CPU 77→84%
+        #
+        # Thread allocation strategy based on total available threads:
+        #   HT (logical > physical): each worker gets PHYSICAL_CORES threads
+        #     6C/12T: enc=6 each, total 12 = all HT threads, beam search fills idle HT
+        #     4C/8T:  enc=4 each, total 8  = all HT threads
+        #   No HT (logical == physical, >= 6 cores): each worker gets threads//2
+        #     8C/8T:  enc=4 each, total 8  = all cores, beam search interleaves
+        #   < 4 cores: sequential (not enough cores to benefit)
+        from core.config import LOGICAL_THREADS, PHYSICAL_CORES as _PHYS
+        has_ht = (LOGICAL_THREADS > _PHYS)
+        use_parallel = (num_chunks >= 4 and _PHYS >= 4)
+
+        if use_parallel:
+            import threading
+
+            if has_ht:
+                # HT: each worker gets full physical cores
+                # Total 2*P = L → HT threads absorb overlap
+                worker_threads = _PHYS
+            else:
+                # No HT: split cores evenly between 2 workers
+                # 8C: 4+4, 6C: 3+3, 4C: 2+2
+                worker_threads = max(2, _PHYS // 2)
+
+            # Resolve model paths for worker creation
+            if is_rover:
+                # ROVER: primary_path and secondary_path already resolved at init
+                if os.path.isdir(os.path.join(self.model_path, ROVER_MODEL_IDS[0])):
+                    _models_dir = self.model_path
+                else:
+                    _models_dir = os.path.dirname(self.model_path)
+                _primary_path = os.path.join(_models_dir, ROVER_MODEL_IDS[0])
+                _secondary_path = os.path.join(_models_dir, ROVER_MODEL_IDS[1])
+            else:
+                _primary_path = self.model_path
+
+            # Recreate recognizer(s) with worker_threads if different from original
+            if worker_threads != cpu_threads:
+                recognizer = create_recognizer(_primary_path, worker_threads,
+                                               max_active_paths=8 if is_rover else 8)
+                recognizer['dec_cache'].clear()
+                if is_rover and rover_recognizer is not None:
+                    rover_recognizer = create_recognizer(
+                        _secondary_path, worker_threads, max_active_paths=8)
+                    rover_recognizer['dec_cache'].clear()
+
+            # Create 2nd worker's recognizer(s) with separate decoder caches
+            recognizer_2 = create_recognizer(_primary_path, worker_threads,
+                                              max_active_paths=8 if is_rover else 8)
+            recognizer_2 = dict(recognizer_2)
+            recognizer_2['dec_cache'] = {}
+
+            rover_recognizer_2 = None
+            if is_rover and rover_recognizer is not None:
+                rover_recognizer_2 = create_recognizer(
+                    _secondary_path, worker_threads, max_active_paths=8)
+                rover_recognizer_2 = dict(rover_recognizer_2)
+                rover_recognizer_2['dec_cache'] = {}
+
+            chunk_results = [None] * num_chunks
+            # ROVER: per-chunk raw words for merge later
+            rover_raw_a_arr = [None] * num_chunks if is_rover else None
+            rover_raw_b_arr = [None] * num_chunks if is_rover else None
+
+            _completed = [0]
+            _lock = threading.Lock()
+            _errors = {}
+
+            def _worker(rec, rec_rover, chunk_indices, worker_id):
+                try:
+                    for idx in chunk_indices:
+                        if self._is_cancelled():
+                            return
+                        actual_start, actual_end, overlap_at_start = chunk_plan[idx]
+
+                        if is_rover and rec_rover is not None:
+                            # ROVER: fbank once, decode both models
+                            chunk_audio = concat_audio[actual_start:actual_end]
+                            concat_time_offset = actual_start / 16000.0
+
+                            if use_wpe:
+                                try:
+                                    from core.audio_preprocessing import apply_wpe_dereverberation, adaptive_peak_limit
+                                    chunk_audio = apply_wpe_dereverberation(chunk_audio)
+                                    chunk_audio = adaptive_peak_limit(chunk_audio)
+                                except Exception as e:
+                                    logger.warning(f"[WPE] Chunk {idx} error (skipping): {e}")
+
+                            shared_fbank = compute_fbank_ort(chunk_audio, 16000)
+                            words_a = decode_chunk(rec, chunk_audio, concat_time_offset,
+                                                    precomputed_features=shared_fbank)
+                            words_b = decode_chunk(rec_rover, chunk_audio, concat_time_offset,
+                                                    precomputed_features=shared_fbank)
+
+                            for w in words_a:
+                                w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                                w["end"] = map_concat_time_to_original(w["end"], offset_map)
+                            for w in words_b:
+                                w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                                w["end"] = map_concat_time_to_original(w["end"], offset_map)
+
+                            rover_raw_a_arr[idx] = words_a
+                            rover_raw_b_arr[idx] = words_b
+
+                            chunk_results[idx] = {
+                                "text": " ".join(w["text"] for w in words_a) if words_a else "",
+                                "words": words_a,
+                                "audio_start_abs": concat_time_offset,
+                                "audio_end_abs": actual_end / 16000.0,
+                                "overlap_sec": overlap_at_start / 16000.0,
+                                "vad_group": 0,
+                            }
+                        else:
+                            # Non-ROVER: single model
+                            chunk_results[idx] = _process_single_chunk(
+                                rec, idx, actual_start, actual_end, overlap_at_start,
+                                use_wpe=use_wpe)
+
+                        with _lock:
+                            _completed[0] += 1
+                            pct = int(_completed[0] / num_chunks * 100)
+                            self._emit(f"PHASE:Transcription|{phase_label}|{pct}")
+                except Exception as e:
+                    _errors[worker_id] = e
+                    logger.error(f"[ASR Worker {worker_id}] Error: {e}")
+
+            # Split: even chunks → worker 1, odd chunks → worker 2
+            indices_w1 = list(range(0, num_chunks, 2))
+            indices_w2 = list(range(1, num_chunks, 2))
+
+            w1 = threading.Thread(target=_worker,
+                                  args=(recognizer, rover_recognizer, indices_w1, 1),
+                                  name="asr-w1")
+            w2 = threading.Thread(target=_worker,
+                                  args=(recognizer_2, rover_recognizer_2, indices_w2, 2),
+                                  name="asr-w2")
+            w1.start()
+            w2.start()
+            w1.join()
+            w2.join()
+
+            if _errors:
+                logger.error(f"[ASR Parallel] Worker errors: {_errors}")
+                for i in range(num_chunks):
+                    if chunk_results[i] is None:
+                        actual_start, actual_end, overlap_at_start = chunk_plan[i]
+                        chunk_results[i] = _process_single_chunk(
+                            recognizer, i, actual_start, actual_end, overlap_at_start,
+                            use_wpe=use_wpe)
+
+            # Collect ROVER raw words (ordered by chunk index)
+            if is_rover and rover_raw_a_arr is not None:
+                rover_raw_a = [w for w in rover_raw_a_arr if w is not None]
+                rover_raw_b = [w for w in rover_raw_b_arr if w is not None]
+
+            del recognizer_2
+            if rover_recognizer_2 is not None:
+                del rover_recognizer_2
+
+        else:
+            # ── Sequential fallback: < 4 chunks or < 4 physical cores ──
+            for i, (actual_start, actual_end, overlap_at_start) in enumerate(chunk_plan):
+                if self._is_cancelled():
+                    return None
+
+                if is_rover:
+                    chunk_audio = concat_audio[actual_start:actual_end]
+                    concat_time_offset = actual_start / 16000.0
+
+                    if use_wpe:
+                        try:
+                            from core.audio_preprocessing import apply_wpe_dereverberation, adaptive_peak_limit
+                            chunk_audio = apply_wpe_dereverberation(chunk_audio)
+                            chunk_audio = adaptive_peak_limit(chunk_audio)
+                        except Exception as e:
+                            logger.warning(f"[WPE] Chunk {i} error (skipping): {e}")
+
+                    shared_fbank = compute_fbank_ort(chunk_audio, 16000)
+                    chunk_words = decode_chunk(recognizer, chunk_audio, concat_time_offset,
+                                               precomputed_features=shared_fbank)
+                    chunk_words_b = decode_chunk(rover_recognizer, chunk_audio, concat_time_offset,
+                                                 precomputed_features=shared_fbank)
+
+                    for w in chunk_words:
+                        w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                        w["end"] = map_concat_time_to_original(w["end"], offset_map)
+                    for w in chunk_words_b:
+                        w["start"] = map_concat_time_to_original(w["start"], offset_map)
+                        w["end"] = map_concat_time_to_original(w["end"], offset_map)
+
+                    rover_raw_a.append(chunk_words)
+                    rover_raw_b.append(chunk_words_b)
+                    chunk_words_for_result = chunk_words
+                else:
+                    cr = _process_single_chunk(
+                        recognizer, i, actual_start, actual_end, overlap_at_start,
+                        use_wpe=use_wpe)
+                    chunk_words_for_result = cr["words"]
+
+                chunk_results.append({
+                    "text": " ".join(w["text"] for w in chunk_words_for_result) if chunk_words_for_result else "",
+                    "words": chunk_words_for_result,
+                    "audio_start_abs": actual_start / 16000.0,
+                    "audio_end_abs": actual_end / 16000.0,
+                    "overlap_sec": overlap_at_start / 16000.0,
+                    "vad_group": 0,
+                })
+
+                percent = int((i + 1) / num_chunks * 100)
+                self._emit(f"PHASE:Transcription|{phase_label}|{percent}")
 
         # ROVER: giữ A, bổ sung phần dư từ B, track disagree
         rover_disagree = set()

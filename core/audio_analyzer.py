@@ -32,6 +32,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DNSMOS_DIR = os.path.join(BASE_DIR, "models", "dnsmos")
 DNSMOS_URL = "https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
 DNSMOS_MODEL_NAME = "sig_bak_ovr.onnx"
+DNSMOS_SHA256 = "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd"
 
 SAMPLE_RATE = 16000
 VAD_PAD_SEC = 0.6
@@ -80,11 +81,21 @@ class DNSMOSDownloader(QThread):
                 self.progress.emit(percent)
             
             urllib.request.urlretrieve(
-                DNSMOS_URL, 
+                DNSMOS_URL,
                 model_path + ".tmp",
                 reporthook=download_progress
             )
-            
+
+            import hashlib
+            sha256 = hashlib.sha256()
+            with open(model_path + ".tmp", "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    sha256.update(chunk)
+            if sha256.hexdigest() != DNSMOS_SHA256:
+                os.remove(model_path + ".tmp")
+                self.finished.emit(False, "SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
+                return
+
             os.rename(model_path + ".tmp", model_path)
             self.finished.emit(True, "Download thành công")
             
@@ -717,7 +728,19 @@ def download_dnsmos_model_sync() -> bool:
             return True
         
         print("[AudioAnalyzer] Downloading DNSMOS model...")
-        urllib.request.urlretrieve(DNSMOS_URL, model_path)
+        tmp_path = model_path + ".tmp"
+        urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
+
+        import hashlib
+        sha256 = hashlib.sha256()
+        with open(tmp_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256.update(chunk)
+        if sha256.hexdigest() != DNSMOS_SHA256:
+            os.remove(tmp_path)
+            print("[AudioAnalyzer] SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
+            return False
+        os.rename(tmp_path, model_path)
         print("[AudioAnalyzer] DNSMOS model downloaded successfully")
         return True
         
