@@ -94,8 +94,8 @@ EXCLUDE_PACKAGES_SERVICES = {
     'pyannoteai', 'pyannoteai_sdk',
     'asteroid_filterbanks', 'julius', 'einops',
 
-    # === numba/llvmlite — librosa only uses load/resample via soxr ===
-    'numba', 'llvmlite',
+    # numba/llvmlite: GIỮ LẠI — umap-learn (Senko diarization) cần numba.njit thật
+    # 'numba', 'llvmlite',
 
     # === Large unused packages ===
     'pandas', 'pymupdf', 'fitz', 'onnx', 'ctranslate2', 'av',
@@ -130,7 +130,7 @@ EXCLUDE_PACKAGES_SERVICES = {
     # === transformers + deps — replaced by minimal stub ===
     'transformers',
     'huggingface_hub', 'safetensors',
-    'regex', 'fsspec', 'tqdm',
+    'regex', 'fsspec',  # tqdm: GIỮ LẠI — umap-learn cần tqdm.auto
 
     # === Text processing / Math / Misc not used ===
     'jiwer', 'langid', 'mosestokenizer', 'wtpsplit', 'textgrid',
@@ -585,6 +585,19 @@ def main():
         copy_source_files_online()
         copy_server_extras()  # ICU shim, nssm.exe, bat files (SAU cleanup_pyqt6)
         copy_models_online()
+
+        # Write VERSION file (auto from git)
+        print("[VER] Writing VERSION file...")
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from core.version import get_version
+            version = get_version()
+            (DIST_DIR_ONLINE / "VERSION").write_text(version, encoding='utf-8')
+            print(f"[OK] VERSION = {version}")
+        except Exception as e:
+            print(f"[WARN] Cannot determine version: {e}")
+            (DIST_DIR_ONLINE / "VERSION").write_text("unknown", encoding='utf-8')
+
         create_launcher_online()
 
         # Trim (reuse from desktop build)

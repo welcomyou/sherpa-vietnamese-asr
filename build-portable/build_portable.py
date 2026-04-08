@@ -34,6 +34,7 @@ SOURCE_FILES = [
     "streaming_asr.py", "streaming_asr_online.py",
     "config.ini", "hotword.txt", "verb-form-vocab.txt",
     "speaker_hotkeys.json", "ffmpeg.exe", "ffprobe.exe",
+    "resource_monitor.py",
 ]
 
 # Module directories to copy
@@ -171,8 +172,8 @@ def copy_venv_packages():
         'pyannoteai', 'pyannoteai_sdk',
         'asteroid_filterbanks', 'julius', 'einops',
 
-        # === numba/llvmlite (~133 MB) — librosa only uses load/resample via soxr ===
-        'numba', 'llvmlite',
+        # numba/llvmlite: GIỮ LẠI — umap-learn (Senko diarization) cần numba.njit thật
+        # 'numba', 'llvmlite',
 
         # === Large unused packages ===
         'pandas',           # 67 MB — not imported in app
@@ -230,7 +231,7 @@ def copy_venv_packages():
         'transformers',
         'huggingface_hub', 'safetensors',
         'regex', 'requests', 'urllib3', 'certifi', 'charset_normalizer', 'idna',
-        'fsspec', 'tqdm',
+        'fsspec',  # tqdm: GIỮ LẠI — umap-learn cần tqdm.auto
 
         # === Misc not needed at runtime ===
         'bottleneck',       # optional pandas dep
@@ -298,15 +299,8 @@ def copy_venv_packages():
 
 
 def _create_stubs(dst_site):
-    """Create stub packages for excluded dependencies (numba, pooch, transformers)."""
-    numba_stub = dst_site / "numba"
-    numba_stub.mkdir(exist_ok=True)
-    (numba_stub / "__init__.py").write_text(
-        '"""Stub: numba excluded from portable build."""\n'
-        '__version__ = "0.0.0"\n'
-        '_nop = lambda *a, **kw: (lambda f: f)\n'
-        'jit = generated_jit = vectorize = guvectorize = stencil = _nop\n',
-        encoding='utf-8')
+    """Create stub packages for excluded dependencies (pooch, transformers)."""
+    # numba: GIỮ LẠI bản thật (umap-learn cần numba.njit) — không tạo stub
 
     pooch_stub = dst_site / "pooch"
     pooch_stub.mkdir(exist_ok=True)
@@ -853,6 +847,20 @@ def copy_data():
 
 def create_launcher():
     """Create launcher batch file"""
+def write_version_file():
+    """Ghi VERSION file từ git describe (để portable build đọc version khi không có .git)."""
+    print("[VER] Writing VERSION file...")
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from core.version import get_version
+        version = get_version()
+        (DIST_DIR / "VERSION").write_text(version, encoding='utf-8')
+        print(f"[OK] VERSION = {version}")
+    except Exception as e:
+        print(f"[WARN] Cannot determine version: {e}")
+        (DIST_DIR / "VERSION").write_text("unknown", encoding='utf-8')
+
+
     print("[LNCH] Creating launcher...")
     
     bat_content = '''@echo off
@@ -925,8 +933,14 @@ def trim_portable():
             shutil.rmtree(d, ignore_errors=True)
 
     # Remove .dist-info (pip metadata, not needed at runtime)
+    # KEEP dist-info for packages that read their own version via importlib.metadata
+    keep_dist_info = {'pynndescent', 'umap_learn', 'umap-learn', 'hdbscan',
+                      'numba', 'llvmlite', 'scikit_learn', 'scikit-learn'}
     for d in site.glob("*.dist-info"):
         if d.is_dir():
+            dist_name = d.name.split('-')[0].lower()
+            if dist_name in keep_dist_info:
+                continue
             for f in d.rglob("*"):
                 if f.is_file():
                     removed += f.stat().st_size
@@ -1005,6 +1019,9 @@ def main():
         # Copy source and data
         copy_source_files()
         copy_data()
+
+        # Write VERSION file (auto from git)
+        write_version_file()
 
         # Create launcher
         create_launcher()

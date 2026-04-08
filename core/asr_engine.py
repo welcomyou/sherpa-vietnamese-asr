@@ -480,8 +480,7 @@ def load_audio(file_path, sample_rate=16000, progress_callback=None, res_type="s
         file_path: Đường dẫn file audio/video
         sample_rate: Sample rate đích (mặc định 16000)
         progress_callback: callable(message) - callback báo tiến trình
-        res_type: librosa resample quality — "soxr_vhq" (web, chính xác nhất)
-                  hoặc "soxr_hq" (desktop, nhanh hơn, tiết kiệm RAM)
+        res_type: librosa resample quality — "soxr_hq" (default, 2.8x faster than vhq, 71dB SNR vs vhq)
 
     Returns:
         numpy.ndarray - audio float32 array, mono, normalized
@@ -2008,7 +2007,7 @@ class TranscriberPipeline:
 
         self._emit("PHASE:LoadAudio|Đang chuẩn hóa audio|30")
         audio = load_audio(self.file_path, progress_callback=lambda msg: self._emit(f"PHASE:LoadAudio|{msg}|35"),
-                           res_type=self.config.get("resample_quality", "soxr_vhq"))
+                           res_type=self.config.get("resample_quality", "soxr_hq"))
 
         timing_details["upload_convert"] = time.time() - load_audio_start
         self._emit(f"PHASE:LoadAudio|Đã tải audio ({timing_details['upload_convert']:.1f}s)|100")
@@ -2484,9 +2483,9 @@ class TranscriberPipeline:
                 except InterruptedError:
                     raise
                 except Exception as e:
-                    print(f"[Transcriber] Speaker diarization failed: {e}")
                     import traceback
-                    traceback.print_exc()
+                    logger.error(f"Speaker diarization FAILED: {e}")
+                    logger.error(traceback.format_exc())
                     self._emit(f"PHASE:Diarization|Lỗi phân tách người nói: {str(e)[:80]}|0")
 
         # Giải phóng audio — diarization xong, không cần nữa

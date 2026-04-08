@@ -2,6 +2,10 @@
 import sys
 import os
 
+# Setup file logging (clears log on restart)
+from core.log_config import setup_logging
+setup_logging("desktop")
+
 # Import numpy first to avoid "CPU dispatcher tracer already initialized" error
 import numpy
 
@@ -601,7 +605,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         
         # Nội dung chính
-        content_text = """
+        from core.version import get_version
+        app_version = get_version()
+
+        content_text = f"""
 <p style='color: #cccccc; margin: 8px 0;'><b>Thiết kế:</b> Nguyễn Hồng Quân<br>
 nhquan.thanhuy@tphcm.gov.vn — 098.558.3555<br>
 Chuyên viên Phòng Chuyển đổi số - Cơ yếu,<br>
@@ -609,8 +616,7 @@ Văn phòng Thành ủy Thành phố Hồ Chí Minh.</p>
 
 <p style='color: #cccccc; margin: 8px 0;'><b>Lập trình:</b> Claude và những người bạn</p>
 
-<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> 2.1<br>
-Ngày 07 tháng 04 năm 2026</p>
+<p style='color: #cccccc; margin: 8px 0;'><b>Phiên bản:</b> {app_version}</p>
 
 <p style='color: #ffd700; margin: 15px 0; font-weight: bold; text-align: center;'>
 PHẦN MỀM SỬ DỤNG TRONG MÔI TRƯỜNG GIÁO DỤC, HÀNH CHÍNH CÔNG, TỔ CHỨC ĐẢNG, ĐOÀN THỂ.<br>

@@ -346,6 +346,13 @@ def _get_models_sync():
     }
 
 
+@app.get("/api/version")
+async def get_version_info():
+    """Trả về version hiện tại."""
+    from core.version import get_version
+    return {"version": get_version()}
+
+
 @app.get("/api/config/defaults")
 async def get_defaults():
     """Cấu hình mặc định"""

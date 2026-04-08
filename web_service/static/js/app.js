@@ -342,6 +342,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 function showAboutDialog() {
     document.getElementById('about-modal').style.display = 'flex';
+    // Fetch version từ server
+    fetch('/api/version').then(r => r.json()).then(d => {
+        const el = document.getElementById('about-version-text');
+        if (el && d.version) el.textContent = 'Phiên bản ' + d.version;
+    }).catch(() => {});
 }
 
 function hideAboutDialog() {
