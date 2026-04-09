@@ -448,98 +448,106 @@ def split_long_segments(segments, max_duration=12.0, preserve_raw_words=False):
 # AUDIO UTILITIES
 # =============================================================================
 
-def setup_ffmpeg_path():
-    """Thiết lập đường dẫn ffmpeg cho pydub"""
-    from pydub.utils import which
-
-    if which("ffmpeg"):
-        return
-
-    possible_paths = [
+def _find_ffmpeg():
+    """Find ffmpeg executable path."""
+    import shutil
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    possible = [
         os.path.join(os.path.dirname(sys.executable), "ffmpeg.exe"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffmpeg.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffmpeg", "bin", "ffmpeg.exe"),
         r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+    ]
+    for p in possible:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _load_audio_ffmpeg_pipe(file_path, sample_rate=16000):
+    """Load audio via ffmpeg pipe — decode + resample + mono in 1 pass.
+    No intermediate copies in Python memory. Peak RAM = output array only.
+
+    Returns: float32 numpy array (mono, target sample rate)
+    """
+    import subprocess
+
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        raise FileNotFoundError("ffmpeg not found")
+
+    cmd = [
+        ffmpeg, "-i", file_path,
+        "-vn",                                       # no video
+        "-af", "aresample=resampler=soxr:precision=20",  # SoXR HQ resampler
+        "-ac", "1",                                  # mono
+        "-ar", str(sample_rate),                     # target sample rate
+        "-f", "f32le",                               # raw float32 little-endian
+        "-acodec", "pcm_f32le",
+        "-loglevel", "error",
+        "pipe:1"                                     # output to stdout
     ]
 
-    for ffmpeg_path in possible_paths:
-        if os.path.exists(ffmpeg_path):
-            import pydub
-            pydub.AudioSegment.converter = ffmpeg_path
-            pydub.AudioSegment.ffmpeg = ffmpeg_path
-            pydub.AudioSegment.ffprobe = ffmpeg_path.replace("ffmpeg.exe", "ffprobe.exe")
-            return
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=creationflags)
+    raw_bytes, stderr = proc.communicate()
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {stderr.decode('utf-8', errors='replace')[:200]}")
+
+    audio = np.frombuffer(raw_bytes, dtype=np.float32)
+    return audio
 
 
-def load_audio(file_path, sample_rate=16000, progress_callback=None, res_type="soxr_hq"):
+def load_audio(file_path, sample_rate=16000, progress_callback=None, **kwargs):
     """
     Load và chuẩn hóa audio file thành float32 array tại sample rate mong muốn.
+
+    Strategy:
+      1. WAV/FLAC 16kHz mono: soundfile direct read (fastest, zero resample)
+      2. WAV/FLAC other rate: ffmpeg pipe (decode + resample in 1 pass)
+      3. MP3/M4A/video: ffmpeg pipe (decode + resample + mono in 1 pass)
+
+    RAM: output array only (~660MB for 3h audio). No intermediate copies.
 
     Args:
         file_path: Đường dẫn file audio/video
         sample_rate: Sample rate đích (mặc định 16000)
         progress_callback: callable(message) - callback báo tiến trình
-        res_type: librosa resample quality — "soxr_hq" (default, 2.8x faster than vhq, 71dB SNR vs vhq)
 
     Returns:
         numpy.ndarray - audio float32 array, mono, normalized
     """
-    import librosa
-
     def emit(msg):
         if progress_callback:
             progress_callback(msg)
 
     file_ext = os.path.splitext(file_path)[1].lower()
 
-    needs_conversion = ['.m4a', '.ogg', '.wma', '.opus',
-                        '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
-
-    file_to_load = file_path
-
-    if file_ext in needs_conversion:
-        try:
-            audio, sr = librosa.load(file_path, sr=sample_rate, mono=True, res_type=res_type)
-        except Exception:
-            emit(f"Đang chuyển đổi {file_ext} sang wav")
-            try:
-                from pydub import AudioSegment
-                setup_ffmpeg_path()
-
-                import io
-                format_map = {'.m4a': 'm4a', '.ogg': 'ogg', '.wma': 'wma', '.opus': 'opus'}
-                if file_ext in format_map:
-                    audio_segment = AudioSegment.from_file(file_path, format=format_map[file_ext])
-                else:
-                    audio_segment = AudioSegment.from_file(file_path)
-
-                audio_segment = audio_segment.set_channels(1)
-                # In-memory WAV: tránh ghi temp file ra disk (giảm disk I/O)
-                buf = io.BytesIO()
-                audio_segment.export(buf, format='wav')
-                buf.seek(0)
-                audio, sr = librosa.load(buf, sr=sample_rate, mono=True, res_type=res_type)
-            except ImportError:
-                raise ImportError(f"Không thể đọc file {file_ext}. Vui lòng cài đặt pydub: pip install pydub")
-            except Exception as e2:
-                raise Exception(f"Không thể đọc file {file_ext}. Đảm bảo đã cài ffmpeg: {e2}")
-    else:
-        # WAV/FLAC: dùng soundfile nếu đã đúng sample rate (tránh resample thừa)
+    # Fast path: WAV/FLAC already at target rate + mono → soundfile direct
+    if file_ext in ('.wav', '.flac'):
         import soundfile as sf
-        info = sf.info(file_to_load)
+        info = sf.info(file_path)
         if info.samplerate == sample_rate and info.channels == 1:
-            # Đã đúng 16kHz mono — đọc trực tiếp, không qua librosa/soxr
-            audio, sr = sf.read(file_to_load, dtype='float32')
+            audio, _ = sf.read(file_path, dtype='float32')
         elif info.samplerate == sample_rate and info.channels > 1:
-            # Đúng sample rate nhưng stereo — đọc rồi trộn mono
-            audio, sr = sf.read(file_to_load, dtype='float32')
+            audio, _ = sf.read(file_path, dtype='float32')
             audio = audio.mean(axis=1)
         else:
-            # Cần resample — dùng librosa + soxr
-            audio, sr = librosa.load(file_to_load, sr=sample_rate, mono=True, res_type=res_type)
+            # WAV/FLAC needs resample → ffmpeg pipe
+            emit("Đang resample audio (ffmpeg)")
+            audio = _load_audio_ffmpeg_pipe(file_path, sample_rate)
+    else:
+        # MP3/M4A/video/etc → ffmpeg pipe: decode + resample + mono in 1 pass
+        emit("Đang đọc audio (ffmpeg)")
+        audio = _load_audio_ffmpeg_pipe(file_path, sample_rate)
 
-    # Peak normalization
+    print(f"[Audio] Loaded: {len(audio)/sample_rate:.1f}s, {len(audio)*4/1024/1024:.0f}MB")
+
+    # Peak normalization (low volume boost)
     peak = np.max(np.abs(audio))
     if peak > 0 and peak < 0.5:
         audio = audio / peak * 0.95

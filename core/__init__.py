@@ -35,7 +35,7 @@ from core.asr_engine import (
     merge_chunks_with_overlap,
     split_long_segments,
     load_audio,
-    setup_ffmpeg_path,
+    _find_ffmpeg,
     find_silent_regions,
     get_ort,
 )

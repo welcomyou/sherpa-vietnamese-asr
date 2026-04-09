@@ -50,9 +50,7 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
         except Exception:
             pass  # File hỏng → convert lại
 
-    # Tim ffmpeg
-    from core.asr_engine import setup_ffmpeg_path
-    setup_ffmpeg_path()
+    # ffmpeg được gọi trực tiếp qua subprocess (không cần import helper)
 
     try:
         # Lấy duration bằng ffprobe để tính % tiến độ

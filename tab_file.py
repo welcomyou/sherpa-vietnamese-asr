@@ -859,32 +859,48 @@ class FileProcessingTab(QWidget):
 
     def _get_playback_path(self, file_path):
         """Convert non-WAV files to temp WAV for accurate QMediaPlayer seeking.
-        MP3/M4A seeking is frame-based and inaccurate. WAV seeking is sample-exact."""
+        MP3/M4A seeking is frame-based and inaccurate. WAV seeking is sample-exact.
+        Uses ffmpeg subprocess (no pydub, no RAM spike for long audio)."""
         file_ext = os.path.splitext(file_path)[1].lower()
         if file_ext == '.wav':
-            return file_path  # WAV: use directly
-            
+            return file_path
+
         if file_path in self._playback_cache:
             cached_path = self._playback_cache[file_path]
             if os.path.exists(cached_path):
                 print(f"[_get_playback_path] Using cached WAV for {file_ext}: {cached_path}")
                 return cached_path
-        
+
         try:
-            from pydub import AudioSegment
-            import tempfile
-            
-            audio = AudioSegment.from_file(file_path)
+            import tempfile, subprocess
+
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False, prefix='asr_playback_')
             temp_path = temp_file.name
             temp_file.close()
-            
-            audio.export(temp_path, format='wav')
+
+            # Find ffmpeg
+            from core.asr_engine import _find_ffmpeg
+            ffmpeg = _find_ffmpeg()
+            if not ffmpeg:
+                raise FileNotFoundError("ffmpeg not found")
+
+            # Convert via ffmpeg subprocess — streams to disk, no RAM spike
+            cmd = [
+                ffmpeg, "-i", file_path,
+                "-vn",
+                "-c:a", "pcm_s16le",
+                "-loglevel", "quiet",
+                "-y",
+                temp_path,
+            ]
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            subprocess.run(cmd, check=True, creationflags=creationflags)
+
             self._playback_cache[file_path] = temp_path
-            print(f"[_get_playback_path] Converted {file_ext} -> WAV for accurate seeking: {temp_path}")
+            print(f"[_get_playback_path] Converted {file_ext} -> WAV via ffmpeg: {temp_path}")
             return temp_path
         except Exception as e:
-            print(f"[_get_playback_path] Failed to convert, using original: {e}")
+            print(f"[_get_playback_path] Failed to convert: {e}")
             return file_path
 
     def cleanup_temp_files(self):
