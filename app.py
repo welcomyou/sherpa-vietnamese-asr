@@ -2,6 +2,38 @@
 import sys
 import os
 
+# ─── Splash screen (hiện NGAY trước mọi import nặng) ───
+# Chỉ import tối thiểu PyQt6 để hiện splash nhanh nhất có thể
+_splash = None
+if __name__ == "__main__":
+    os.environ["QT_MEDIA_BACKEND"] = "windows"
+    from PyQt6.QtWidgets import QApplication, QSplashScreen
+    from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+    from PyQt6.QtCore import Qt
+
+    _app = QApplication(sys.argv)
+    # Vẽ splash
+    _pw, _ph = 420, 200
+    _pm = QPixmap(_pw, _ph)
+    _pt = QPainter(_pm)
+    _pt.fillRect(0, 0, _pw, _ph, QColor("#1e1e2e"))
+    _pt.setPen(QColor("#3d5afe"))
+    _pt.drawRect(0, 0, _pw - 1, _ph - 1)
+    _pt.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+    _pt.drawText(_pm.rect().adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "sherpa-vietnamese-asr")
+    _pt.setPen(QColor("#e0e0e0"))
+    _pt.setFont(QFont("Segoe UI", 11))
+    _pt.drawText(_pm.rect(), Qt.AlignmentFlag.AlignCenter, "Đang khởi động...")
+    _pt.setPen(QColor("#888888"))
+    _pt.setFont(QFont("Segoe UI", 8))
+    _pt.drawText(_pm.rect().adjusted(0, 0, 0, -15), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, "Nhận dạng giọng nói tiếng Việt — Offline, CPU")
+    _pt.end()
+    _splash = QSplashScreen(_pm)
+    _splash.show()
+    _app.processEvents()
+
+# ─── Heavy imports (splash đã hiện) ───
+
 # Setup file logging (clears log on restart)
 from core.log_config import setup_logging
 setup_logging("desktop")
@@ -44,9 +76,10 @@ print(f"[Init] CPU: {DEFAULT_THREADS} physical cores, {ALLOWED_THREADS} logical 
 os.environ["OMP_NUM_THREADS"] = str(ALLOWED_THREADS)
 os.environ["MKL_NUM_THREADS"] = str(ALLOWED_THREADS)
 
-os.environ["QT_MEDIA_BACKEND"] = "windows"
+if "QT_MEDIA_BACKEND" not in os.environ:
+    os.environ["QT_MEDIA_BACKEND"] = "windows"
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTabWidget, QLabel, QPushButton)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
@@ -665,9 +698,15 @@ KHÔNG SỬ DỤNG CHO MỤC ĐÍCH THƯƠNG MẠI.
 if __name__ == "__main__":
     # Dọn dẹp file tạm từ lần chạy trước (nếu bị crash)
     cleanup_temp_files()
-    
-    app = QApplication(sys.argv)
+
+    # _app và _splash đã tạo ở đầu file (trước imports nặng)
+    app = _app
+
+    # Load MainWindow
     window = MainWindow()
     window.show()
+    if _splash:
+        _splash.finish(window)
+
     ret = app.exec()
     os._exit(ret)

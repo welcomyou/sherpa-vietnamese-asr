@@ -863,7 +863,8 @@ def write_version_file():
 
     print("[LNCH] Creating launcher...")
     
-    bat_content = '''@echo off
+    # Bat 1: Console mode (debug, xem log)
+    bat_console = '''@echo off
 chcp 65001 >nul
 setlocal
 
@@ -872,7 +873,7 @@ set "PYTHON_EXE=%BASE_DIR%python\\python.exe"
 set "APP_SCRIPT=%BASE_DIR%app.py"
 
 if not exist "%PYTHON_EXE%" (
-    echo ERROR: Không tìm thấy Python embedded
+    echo ERROR: Khong tim thay Python embedded
     pause
     exit /b 1
 )
@@ -891,30 +892,45 @@ if %errorlevel% neq 0 (
 )
 exit /b %errorlevel%
 '''
-    
-    launcher_path = DIST_DIR / "sherpa-vietnamese-asr.bat"
-    launcher_path.write_text(bat_content, encoding='utf-8')
-    
+    (DIST_DIR / "sherpa-vietnamese-asr.bat").write_text(bat_console, encoding='utf-8')
+
+    # Bat 2: GUI mode (không console — dùng pythonw.exe, log ra file)
+    bat_gui = '''@echo off
+set "BASE_DIR=%~dp0"
+set "PYTHONHOME=%BASE_DIR%python"
+set "PYTHONDONTWRITEBYTECODE=1"
+set "PYTHONIOENCODING=utf-8"
+set "QT6_BIN=%BASE_DIR%python\\Lib\\site-packages\\PyQt6\\Qt6\\bin"
+set "PATH=%QT6_BIN%;%BASE_DIR%python;%BASE_DIR%python\\Lib\\site-packages;%PATH%"
+start "" "%BASE_DIR%python\\pythonw.exe" "%BASE_DIR%app.py" %*
+exit
+'''
+    (DIST_DIR / "sherpa-vietnamese-asr-gui.bat").write_text(bat_gui, encoding='utf-8')
+
     # Create README
     readme = '''ASR-VN Portable
 ===============
 
-Run: Double-click sherpa-vietnamese-asr.bat
+Chay:
+  sherpa-vietnamese-asr.bat       — Co console (debug, xem log)
+  sherpa-vietnamese-asr-gui.bat   — Chi hien GUI (cho nguoi dung)
 
-Requirements:
+Tao shortcut: Click phai file .bat -> Send to -> Desktop (shortcut)
+Shortcut chay dung thu muc, khong can chinh "Start in".
+
+Yeu cau:
 - Windows 10/11 64-bit
-- No Python installation required
+- Khong can cai Python
 
-Folder structure:
+Thu muc:
 - python/           : Python embedded runtime
 - models/           : AI models
 - vocabulary/       : Vocabulary data
 - *.py              : Source code
-- sherpa-vietnamese-asr.bat : Launcher
 '''
     (DIST_DIR / "README.txt").write_text(readme, encoding='utf-8')
-    
-    print(f"[OK] Launcher created: sherpa-vietnamese-asr.bat")
+
+    print(f"[OK] Launcher created: sherpa-vietnamese-asr.bat + sherpa-vietnamese-asr-gui.bat")
 
 
 def trim_portable():

@@ -35,25 +35,29 @@ class _TeeWriter:
                 self.log_file.flush()
             except (OSError, ValueError):
                 pass
-        # Always write to original console
-        try:
-            self.original.write(text)
-        except (OSError, ValueError):
-            pass
+        # Write to original console (skip if None — pythonw.exe)
+        if self.original is not None:
+            try:
+                self.original.write(text)
+            except (OSError, ValueError):
+                pass
 
     def flush(self):
         try:
             self.log_file.flush()
         except (OSError, ValueError):
             pass
-        try:
-            self.original.flush()
-        except (OSError, ValueError):
-            pass
+        if self.original is not None:
+            try:
+                self.original.flush()
+            except (OSError, ValueError):
+                pass
 
     # Pass through attributes for compatibility
     def fileno(self):
-        return self.original.fileno()
+        if self.original is not None:
+            return self.original.fileno()
+        raise OSError("no underlying fileno")
 
     @property
     def encoding(self):
@@ -106,11 +110,12 @@ def setup_logging(mode="desktop", log_level=logging.INFO):
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    # Console handler — keep existing console output
-    ch = logging.StreamHandler(sys.__stdout__)  # use original stdout
-    ch.setLevel(log_level)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
+    # Console handler — keep existing console output (skip if pythonw.exe)
+    if sys.__stdout__ is not None:
+        ch = logging.StreamHandler(sys.__stdout__)
+        ch.setLevel(log_level)
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
 
     # Suppress noisy third-party loggers
     for name in ("urllib3", "asyncio", "websockets", "httpcore", "httpx",
