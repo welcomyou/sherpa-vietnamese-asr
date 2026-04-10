@@ -928,13 +928,18 @@ class FileProcessingTab(QWidget):
 
     def set_file(self, file_path):
         self.cleanup_temp_files()
-        
-        valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.wma', '.ogg', '.opus', 
+
+        # Xử lý kéo thả file .asr.json trực tiếp
+        if file_path.lower().endswith('.asr.json'):
+            self._load_json_file_dropped(file_path)
+            return
+
+        valid_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.aac', '.wma', '.ogg', '.opus',
                             '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
         file_ext = os.path.splitext(file_path)[1].lower()
-        
+
         if file_ext not in valid_extensions:
-            QMessageBox.warning(self.window(), "Định dạng không hỗ trợ", 
+            QMessageBox.warning(self.window(), "Định dạng không hỗ trợ",
                 f"File '{os.path.basename(file_path)}' không được hỗ trợ.")
             return
         
@@ -1026,6 +1031,39 @@ class FileProcessingTab(QWidget):
         QMessageBox.critical(p_win, "Lỗi load JSON", f"Không thể đọc file JSON:\n{err_msg}")
         self.progress_bar.setFormat("Lỗi load JSON")
         
+    def _load_json_file_dropped(self, json_path):
+        """Xử lý khi user kéo thả file .asr.json trực tiếp vào vùng drop."""
+        if not os.path.exists(json_path):
+            QMessageBox.warning(self.window(), "Không tìm thấy file", f"File không tồn tại:\n{json_path}")
+            return
+
+        # Tìm file audio tương ứng (cùng tên, các định dạng phổ biến)
+        audio_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg', '.opus',
+                            '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.wma']
+        base = json_path
+        # Bóc .json rồi .asr → tên gốc
+        if base.lower().endswith('.asr.json'):
+            base = base[:-len('.asr.json')]
+        found_audio = None
+        for ext in audio_extensions:
+            candidate = base + ext
+            if os.path.exists(candidate):
+                found_audio = candidate
+                break
+
+        if found_audio:
+            # Có audio → dùng luôn set_file() với audio, nó sẽ tự phát hiện JSON
+            self.set_file(found_audio)
+            return
+
+        # Không có audio → báo lỗi, không load
+        QMessageBox.warning(
+            self.window(), "Không tìm thấy file âm thanh",
+            f"Không tìm thấy file âm thanh tương ứng với:\n{os.path.basename(json_path)}\n\n"
+            f"Hãy đặt file audio (mp3, wav, m4a...) cùng thư mục với file JSON,\n"
+            f"hoặc kéo thả file audio vào trực tiếp."
+        )
+
     def _on_json_load_finished(self, file_path, thread=None):
         if thread is None:
             thread = getattr(self, '_json_load_thread', None)
@@ -1267,7 +1305,11 @@ class FileProcessingTab(QWidget):
 
     def open_file_dialog(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Chọn file âm thanh/video", "", "Media Files (*.mp3 *.wav *.m4a *.ogg *.wma *.flac *.aac *.opus *.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv);;All Files (*)")
+            self, "Chọn file âm thanh/video hoặc ASR JSON", "",
+            "Tất cả định dạng hỗ trợ (*.mp3 *.wav *.m4a *.ogg *.wma *.flac *.aac *.opus *.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.asr.json);;"
+            "Media Files (*.mp3 *.wav *.m4a *.ogg *.wma *.flac *.aac *.opus *.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv);;"
+            "ASR JSON (*.asr.json);;"
+            "All Files (*)")
         if file_path:
             self.set_file(file_path)
 

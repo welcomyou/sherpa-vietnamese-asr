@@ -2,8 +2,29 @@
 import sys
 import os
 
-# ─── Splash screen (hiện NGAY trước mọi import nặng) ───
-# Chỉ import tối thiểu PyQt6 để hiện splash nhanh nhất có thể
+# ─── Setup logging sớm nhất có thể (không import Qt6/ORT) ───
+from core.log_config import setup_logging
+setup_logging("desktop")
+
+# ─── Import numpy + ORT + sherpa TRƯỚC Qt6 (Windows DLL load order) ───
+# Qt6 load một số DLL làm ORT initialization routine fail nếu ORT load SAU Qt6.
+# Thứ tự đúng: numpy → onnxruntime → sherpa_onnx → PyQt6
+import numpy
+
+try:
+    import onnxruntime as _ort
+    print(f"[Init] onnxruntime {_ort.__version__}")
+except ImportError as e:
+    print(f"[Init] onnxruntime not available: {e}")
+
+try:
+    import sherpa_onnx
+    print(f"[Init] sherpa_onnx loaded (version: {sherpa_onnx.__version__ if hasattr(sherpa_onnx, '__version__') else 'unknown'})")
+except ImportError as e:
+    print(f"[Init] sherpa_onnx not available: {e}")
+
+# ─── Splash screen (hiện trước khi load model, phần tốn thời gian nhất) ───
+# ORT đã load (~0.5s), model loading mới là phần lâu thực sự (10-20s)
 _splash = None
 if __name__ == "__main__":
     os.environ["QT_MEDIA_BACKEND"] = "windows"
@@ -32,23 +53,6 @@ if __name__ == "__main__":
     _splash.show()
     _app.processEvents()
 
-# ─── Heavy imports (splash đã hiện) ───
-
-# Setup file logging (clears log on restart)
-from core.log_config import setup_logging
-setup_logging("desktop")
-
-# Import numpy first to avoid "CPU dispatcher tracer already initialized" error
-import numpy
-
-# Import sherpa_onnx BEFORE torch to avoid DLL conflicts
-try:
-    import sherpa_onnx
-    print(f"[Init] sherpa_onnx loaded (version: {sherpa_onnx.__version__ if hasattr(sherpa_onnx, '__version__') else 'unknown'})")
-except ImportError as e:
-    print(f"[Init] sherpa_onnx not available: {e}")
-
-# Now import other modules
 import configparser
 
 # === Cleanup temporary files from previous crashed sessions ===

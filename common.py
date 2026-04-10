@@ -83,10 +83,10 @@ class DragDropLabel(QLabel):
     def setDefaultText(self):
         self.has_file = False
         self.setText(
-            "📁 Kéo thả file âm thanh/video (mp3, wav, m4a, mp4, mkv, avi...) hoặc bấm để chọn"
+            "📁 Kéo thả file âm thanh/video hoặc file .asr.json — hoặc bấm để chọn"
             f"<br><span style='font-size:11px;color:{COLORS['text_secondary']};'>"
-            "Kết quả chính xác nhất với tập tin ghi âm trực tiếp từ hệ thống microphone cổ ngỗng."
-            "<br>Nếu ghi âm trực tiếp tại phòng họp thì ưu tiên sử dụng thiết bị chuyên ghi âm như Sony và để sát người chủ trì."
+            "Hỗ trợ: mp3, wav, m4a, mp4, mkv, avi... và file .asr.json (load kết quả đã lưu)"
+            "<br>Kết quả chính xác nhất với tập tin ghi âm trực tiếp từ microphone cổ ngỗng."
             "</span>"
         )
         self.setToolTip("")
