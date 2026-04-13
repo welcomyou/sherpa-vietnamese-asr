@@ -92,10 +92,17 @@ def setup_python(zip_file):
     """Extract and configure Python embedded"""
     python_dir = DIST_DIR / "python"
     python_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print("[EX] Extracting Python...")
+    # A01: Validate extracted paths to prevent path traversal (zip slip)
+    python_dir_resolved = python_dir.resolve()
     with zipfile.ZipFile(zip_file, 'r') as z:
-        z.extractall(python_dir)
+        for member in z.infolist():
+            member_path = (python_dir / member.filename).resolve()
+            if not str(member_path).startswith(str(python_dir_resolved)):
+                print(f"[WARN] Skipping unsafe zip entry: {member.filename}")
+                continue
+            z.extract(member, python_dir)
     
     # Configure python312._pth (enable site-packages)
     pth_content = "python312.zip\n.\nLib/site-packages\nimport site\n"

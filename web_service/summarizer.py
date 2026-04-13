@@ -19,6 +19,11 @@ logger = logging.getLogger("asr.summarizer")
 DEFAULT_GGUF_REPO = "unsloth/gemma-4-E2B-it-GGUF"
 DEFAULT_GGUF_FILE = "gemma-4-E2B-it-Q4_K_M.gguf"
 
+# P2 Supply chain: SHA-256 của GGUF file chính thức để verify sau khi download.
+# Cập nhật khi release model mới. Để None để bỏ qua verify (không khuyến nghị).
+# Lấy hash: sha256sum gemma-4-E2B-it-Q4_K_M.gguf
+DEFAULT_GGUF_SHA256: Optional[str] = None  # chưa có hash chính thức — set khi biết
+
 
 def get_default_model_path() -> str:
     """Đường dẫn mặc định cho model GGUF trong thư mục models/."""
@@ -76,6 +81,13 @@ def download_model(progress_cb: Optional[Callable[[str, int], None]] = None) -> 
                     progress_cb(f"Đang tải model... {downloaded/1e9:.1f}/{total/1e9:.1f} GB", pct)
         file_hash = sha256.hexdigest()
         logger.info(f"Model SHA-256: {file_hash}")
+        # P2 Supply chain: verify hash nếu đã pin
+        if DEFAULT_GGUF_SHA256 and file_hash != DEFAULT_GGUF_SHA256:
+            os.remove(tmp_dest)
+            raise RuntimeError(
+                f"SHA-256 mismatch! Expected {DEFAULT_GGUF_SHA256}, got {file_hash}. "
+                "File có thể bị thay đổi hoặc download thất bại."
+            )
         os.rename(tmp_dest, dest)
         if progress_cb:
             progress_cb("Tải model hoàn tất", 100)

@@ -47,15 +47,24 @@ def _load_dnsmos_session():
             tmp_path = model_path + ".tmp"
             logger.info("Downloading DNSMOS model...")
             urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
+
+            # A01: Validate paths before file ops (prevent path traversal)
+            dnsmos_dir_real = os.path.realpath(DNSMOS_DIR)
+            tmp_path_real = os.path.realpath(tmp_path)
+            model_path_real = os.path.realpath(model_path)
+            if not tmp_path_real.startswith(dnsmos_dir_real) or not model_path_real.startswith(dnsmos_dir_real):
+                logger.error("DNSMOS path validation failed — aborting download")
+                return None
+
             sha256 = hashlib.sha256()
-            with open(tmp_path, "rb") as f:
+            with open(tmp_path_real, "rb") as f:
                 for chunk in iter(lambda: f.read(8192), b""):
                     sha256.update(chunk)
             if sha256.hexdigest() != DNSMOS_SHA256:
-                os.remove(tmp_path)
+                os.remove(tmp_path_real)
                 logger.error("DNSMOS SHA-256 mismatch — file corrupted or tampered")
                 return None
-            os.rename(tmp_path, model_path)
+            os.rename(tmp_path_real, model_path_real)
             logger.info("DNSMOS model downloaded.")
         except Exception as e:
             logger.error(f"Failed to download DNSMOS: {e}")

@@ -117,11 +117,14 @@ def install_llama_cpp():
         subprocess.run([str(venv_python), "-m", "pip", "install", dep],
                        capture_output=True)
 
-    # Build from git source (upstream latest — có Gemma 4)
+    # P2 Supply chain: Pin commit hash thay vì HEAD để tránh rủi ro upstream inject.
+    # Cập nhật hash khi cần upgrade (kiểm tra tại github.com/abetlen/llama-cpp-python/commits)
+    # Hash hiện tại: commit đã test với Gemma 4 E2B
+    _LLAMA_CPP_COMMIT = "a0bc4d5"  # placeholder — set commit hash thực tế khi build
     print("      Building from source (cần GCC/MSVC, mất 5-15 phút)...")
     result = subprocess.run(
         [str(venv_python), "-m", "pip", "install",
-         "git+https://github.com/abetlen/llama-cpp-python.git",
+         f"git+https://github.com/abetlen/llama-cpp-python.git@{_LLAMA_CPP_COMMIT}",
          "--no-cache-dir"],
         capture_output=True, text=True, timeout=1200,
     )

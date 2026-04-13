@@ -54,6 +54,15 @@ class _LocalAPI:
     def host(self, value):
         # 0.0.0.0 listens on all interfaces → connect via 127.0.0.1
         self._host = "127.0.0.1" if value == "0.0.0.0" else value
+        # P3 MITM: cảnh báo nếu GUI kết nối tới host không phải loopback
+        _loopback = {"127.0.0.1", "::1", "localhost"}
+        if self._host not in _loopback:
+            logger.warning(
+                "P3 MITM risk: Admin GUI kết nối tới %s (không phải localhost). "
+                "Traffic quản trị có thể bị chặn trên LAN. "
+                "Khuyến nghị: chỉ dùng 127.0.0.1 hoặc dùng VPN/SSH tunnel.",
+                self._host,
+            )
 
     def _ssl_ctx(self):
         import ssl
@@ -349,6 +358,30 @@ class StatusTab(BaseTab):
     def start_server(self):
         host = self.combo_bind.currentText()
         port = self.edit_port.value()
+
+        # Cảnh báo nếu admin chưa đổi mật khẩu mặc định
+        try:
+            import sys as _sys
+            _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if _base not in _sys.path:
+                _sys.path.insert(0, _base)
+            from web_service.auth import is_admin_using_default_password
+            if is_admin_using_default_password():
+                reply = QMessageBox.warning(
+                    self,
+                    "⚠️ Cảnh báo bảo mật",
+                    "Tài khoản <b>admin</b> đang dùng mật khẩu mặc định <b>'admin'</b>.<br><br>"
+                    "Điều này có thể gây rủi ro bảo mật nếu server được truy cập từ mạng ngoài.<br><br>"
+                    "Bạn có muốn tiếp tục khởi động không?<br>"
+                    "<i>(Khuyến nghị: đổi mật khẩu ngay sau khi đăng nhập)</i>",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+        except Exception:
+            pass  # Không chặn start nếu kiểm tra lỗi
+
         self.main_window.local_api.port = port
         self.main_window.local_api.host = host
         self.main_window.server.start(host, port)

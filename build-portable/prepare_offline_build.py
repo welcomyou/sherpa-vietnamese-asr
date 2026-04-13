@@ -229,7 +229,24 @@ def download_github_tar(model_id: str) -> bool:
         # Download tar file
         print("   Đang download...")
         urllib.request.urlretrieve(config['url'], tar_path)
-        
+
+        # P2 Supply chain: verify SHA-256 nếu config có pin hash
+        if config.get("sha256"):
+            import hashlib
+            h = hashlib.sha256()
+            with open(tar_path, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(8192), b""):
+                    h.update(_chunk)
+            got = h.hexdigest()
+            if got != config["sha256"]:
+                tar_path.unlink(missing_ok=True)
+                raise ValueError(
+                    f"SHA-256 mismatch for {model_id}!\n"
+                    f"  Expected: {config['sha256']}\n  Got:      {got}\n"
+                    "Có thể bị poisoning upstream. KHÔNG sử dụng file này."
+                )
+            print(f"   ✓ SHA-256 verified: {got[:16]}...")
+
         # Extract (with path traversal protection)
         print("   Đang giải nén...")
         with tarfile.open(tar_path, 'r:bz2') as tar:
@@ -284,10 +301,32 @@ def download_direct(model_id: str) -> bool:
             if block_num % 10 == 0:  # Update every 10 blocks
                 print(f"   Progress: {percent}%", end='\r')
         
-        urllib.request.urlretrieve(config['url'], local_path, reporthook=progress_hook)
-        print(f"\n✅ Đã tải xong {model_id}")
+        tmp_path = str(local_path) + ".tmp"
+        urllib.request.urlretrieve(config['url'], tmp_path, reporthook=progress_hook)
+
+        # P2 Supply chain: verify SHA-256 nếu config có pin hash
+        if config.get("sha256"):
+            import hashlib
+            h = hashlib.sha256()
+            with open(tmp_path, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(8192), b""):
+                    h.update(_chunk)
+            got = h.hexdigest()
+            if got != config["sha256"]:
+                import os; os.remove(tmp_path)
+                raise ValueError(
+                    f"SHA-256 mismatch for {model_id}!\n"
+                    f"  Expected: {config['sha256']}\n  Got:      {got}\n"
+                    "Có thể bị poisoning upstream. KHÔNG sử dụng file này."
+                )
+            print(f"\n   ✓ SHA-256 verified: {got[:16]}...")
+        else:
+            print(f"\n[WARN] {model_id}: chưa có SHA-256 pin — khuyến nghị thêm vào MODELS_CONFIG")
+
+        import os; os.replace(tmp_path, str(local_path))
+        print(f"✅ Đã tải xong {model_id}")
         return True
-        
+
     except Exception as e:
         print(f"\n❌ Lỗi khi tải {model_id}: {e}")
         return False

@@ -32,14 +32,20 @@ def _load_jwt_secret() -> str:
             if secret:
                 return secret
     secret = secrets.token_hex(32)
+    # A02: Log warning — JWT secret is stored on disk. Use ASR_JWT_SECRET env var in production.
+    logger.warning(
+        "JWT secret written to file %s. "
+        "Set ASR_JWT_SECRET environment variable to avoid storing secrets on disk.",
+        _JWT_SECRET_FILE,
+    )
     with open(_JWT_SECRET_FILE, "w") as f:
         f.write(secret)
     # Restrict permissions (owner-only)
     try:
-        import stat
-        os.chmod(_JWT_SECRET_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        import stat as _stat
+        os.chmod(_JWT_SECRET_FILE, _stat.S_IRUSR | _stat.S_IWUSR)
     except OSError:
-        pass
+        pass  # Windows: file ACL not set via chmod; rely on directory permissions
     return secret
 
 
@@ -119,6 +125,15 @@ def ensure_admin(password: str = None):
     )
     logger.info(f"Admin account created (id={admin_id})")
     return db.get_user_by_id(admin_id)
+
+
+def is_admin_using_default_password() -> bool:
+    """Kiểm tra admin có đang dùng mật khẩu mặc định 'admin' không.
+    Dùng để cảnh báo khi khởi động server."""
+    admin = db.get_user_by_username("admin")
+    if not admin:
+        return False  # chưa tạo — sẽ tạo với env var hoặc 'admin'
+    return verify_password("admin", admin["password_hash"])
 
 
 def authenticate_user(username: str, password: str) -> Optional[dict]:

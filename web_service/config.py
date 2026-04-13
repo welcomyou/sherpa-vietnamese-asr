@@ -36,7 +36,7 @@ class ServerConfig:
         "default_punctuation_confidence": "7",
         "default_case_confidence": "6",
         "default_diarization_threshold": "70",
-        "jwt_expire_minutes": "1440",
+        "jwt_expire_minutes": "480",  # P2: 8h thay vì 24h — giảm cửa sổ tấn công nếu token bị lộ
         "http_mode": "0",
         "admin_password_hash": "",
         "offline_download_url": "",

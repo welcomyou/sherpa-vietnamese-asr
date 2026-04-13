@@ -731,16 +731,24 @@ def download_dnsmos_model_sync() -> bool:
         tmp_path = model_path + ".tmp"
         urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
 
+        # A01: Validate path before file ops (prevent path traversal from URL-derived filename)
+        dnsmos_dir_real = os.path.realpath(DNSMOS_DIR)
+        tmp_path_real = os.path.realpath(tmp_path)
+        model_path_real = os.path.realpath(model_path)
+        if not tmp_path_real.startswith(dnsmos_dir_real) or not model_path_real.startswith(dnsmos_dir_real):
+            print("[AudioAnalyzer] Path validation failed — aborting download")
+            return False
+
         import hashlib
         sha256 = hashlib.sha256()
-        with open(tmp_path, "rb") as f:
+        with open(tmp_path_real, "rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
                 sha256.update(chunk)
         if sha256.hexdigest() != DNSMOS_SHA256:
-            os.remove(tmp_path)
+            os.remove(tmp_path_real)
             print("[AudioAnalyzer] SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
             return False
-        os.rename(tmp_path, model_path)
+        os.rename(tmp_path_real, model_path_real)
         print("[AudioAnalyzer] DNSMOS model downloaded successfully")
         return True
         

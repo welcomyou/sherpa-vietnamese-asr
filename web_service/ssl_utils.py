@@ -44,10 +44,10 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
 
-    # Tao RSA key 2048-bit
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # A02: RSA 3072-bit (NIST recommended after 2030), cert 2 năm thay vì 10 năm
+    key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
 
-    # Tao self-signed cert (10 nam)
+    # Tao self-signed cert (2 nam)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "Sherpa Vietnamese ASR"),
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "ASR VN"),
@@ -60,7 +60,7 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=730))
         .add_extension(
             x509.BasicConstraints(ca=True, path_length=0),
             critical=True,

@@ -282,8 +282,14 @@ class QueueManager:
             stored_filename = item["stored_filename"]
             file_path = os.path.join(UPLOAD_DIR, stored_filename)
 
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
+            # A01: Validate realpath để chống path traversal nếu stored_filename bị giả mạo
+            upload_dir_real = os.path.realpath(UPLOAD_DIR)
+            file_path_real = os.path.realpath(file_path)
+            if not file_path_real.startswith(upload_dir_real + os.sep) and file_path_real != upload_dir_real:
+                raise ValueError(f"Invalid file path: {stored_filename}")
+
+            if not os.path.exists(file_path_real):
+                raise FileNotFoundError(f"File not found: {file_path_real}")
 
             # 2. Convert sang WAV (với progress bar realtime từ ffmpeg)
             self.progress_callback("PHASE:Convert|Đang chuyển định dạng audio...|0")
@@ -291,7 +297,7 @@ class QueueManager:
             def _convert_progress(pct):
                 self.progress_callback(f"PHASE:Convert|Đang chuyển định dạng audio ({pct}%)|{pct}")
 
-            wav_path = convert_to_wav(file_path, progress_callback=_convert_progress)
+            wav_path = convert_to_wav(file_path_real, progress_callback=_convert_progress)
 
             if self._cancelled:
                 raise InterruptedError("Cancelled by user")

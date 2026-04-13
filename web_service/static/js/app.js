@@ -754,6 +754,15 @@ function renderASRResult(data) {
         });
     });
 
+    // P1 XSS: Gắn event listener cho speaker-label qua addEventListener (không inline onclick)
+    contentEl.querySelectorAll('.speaker-label[data-spk]').forEach(label => {
+        label.addEventListener('click', () => {
+            const spkId = parseInt(label.dataset.spk);
+            const blockIdx = parseInt(label.dataset.blockIdx) || 0;
+            ctxRenameSpeakerDirect(spkId, blockIdx);
+        });
+    });
+
     // Load summary if available
     if (typeof loadSummaryForFile === 'function' && currentFileId) {
         loadSummaryForFile(currentFileId);
@@ -873,9 +882,12 @@ function renderSpeakerView(segments, speakerNames) {
         const color = _safeColor(currentSpeaker ? (speakerColors[currentSpeaker] || '') : '');
         const borderStyle = color ? `border-left-color:${color}` : '';
         const labelStyle = color ? `color:${color}` : '';
-        const safeSpk = escapeHtml(String(currentSpeaker || ''));
-        html += `<div class="speaker-block" data-block="${blockIdx}" data-speaker-id="${safeSpk}" style="${borderStyle}">`;
-        html += `<div class="speaker-label" style="${labelStyle}" onclick="ctxRenameSpeakerDirect('${safeSpk}', ${parseInt(blockIdx) || 0})">${escapeHtml(name)}:</div>`;
+        // P1 XSS: Không nội suy speaker_id vào inline onclick — dùng data-attribute
+        // Event listener được gắn qua addEventListener sau khi render (xem initSpeakerLabelListeners)
+        const safeSpkNum = parseInt(currentSpeaker) || 0; // speaker_id là số nguyên từ backend
+        const safeBlockIdx = parseInt(blockIdx) || 0;
+        html += `<div class="speaker-block" data-block="${safeBlockIdx}" data-speaker-id="${safeSpkNum}" style="${borderStyle}">`;
+        html += `<div class="speaker-label" style="${labelStyle}" data-spk="${safeSpkNum}" data-block-idx="${safeBlockIdx}">${escapeHtml(name)}:</div>`;
         html += `<div class="speaker-text">${currentBlock.join(' ')}</div>`;
         html += `</div>`;
         blockIdx++;
@@ -1124,9 +1136,11 @@ function showLoggedIn(user) {
 }
 
 async function logout() {
-    // Gọi backend tạo session anonymous mới (tách khỏi session cũ đang processing)
+    // P2: Gửi Authorization header để backend revoke JWT token ngay lập tức
     try {
-        await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        const headers = { 'Content-Type': 'application/json' };
+        if (window.authToken) headers['Authorization'] = 'Bearer ' + window.authToken;
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin', headers });
     } catch (e) {
         console.error('Logout API error:', e);
     }

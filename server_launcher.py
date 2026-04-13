@@ -183,6 +183,21 @@ def start_server(host=None, port=None, no_gui=False):
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"
 
+        # Khởi tạo DB + tài khoản admin trước khi server chạy
+        from web_service.database import db as _db  # noqa: F401 — trigger init
+        from web_service.auth import ensure_admin, is_admin_using_default_password
+        ensure_admin()
+        if is_admin_using_default_password():
+            logger.warning(
+                "=" * 60
+            )
+            logger.warning("⚠️  CẢNH BÁO BẢO MẬT: Tài khoản admin đang dùng mật khẩu mặc định 'admin'!")
+            logger.warning("    Vui lòng đổi mật khẩu ngay sau khi đăng nhập.")
+            logger.warning("    Đăng nhập → Menu Admin → Đổi mật khẩu")
+            logger.warning(
+                "=" * 60
+            )
+
         import uvicorn
         uvicorn_kwargs = dict(
             app="web_service.server:app",

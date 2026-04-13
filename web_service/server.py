@@ -33,6 +33,25 @@ from web_service.queue_manager import queue_manager
 
 logger = logging.getLogger("asr.server")
 
+# === JWT revocation list (A07: revoke tokens on logout) ===
+# Lưu (jti/token, exp_timestamp) — tự cleanup khi hết hạn
+_revoked_tokens: dict[str, float] = {}
+
+
+def _revoke_token(token: str, exp: float):
+    """Thêm token vào danh sách bị thu hồi."""
+    _revoked_tokens[token] = exp
+    # Cleanup tokens đã hết hạn để tránh memory leak
+    now = time.time()
+    expired = [t for t, e in _revoked_tokens.items() if e < now]
+    for t in expired:
+        del _revoked_tokens[t]
+
+
+def is_token_revoked(token: str) -> bool:
+    return token in _revoked_tokens
+
+
 # === Login rate limiting (in-memory) ===
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 _LOGIN_MAX_ATTEMPTS = 5
@@ -63,15 +82,34 @@ def _clear_login_rate(ip: str = None):
 
 
 def _get_locked_ips() -> list:
-    """Trả về danh sách IP đang bị khóa login."""
+    """Trả về danh sách IP đang bị khóa login. Đồng thời cleanup entries hết hạn."""
     now = time.time()
     result = []
-    for ip, attempts in list(_login_attempts.items()):
-        valid = [t for t in attempts if now - t < _LOGIN_WINDOW_SECONDS]
-        if len(valid) >= _LOGIN_MAX_ATTEMPTS:
-            oldest = min(valid)
-            remain = int(_LOGIN_WINDOW_SECONDS - (now - oldest)) + 1
-            result.append({"ip": ip, "attempts": len(valid), "unlock_in_seconds": remain})
+    # A04: Cleanup để tránh memory leak khi có nhiều IP
+    for ip in list(_login_attempts.keys()):
+        valid = [t for t in _login_attempts[ip] if now - t < _LOGIN_WINDOW_SECONDS]
+        if not valid:
+            del _login_attempts[ip]
+        else:
+            _login_attempts[ip] = valid
+            if len(valid) >= _LOGIN_MAX_ATTEMPTS:
+                oldest = min(valid)
+                remain = int(_LOGIN_WINDOW_SECONDS - (now - oldest)) + 1
+                result.append({"ip": ip, "attempts": len(valid), "unlock_in_seconds": remain})
+    # Cleanup upload attempts
+    for sid in list(_upload_attempts.keys()):
+        valid = [t for t in _upload_attempts[sid] if now - t < _UPLOAD_WINDOW_SECONDS]
+        if not valid:
+            del _upload_attempts[sid]
+        else:
+            _upload_attempts[sid] = valid
+    # Cleanup account lockouts
+    for uname in list(_account_failures.keys()):
+        valid = [t for t in _account_failures[uname] if now - t < _LOCKOUT_DURATION_SECONDS]
+        if not valid:
+            del _account_failures[uname]
+        else:
+            _account_failures[uname] = valid
     return result
 
 # === Upload rate limiting (per session, cho phép tải nhiều nhưng chống spam) ===
@@ -142,12 +180,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # A05: 'unsafe-inline' giữ cho scripts vì PWA dùng inline handlers.
+        # connect-src giới hạn về 'self' thay vì wss:/ws: mở toàn bộ.
+        host = request.headers.get("host", "").split(":")[0] or "localhost"
+        _ws_scheme = "ws" if server_config.http_mode else "wss"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "img-src 'self' data:; "
-            "connect-src 'self' wss: ws:; "
+            f"connect-src 'self' {_ws_scheme}://{host} {_ws_scheme}://{host}:*; "
             "media-src 'self' blob:; "
             "font-src 'self' https://fonts.gstatic.com"
         )
@@ -185,11 +227,14 @@ def get_session_id(request: Request) -> str:
 
 
 def get_current_user(request: Request) -> Optional[dict]:
-    """Lấy user từ JWT token (nếu có). Trả về None nếu anonymous hoặc deactivated."""
+    """Lấy user từ JWT token (nếu có). Trả về None nếu anonymous, deactivated, hoặc token bị revoke."""
     auth = request.headers.get("authorization", "")
     if not auth.startswith("Bearer "):
         return None
     token = auth[7:]
+    # A07: Kiểm tra token đã bị revoke (logout)
+    if is_token_revoked(token):
+        return None
     payload = decode_token(token)
     if not payload:
         return None
@@ -450,6 +495,114 @@ async def get_session_status(session_id: str = Depends(get_session_id)):
 
 # === Upload API ===
 
+_MAX_SPEAKER_ID = 99       # speaker_id hợp lệ: số nguyên 0-99
+_MAX_TEXT_LEN   = 50_000   # ký tự tối đa mỗi segment text
+_MAX_SEGMENTS   = 100_000  # số segment tối đa trong một file
+
+
+def _sanitize_asr_json(data: dict) -> dict:
+    """
+    P1 XSS: Sanitize JSON ASR trước khi lưu DB.
+    - Chỉ giữ các key được phép ở top-level.
+    - Validate và ép kiểu từng segment (type, speaker_id, text, start, end).
+    - Loại bỏ mọi giá trị kiểu HTML/JS có thể gây stored XSS khi frontend render.
+    """
+    import html as _html
+
+    allowed_top = {"segments", "speaker_names", "model", "duration_sec",
+                   "speaker_colors", "language", "sample_rate"}
+    cleaned: dict = {}
+
+    # Top-level metadata
+    for k in allowed_top:
+        if k in data:
+            cleaned[k] = data[k]
+
+    # segments: validate từng phần tử
+    raw_segs = data.get("segments", [])
+    if not isinstance(raw_segs, list):
+        raise HTTPException(400, "segments phải là array")
+    if len(raw_segs) > _MAX_SEGMENTS:
+        raise HTTPException(400, f"Quá nhiều segments (tối đa {_MAX_SEGMENTS})")
+
+    safe_segs = []
+    for seg in raw_segs:
+        if not isinstance(seg, dict):
+            continue
+        seg_type = str(seg.get("type", ""))
+        if seg_type not in ("text", "speaker", "gap"):
+            continue
+        s: dict = {"type": seg_type}
+
+        # speaker_id: phải là số nguyên hợp lệ
+        if "speaker_id" in seg:
+            try:
+                spk = int(seg["speaker_id"])
+                if 0 <= spk <= _MAX_SPEAKER_ID:
+                    s["speaker_id"] = spk
+            except (ValueError, TypeError):
+                pass  # bỏ qua speaker_id không hợp lệ
+
+        # text: giới hạn độ dài, strip HTML tags
+        if "text" in seg:
+            txt = str(seg["text"])[:_MAX_TEXT_LEN]
+            s["text"] = _html.escape(txt, quote=False)
+
+        # timing: chỉ chấp nhận số
+        for tf in ("start", "end", "duration"):
+            if tf in seg:
+                try:
+                    s[tf] = float(seg[tf])
+                except (ValueError, TypeError):
+                    pass
+
+        # confidence: 0.0-1.0
+        if "confidence" in seg:
+            try:
+                c = float(seg["confidence"])
+                s["confidence"] = max(0.0, min(1.0, c))
+            except (ValueError, TypeError):
+                pass
+
+        safe_segs.append(s)
+
+    cleaned["segments"] = safe_segs
+
+    # speaker_names: {str_key: str_value}, escape HTML
+    raw_names = cleaned.get("speaker_names", {})
+    if isinstance(raw_names, dict):
+        cleaned["speaker_names"] = {
+            str(k)[:20]: _html.escape(str(v)[:200], quote=False)
+            for k, v in list(raw_names.items())[:_MAX_SPEAKER_ID + 1]
+        }
+    else:
+        cleaned["speaker_names"] = {}
+
+    # speaker_colors: {str_key: CSS color string}, chỉ cho phép #hex hoặc rgb(...)
+    raw_colors = cleaned.get("speaker_colors", {})
+    if isinstance(raw_colors, dict):
+        import re as _re2
+        _color_re = _re2.compile(r'^(#[0-9a-fA-F]{3,8}|rgb\(\d{1,3},\s*\d{1,3},\s*\d{1,3}\))$')
+        cleaned["speaker_colors"] = {
+            str(k)[:20]: v
+            for k, v in list(raw_colors.items())[:_MAX_SPEAKER_ID + 1]
+            if isinstance(v, str) and _color_re.match(v.strip())
+        }
+    else:
+        cleaned.pop("speaker_colors", None)
+
+    # Scalar fields
+    if "model" in cleaned:
+        cleaned["model"] = str(cleaned["model"])[:200]
+    if "duration_sec" in cleaned:
+        try:
+            cleaned["duration_sec"] = float(cleaned["duration_sec"])
+        except (ValueError, TypeError):
+            cleaned.pop("duration_sec", None)
+
+    return cleaned
+
+
 ALLOWED_EXTENSIONS = {
     "mp3", "wav", "m4a", "flac", "aac", "wma", "ogg", "opus",
     "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv",
@@ -474,17 +627,7 @@ async def upload_file(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f"Định dạng không hỗ trợ: .{ext}")
 
-    # Validate size
     max_size = server_config.max_upload_bytes
-    content = await file.read()
-    if len(content) > max_size:
-        raise HTTPException(400, f"File quá lớn. Tối đa {server_config.get('max_upload_mb')}MB")
-
-    # Check storage limit nếu user đã login
-    if user and user["storage_limit_gb"] > 0:
-        limit = int(user["storage_limit_gb"] * 1024 * 1024 * 1024)
-        if user["storage_used_bytes"] + len(content) > limit:
-            raise HTTPException(400, "Vượt quá giới hạn lưu trữ")
 
     # Anonymous: xóa file cũ trước khi upload mới (chỉ giữ 1 file)
     user_id = user["id"] if user else None
@@ -506,18 +649,46 @@ async def upload_file(
     if not safe_name:
         safe_name = "upload"
 
-    # Lưu file
     stored_name = f"{uuid.uuid4().hex}_{safe_name}"
     stored_path = os.path.join(UPLOAD_DIR, stored_name)
     if not os.path.realpath(stored_path).startswith(os.path.realpath(UPLOAD_DIR)):
         raise HTTPException(400, "Tên file không hợp lệ")
-    with open(stored_path, "wb") as f:
-        f.write(content)
+
+    # P2 DoS: Stream file lên disk từng chunk thay vì đọc toàn bộ vào RAM
+    # Giới hạn size được kiểm tra trong khi ghi — tránh DoS bộ nhớ khi upload song song
+    _CHUNK = 1024 * 1024  # 1 MB
+    written = 0
+    try:
+        with open(stored_path, "wb") as f:
+            while True:
+                chunk = await file.read(_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_size:
+                    f.close()
+                    os.remove(stored_path)
+                    raise HTTPException(400, f"File quá lớn. Tối đa {server_config.get('max_upload_mb')}MB")
+                f.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        if os.path.exists(stored_path):
+            os.remove(stored_path)
+        raise HTTPException(500, f"Lỗi lưu file: {e}")
+
+    # Check storage limit nếu user đã login
+    if user and user["storage_limit_gb"] > 0:
+        limit = int(user["storage_limit_gb"] * 1024 * 1024 * 1024)
+        if user["storage_used_bytes"] + written > limit:
+            os.remove(stored_path)
+            raise HTTPException(400, "Vượt quá giới hạn lưu trữ")
+
     file_id = db.create_file(
         session_id=session_id,
         original_filename=file.filename,
         stored_filename=stored_name,
-        file_size_bytes=len(content),
+        file_size_bytes=written,
         user_id=user_id,
     )
 
@@ -525,9 +696,9 @@ async def upload_file(
     if user_id:
         db.update_user_storage(user_id)
 
-    logger.info(f"File uploaded: {file.filename} ({len(content)} bytes) file_id={file_id}")
+    logger.info(f"File uploaded: {file.filename} ({written} bytes) file_id={file_id}")
 
-    return {"file_id": file_id, "filename": file.filename, "size": len(content)}
+    return {"file_id": file_id, "filename": file.filename, "size": written}
 
 
 @app.post("/api/upload-json/{file_id}")
@@ -541,15 +712,20 @@ async def upload_json(
     file_record = db.get_file(file_id)
     check_file_access(file_record, session_id, user)
 
-    content = await file.read()
+    # P2 DoS: Giới hạn JSON upload tối đa 50 MB (đủ cho file transcript rất dài)
+    _JSON_MAX = 50 * 1024 * 1024
+    content = await file.read(_JSON_MAX + 1)
+    if len(content) > _JSON_MAX:
+        raise HTTPException(400, "JSON file quá lớn (tối đa 50 MB)")
     try:
         json_data = json.loads(content.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise HTTPException(400, "JSON không hợp lệ")
 
-    # Validate JSON structure (kiểm tra có 'segments' key)
+    # Validate + sanitize JSON structure (P1 XSS: loại bỏ payload độc hại)
     if "segments" not in json_data:
         raise HTTPException(400, "JSON không đúng cấu trúc ASR (thiếu 'segments')")
+    json_data = _sanitize_asr_json(json_data)
 
     # Lưu vào DB
     speaker_names = json_data.get("speaker_names", {})
@@ -743,9 +919,13 @@ async def save_file_result(
 
     body = await request.json()
     asr_data = body.get("asr_result")
-    if not asr_data:
+    if not asr_data or not isinstance(asr_data, dict):
         raise HTTPException(400, "Missing asr_result")
 
+    # P1 XSS: sanitize trước khi lưu (save-result từ client cũng cần validate)
+    if "segments" not in asr_data:
+        raise HTTPException(400, "asr_result thiếu 'segments'")
+    asr_data = _sanitize_asr_json(asr_data)
     result_json = json.dumps(asr_data, ensure_ascii=False)
     db.update_file(file_id, asr_result_json=result_json)
 
@@ -816,7 +996,14 @@ async def download_json(
 # === Queue status ===
 
 @app.get("/api/queue/position/{file_id}")
-async def queue_position(file_id: int):
+async def queue_position(
+    file_id: int,
+    session_id: str = Depends(get_session_id),
+    user: Optional[dict] = Depends(get_current_user),
+):
+    # A01: Kiểm tra quyền truy cập — chỉ owner mới xem được position
+    file_record = db.get_file(file_id)
+    check_file_access(file_record, session_id, user)
     position = db.get_queue_position(file_id)
     total = db.get_queue_total_waiting()
     return {"position": position, "total": total}
@@ -1081,13 +1268,15 @@ async def login(request: Request, session_id: str = Depends(get_session_id)):
     if not user:
         _record_failed_login(ip)
         _record_failed_account(username)
-        logger.warning(f"Failed login from {ip} for user '{username}'")
+        # A09: Không log username để tránh confirm username hợp lệ qua log
+        logger.warning(f"Failed login attempt from {ip}")
         raise HTTPException(401, "Sai tên đăng nhập hoặc mật khẩu")
 
     _clear_account_lockout(username)
 
     token = create_token(user["id"], user["username"], user["role"])
-    logger.info(f"User '{username}' logged in from {ip}")
+    # A09: Log user_id thay vì username
+    logger.info(f"User id={user['id']} logged in from {ip}")
 
     # Session fixation prevention: tạo session mới thay vì giữ session cũ
     ua = request.headers.get("user-agent", "")
@@ -1141,8 +1330,8 @@ async def auth_change_password(
     old_password = body.get("old_password", "")
     new_password = body.get("new_password", "")
 
-    if len(new_password) < 6:
-        raise HTTPException(400, "Mật khẩu mới phải có ít nhất 6 ký tự")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Mật khẩu mới phải có ít nhất 8 ký tự")
 
     from web_service.auth import verify_password
     if not verify_password(old_password, user["password_hash"]):
@@ -1157,6 +1346,15 @@ async def auth_logout(request: Request):
     """Logout: tạo session anonymous mới, tách khỏi session cũ (vẫn giữ processing)."""
     ip = request.client.host if request.client else ""
     ua = request.headers.get("user-agent", "")
+
+    # A07: Revoke JWT token hiện tại để không còn dùng được sau khi logout
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        payload = decode_token(token)
+        if payload and "exp" in payload:
+            _revoke_token(token, float(payload["exp"]))
+
     new_session_id = session_manager.create_session(ip_address=ip, user_agent=ua)
 
     response = JSONResponse({
@@ -1442,12 +1640,13 @@ async def local_create_user(request: Request):
     storage_gb = float(body.get("storage_limit_gb", 5.0))
     if not username or len(username) < 2:
         raise HTTPException(400, "Username phải có ít nhất 2 ký tự")
-    if len(password) < 6:
-        raise HTTPException(400, "Mật khẩu phải có ít nhất 6 ký tự")
+    if len(password) < 8:
+        raise HTTPException(400, "Mật khẩu phải có ít nhất 8 ký tự")
     existing = db.get_user_by_username(username)
     if existing:
         raise HTTPException(400, f"Username '{username}' đã tồn tại")
     user_id = db.create_user(username, hash_password(password), "user", storage_gb)
+    logger.info(f"[local] Created user '{username}' (id={user_id})")
     return {"user_id": user_id, "username": username}
 
 
@@ -1456,9 +1655,10 @@ async def local_reset_password(user_id: int, request: Request):
     _require_localhost(request)
     body = await request.json()
     new_password = body.get("password", "")
-    if len(new_password) < 6:
-        raise HTTPException(400, "Mật khẩu phải có ít nhất 6 ký tự")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Mật khẩu phải có ít nhất 8 ký tự")
     change_password(user_id, new_password)
+    logger.info(f"[local] Reset password for user_id={user_id}")
     return {"success": True}
 
 
@@ -1548,14 +1748,15 @@ async def admin_create_user(request: Request, admin=Depends(require_admin)):
 
     if not username or len(username) < 2:
         raise HTTPException(400, "Username phải có ít nhất 2 ký tự")
-    if len(password) < 6:
-        raise HTTPException(400, "Mật khẩu phải có ít nhất 6 ký tự")
+    if len(password) < 8:
+        raise HTTPException(400, "Mật khẩu phải có ít nhất 8 ký tự")
 
     existing = db.get_user_by_username(username)
     if existing:
         raise HTTPException(400, f"Username '{username}' đã tồn tại")
 
     user_id = db.create_user(username, hash_password(password), "user", storage_gb)
+    logger.info(f"Admin {admin['id']} created user '{username}' (id={user_id})")
     return {"user_id": user_id, "username": username}
 
 
@@ -1576,9 +1777,10 @@ async def admin_update_user(user_id: int, request: Request, admin=Depends(requir
 async def admin_reset_password(user_id: int, request: Request, admin=Depends(require_admin)):
     body = await request.json()
     new_password = body.get("password", "")
-    if len(new_password) < 6:
-        raise HTTPException(400, "Mật khẩu phải có ít nhất 6 ký tự")
+    if len(new_password) < 8:
+        raise HTTPException(400, "Mật khẩu phải có ít nhất 8 ký tự")
     change_password(user_id, new_password)
+    logger.info(f"Admin {admin['id']} reset password for user_id={user_id}")
     return {"success": True}
 
 
@@ -1590,6 +1792,7 @@ async def admin_delete_user(user_id: int, admin=Depends(require_admin)):
     if user["role"] == "admin":
         raise HTTPException(400, "Khong the xoa admin")
     db.delete_user(user_id)
+    logger.info(f"Admin {admin['id']} deleted user_id={user_id} ('{user['username']}')")
     return {"success": True}
 
 
@@ -1627,6 +1830,7 @@ _CONFIG_READONLY = {"admin_password_hash", "host"}
 @app.put("/api/admin/config")
 async def admin_update_config(request: Request, admin=Depends(require_admin)):
     body = await request.json()
+    changed = []
     for key, value in body.items():
         if key not in server_config.DEFAULTS or key in _CONFIG_READONLY:
             continue
@@ -1638,7 +1842,11 @@ async def admin_update_config(request: Request, admin=Depends(require_admin)):
             except (ValueError, TypeError):
                 raise HTTPException(400, f"Giá trị không hợp lệ cho {key}")
         server_config.set(key, value)
+        changed.append(key)
     server_config.save()
+    # A09: Audit log — ghi nhận ai thay đổi config gì
+    if changed:
+        logger.info(f"Admin {admin['id']} updated config keys: {changed}")
     return {"success": True}
 
 
