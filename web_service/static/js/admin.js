@@ -165,7 +165,7 @@ async function renderAdminSessions(el) {
         html += '<td>' + escapeHtml(s.ip_address || '-') + '</td>';
         html += '<td>' + type + '</td>';
         html += '<td class="admin-mono">' + _fmtTime(s.last_heartbeat) + '</td>';
-        html += '<td><button class="btn btn-sm btn-danger" onclick="adminKillSession(\'' + fullSid + '\')">Kick</button></td>';
+        html += '<td><button class="btn btn-sm btn-danger" data-sid="' + escapeHtml(fullSid) + '" onclick="adminKillSession(this.dataset.sid)">Kick</button></td>';
         html += '</tr>';
     }
     html += '</table></div>';
@@ -274,9 +274,9 @@ async function renderAdminUsers(el) {
         html += '<td>' + active + '</td>';
         html += '<td class="admin-actions">';
         if (!isAdmin) {
-            html += '<button class="btn btn-sm" onclick="adminResetPassword(' + u.id + ',\'' + escapeHtml(u.username) + '\')" title="Doi mat khau">MK</button>';
+            html += '<button class="btn btn-sm" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" onclick="adminResetPassword(parseInt(this.dataset.uid), this.dataset.uname)" title="Doi mat khau">MK</button>';
             html += '<button class="btn btn-sm" onclick="adminToggleActive(' + u.id + ',' + (u.is_active ? 0 : 1) + ')" title="' + (u.is_active ? 'Khoa' : 'Mo khoa') + '">' + (u.is_active ? 'Khoa' : 'Mo') + '</button>';
-            html += '<button class="btn btn-sm btn-danger" onclick="adminDeleteUser(' + u.id + ',\'' + escapeHtml(u.username) + '\')" title="Xoa">Xoa</button>';
+            html += '<button class="btn btn-sm btn-danger" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" onclick="adminDeleteUser(parseInt(this.dataset.uid), this.dataset.uname)" title="Xoa">Xoa</button>';
         }
         html += '</td>';
         html += '</tr>';

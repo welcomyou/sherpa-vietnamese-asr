@@ -152,7 +152,7 @@ def _clear_account_lockout(username: str):
 
 # === FastAPI App ===
 
-app = FastAPI(title="Sherpa Vietnamese ASR", docs_url=None, redoc_url=None)
+app = FastAPI(title="Sherpa Vietnamese ASR", docs_url=None, redoc_url=None, openapi_url=None)
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -633,13 +633,16 @@ async def upload_file(
     user_id = user["id"] if user else None
     if not user_id and session_id:
         old_files = db.delete_session_files(session_id)
+        _upload_real = os.path.realpath(UPLOAD_DIR)
         for fname in old_files:
             import glob as _glob
             for f_path in _glob.glob(os.path.join(UPLOAD_DIR, f"{fname}*")):
-                try:
-                    os.remove(f_path)
-                except OSError:
-                    pass
+                # A01: Validate path trước khi xóa
+                if os.path.realpath(f_path).startswith(_upload_real + os.sep):
+                    try:
+                        os.remove(f_path)
+                    except OSError:
+                        pass
         if old_files:
             logger.info(f"Cleaned {len(old_files)} old file(s) for anonymous session {session_id[:8]}")
 
@@ -675,7 +678,8 @@ async def upload_file(
     except Exception as e:
         if os.path.exists(stored_path):
             os.remove(stored_path)
-        raise HTTPException(500, f"Lỗi lưu file: {e}")
+        logger.error(f"Upload save error: {e}", exc_info=True)
+        raise HTTPException(500, "Lỗi lưu file. Vui lòng thử lại.")
 
     # Check storage limit nếu user đã login
     if user and user["storage_limit_gb"] > 0:
@@ -684,9 +688,12 @@ async def upload_file(
             os.remove(stored_path)
             raise HTTPException(400, "Vượt quá giới hạn lưu trữ")
 
+    # A03: HTML-escape original_filename để chống stored XSS khi render trên frontend
+    import html as _html
+    safe_original_name = _html.escape(str(file.filename or "unknown")[:500], quote=False)
     file_id = db.create_file(
         session_id=session_id,
-        original_filename=file.filename,
+        original_filename=safe_original_name,
         stored_filename=stored_name,
         file_size_bytes=written,
         user_id=user_id,
@@ -779,9 +786,10 @@ async def process_file(
 
     # Tạo meeting record cho user đã login (skip nếu đã có)
     if user and not db.get_meeting_by_file_id(file_id):
-        meeting_name = body.get("meeting_name", "").strip()
+        import html as _html
+        meeting_name = _html.escape(body.get("meeting_name", "").strip()[:500], quote=False)
         if not meeting_name:
-            meeting_name = file_record["original_filename"]
+            meeting_name = _html.escape(str(file_record["original_filename"])[:500], quote=False)
         db.create_meeting(
             user_id=user["id"],
             file_id=file_id,
@@ -951,6 +959,10 @@ async def file_audio(
     check_file_access(file_record, session_id, user)
 
     file_path = os.path.join(UPLOAD_DIR, file_record["stored_filename"])
+    # A01: Path traversal check — đề phòng stored_filename bị inject
+    _upload_real = os.path.realpath(UPLOAD_DIR)
+    if not os.path.realpath(file_path).startswith(_upload_real + os.sep):
+        raise HTTPException(400, "Invalid file path")
 
     # Ưu tiên file WAV đã convert
     wav_path = file_path.rsplit(".", 1)[0] + ".wav"
@@ -1025,6 +1037,16 @@ async def update_speakers(
     body = await request.json()
     speaker_names = body.get("speaker_names", {})
 
+    # A03 XSS: Sanitize speaker names trước khi lưu DB
+    import html as _html
+    if isinstance(speaker_names, dict):
+        speaker_names = {
+            str(k)[:20]: _html.escape(str(v)[:200], quote=False)
+            for k, v in list(speaker_names.items())[:_MAX_SPEAKER_ID + 1]
+        }
+    else:
+        speaker_names = {}
+
     # Cập nhật speaker names trong kết quả JSON
     if file_record["asr_result_json"]:
         asr_data = json.loads(file_record["asr_result_json"])
@@ -1051,7 +1073,9 @@ async def split_speaker(
 
     body = await request.json()
     seg_index = body.get("seg_index")
-    new_speaker = body.get("new_speaker", "")
+    # A03 XSS: Sanitize new_speaker trước khi chèn vào segments/speaker_names
+    import html as _html
+    new_speaker = _html.escape(str(body.get("new_speaker", "")).strip()[:200], quote=False)
     scope = body.get("scope", "to_end")  # "to_end" hoặc "single"
 
     if seg_index is None or not file_record["asr_result_json"]:
@@ -1401,11 +1425,13 @@ async def delete_user_file(
     if not file_record or file_record["user_id"] != user["id"]:
         raise HTTPException(404, "File not found")
 
-    # Xóa file vật lý
+    # A01: Path traversal check trước khi xóa file
     file_path = os.path.join(UPLOAD_DIR, file_record["stored_filename"])
-    for path in [file_path, file_path.rsplit(".", 1)[0] + ".wav"]:
-        if os.path.exists(path):
-            os.remove(path)
+    _upload_real = os.path.realpath(UPLOAD_DIR)
+    if os.path.realpath(file_path).startswith(_upload_real + os.sep):
+        for path in [file_path, file_path.rsplit(".", 1)[0] + ".wav"]:
+            if os.path.exists(path):
+                os.remove(path)
 
     db.delete_file(file_id)
     db.update_user_storage(user["id"])
@@ -1468,7 +1494,9 @@ async def rename_meeting(meeting_id: int, request: Request, user: dict = Depends
         raise HTTPException(404, "Meeting not found")
 
     body = await request.json()
-    new_name = body.get("meeting_name", "").strip()
+    # A03 XSS: Sanitize meeting name trước khi lưu DB
+    import html as _html
+    new_name = _html.escape(body.get("meeting_name", "").strip()[:500], quote=False)
     if not new_name:
         raise HTTPException(400, "Tên cuộc họp không được để trống")
 
@@ -1488,19 +1516,17 @@ async def delete_meeting(meeting_id: int, user: dict = Depends(require_auth)):
 
     file_id = meeting["file_id"]
 
-    # Xóa file vật lý
+    # A01: Path traversal check trước khi xóa file
     import glob as glob_mod
     file_path = os.path.join(UPLOAD_DIR, meeting["stored_filename"])
-    for f in glob_mod.glob(file_path + "*"):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
-    if os.path.exists(file_path):
-        try:
-            os.remove(file_path)
-        except OSError:
-            pass
+    _upload_real = os.path.realpath(UPLOAD_DIR)
+    if os.path.realpath(file_path).startswith(_upload_real + os.sep):
+        for f in glob_mod.glob(file_path + "*"):
+            if os.path.realpath(f).startswith(_upload_real + os.sep):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
 
     # Xóa DB records
     db.delete_meeting(meeting_id)
@@ -1517,6 +1543,10 @@ async def meeting_audio(meeting_id: int, user: dict = Depends(require_auth)):
         raise HTTPException(404, "Meeting not found")
 
     file_path = os.path.join(UPLOAD_DIR, meeting["stored_filename"])
+    # A01: Path traversal check
+    _upload_real = os.path.realpath(UPLOAD_DIR)
+    if not os.path.realpath(file_path).startswith(_upload_real + os.sep):
+        raise HTTPException(400, "Invalid file path")
 
     # Ưu tiên file WAV đã convert
     wav_path = file_path.rsplit(".", 1)[0] + ".wav"

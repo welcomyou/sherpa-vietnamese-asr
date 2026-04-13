@@ -865,7 +865,8 @@ function renderTimingInfo(timing) {
 
 function _safeColor(c) {
     if (!c) return '';
-    return /^[a-zA-Z0-9#(), .%]+$/.test(c) ? c : '';
+    // A03: Chỉ cho phép #hex, rgb(), rgba(), named colors — chặn CSS injection
+    return /^(#[0-9a-fA-F]{3,8}|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*(,\s*[\d.]+\s*)?\)|[a-zA-Z]{1,20})$/.test(c) ? c : '';
 }
 
 function renderSpeakerView(segments, speakerNames) {

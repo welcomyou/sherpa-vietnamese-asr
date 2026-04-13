@@ -475,10 +475,11 @@ class QueueManager:
                 db.update_meeting(meeting["id"], status="error",
                     error_message=error_msg)
             logger.error(f"Error processing file_id={file_id}: {error_msg}", exc_info=True)
+            # A09: Không gửi chi tiết lỗi nội bộ (path, stack) ra client
             self._send_ws(session_id, {
                 "type": "asr_error",
                 "file_id": file_id,
-                "error": error_msg,
+                "error": "Lỗi xử lý file. Vui lòng thử lại.",
             })
 
         finally:
@@ -529,9 +530,10 @@ class QueueManager:
             error_msg = str(e)
             db.set_queue_error(file_id, error_msg)
             logger.error(f"Summarization error: file_id={file_id}: {error_msg}", exc_info=True)
+            # A09: Không gửi chi tiết lỗi nội bộ ra client
             self._send_ws(session_id, {
                 "type": "summary_error", "file_id": file_id,
-                "error": error_msg,
+                "error": "Lỗi tóm tắt. Vui lòng thử lại.",
             })
 
         finally:

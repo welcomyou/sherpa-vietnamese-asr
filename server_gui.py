@@ -67,8 +67,12 @@ class _LocalAPI:
     def _ssl_ctx(self):
         import ssl
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # A02: Chỉ disable cert verification cho loopback (self-signed cert).
+        # Với remote host, giữ verification để tránh MITM.
+        _loopback = {"127.0.0.1", "::1", "localhost"}
+        if self._host in _loopback:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
     def request(self, method, path, body=None):
@@ -1627,8 +1631,8 @@ class ConfigTab(BaseTab):
             else:
                 san_list.append(x509.IPAddress(ipamod.ip_address(value)))
 
-        # Tao RSA key
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        # A02: RSA 3072-bit (đồng bộ với ssl_utils.py, NIST recommends >=3072)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
 
         import datetime
         subject = issuer = x509.Name([
@@ -1643,7 +1647,7 @@ class ConfigTab(BaseTab):
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(datetime.datetime.utcnow())
-            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=730))
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=0),
                 critical=True,
@@ -1666,6 +1670,12 @@ class ConfigTab(BaseTab):
                 serialization.PrivateFormat.TraditionalOpenSSL,
                 serialization.NoEncryption(),
             ))
+        # A02: Restrict key file permissions (owner-only)
+        try:
+            import stat as _stat
+            os.chmod(key_file, _stat.S_IRUSR | _stat.S_IWUSR)
+        except OSError:
+            pass  # Windows ACL không set qua chmod
         with open(cert_file, "wb") as f:
             f.write(cert.public_bytes(serialization.Encoding.PEM))
 

@@ -81,7 +81,7 @@ async function triggerSummarize() {
         });
         const data = await resp.json();
         if (!resp.ok) {
-            container.innerHTML = `<div class="summary-error">❌ ${data.detail || 'Lỗi không xác định'}</div>`;
+            container.innerHTML = `<div class="summary-error">❌ ${esc(data.detail || 'Lỗi không xác định')}</div>`;
             _summaryLoading = false;
             return;
         }

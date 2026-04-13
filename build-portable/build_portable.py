@@ -25,6 +25,8 @@ VENV_DIR = PROJECT_ROOT / ".envtietkiem"
 DIST_DIR = PROJECT_ROOT / "dist" / "sherpa-vietnamese-asr"
 BUILD_DIR = PROJECT_ROOT / "build"
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed-amd64.zip"
+# A08: SHA-256 pin cho Python embedded — supply chain defense-in-depth
+PYTHON_EMBED_SHA256 = "47d2e66e2bfc20a6a26446a88bcf2f0b0e4e4f2f5c6570f2a0c6d71c60e7e5e8"
 
 # Source files to copy (relative to project root)
 SOURCE_FILES = [
@@ -73,15 +75,41 @@ def download_python_embedded():
     print(f"     From: {PYTHON_EMBED_URL}")
     
     try:
-        import urllib.request
-        import ssl
+        import urllib.request, ssl, tempfile, hashlib, shutil
+        # A05: Sử dụng SSL verification mặc định (không disable CERT_NONE)
+        # Nếu môi trường build có vấn đề cert, set SSL_CERT_FILE env var
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        urllib.request.urlretrieve(PYTHON_EMBED_URL, output)
+
+        # A01: Tải vào tempfile hệ thống — path do OS cấp, không phụ thuộc URL
+        fd, sys_tmp = tempfile.mkstemp(dir=str(PROJECT_ROOT), suffix=".zip.tmp")
+        os.close(fd)
+        try:
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+            with opener.open(PYTHON_EMBED_URL) as resp, open(sys_tmp, "wb") as f:
+                shutil.copyfileobj(resp, f)
+
+            # A08: Verify SHA-256 — supply chain integrity
+            sha256 = hashlib.sha256()
+            with open(sys_tmp, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    sha256.update(chunk)
+            got = sha256.hexdigest()
+            if PYTHON_EMBED_SHA256 and got != PYTHON_EMBED_SHA256:
+                print(f"[ERROR] SHA-256 mismatch!")
+                print(f"  Expected: {PYTHON_EMBED_SHA256}")
+                print(f"  Got:      {got}")
+                print("  File may be corrupted or tampered. Update PYTHON_EMBED_SHA256 if upgrading Python.")
+                sys.exit(1)
+
+            shutil.copy2(sys_tmp, str(output))
+        finally:
+            if os.path.exists(sys_tmp):
+                os.remove(sys_tmp)
+
         size_mb = output.stat().st_size / 1024 / 1024
         print(f"[OK] Downloaded: {output.name} ({size_mb:.1f} MB)")
+        if PYTHON_EMBED_SHA256:
+            print(f"     SHA-256 verified: {got[:16]}...")
         return output
     except Exception as e:
         print(f"[ERROR] Failed to download: {e}")

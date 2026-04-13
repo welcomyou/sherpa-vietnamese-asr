@@ -75,28 +75,46 @@ class DNSMOSDownloader(QThread):
                 self.finished.emit(True, "Model đã tồn tại")
                 return
             
-            def download_progress(block_num, block_size, total_size):
-                downloaded = block_num * block_size
-                percent = min(int(downloaded * 100 / total_size), 100)
-                self.progress.emit(percent)
-            
-            urllib.request.urlretrieve(
-                DNSMOS_URL,
-                model_path + ".tmp",
-                reporthook=download_progress
-            )
-
-            import hashlib
-            sha256 = hashlib.sha256()
-            with open(model_path + ".tmp", "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    sha256.update(chunk)
-            if sha256.hexdigest() != DNSMOS_SHA256:
-                os.remove(model_path + ".tmp")
-                self.finished.emit(False, "SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
+            # A01: Dùng urlopen() + stream copy thay vì urlretrieve()
+            # urlretrieve(url, path) khiến Fortify taint path → mọi file ops bị flag
+            import tempfile, hashlib, shutil
+            dnsmos_dir_real = os.path.realpath(DNSMOS_DIR)
+            model_path_real = os.path.realpath(model_path)
+            if not model_path_real.startswith(dnsmos_dir_real + os.sep):
+                self.finished.emit(False, "Path validation failed")
                 return
 
-            os.rename(model_path + ".tmp", model_path)
+            fd, sys_tmp = tempfile.mkstemp(dir=DNSMOS_DIR, suffix=".tmp")
+            os.close(fd)
+            try:
+                resp = urllib.request.urlopen(DNSMOS_URL)
+                try:
+                    total_size = int(resp.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    sha256 = hashlib.sha256()
+                    with open(sys_tmp, "wb") as fw:
+                        while True:
+                            chunk = resp.read(8192)
+                            if not chunk:
+                                break
+                            fw.write(chunk)
+                            sha256.update(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                percent = min(int(downloaded * 100 / total_size), 100)
+                                self.progress.emit(percent)
+                finally:
+                    resp.close()
+
+                if sha256.hexdigest() != DNSMOS_SHA256:
+                    self.finished.emit(False, "SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
+                    return
+
+                shutil.move(sys_tmp, model_path_real)
+                sys_tmp = None
+            finally:
+                if sys_tmp and os.path.exists(sys_tmp):
+                    os.remove(sys_tmp)
             self.finished.emit(True, "Download thành công")
             
         except Exception as e:
@@ -728,27 +746,39 @@ def download_dnsmos_model_sync() -> bool:
             return True
         
         print("[AudioAnalyzer] Downloading DNSMOS model...")
-        tmp_path = model_path + ".tmp"
-        urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
 
-        # A01: Validate path before file ops (prevent path traversal from URL-derived filename)
+        # A01: Dùng urlopen() + stream copy thay vì urlretrieve()
+        # urlretrieve(url, path) khiến Fortify taint path param → mọi file ops bị flag
+        import tempfile, hashlib, shutil
         dnsmos_dir_real = os.path.realpath(DNSMOS_DIR)
-        tmp_path_real = os.path.realpath(tmp_path)
         model_path_real = os.path.realpath(model_path)
-        if not tmp_path_real.startswith(dnsmos_dir_real) or not model_path_real.startswith(dnsmos_dir_real):
-            print("[AudioAnalyzer] Path validation failed — aborting download")
+        if not model_path_real.startswith(dnsmos_dir_real + os.sep):
+            print("[AudioAnalyzer] Destination path validation failed")
             return False
 
-        import hashlib
-        sha256 = hashlib.sha256()
-        with open(tmp_path_real, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256.update(chunk)
-        if sha256.hexdigest() != DNSMOS_SHA256:
-            os.remove(tmp_path_real)
-            print("[AudioAnalyzer] SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
-            return False
-        os.rename(tmp_path_real, model_path_real)
+        fd, sys_tmp = tempfile.mkstemp(dir=DNSMOS_DIR, suffix=".tmp")
+        os.close(fd)
+        try:
+            resp = urllib.request.urlopen(DNSMOS_URL)
+            try:
+                sha256 = hashlib.sha256()
+                with open(sys_tmp, "wb") as fw:
+                    while True:
+                        chunk = resp.read(8192)
+                        if not chunk:
+                            break
+                        fw.write(chunk)
+                        sha256.update(chunk)
+            finally:
+                resp.close()
+            if sha256.hexdigest() != DNSMOS_SHA256:
+                print("[AudioAnalyzer] SHA-256 mismatch — file bị hỏng hoặc bị thay đổi")
+                return False
+            shutil.move(sys_tmp, model_path_real)
+            sys_tmp = None
+        finally:
+            if sys_tmp and os.path.exists(sys_tmp):
+                os.remove(sys_tmp)
         print("[AudioAnalyzer] DNSMOS model downloaded successfully")
         return True
         

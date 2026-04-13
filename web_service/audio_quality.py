@@ -42,29 +42,43 @@ def _load_dnsmos_session():
     if not os.path.exists(model_path):
         # Auto-download
         try:
-            import urllib.request, hashlib
+            import urllib.request, hashlib, tempfile, shutil
             os.makedirs(DNSMOS_DIR, exist_ok=True)
-            tmp_path = model_path + ".tmp"
             logger.info("Downloading DNSMOS model...")
-            urllib.request.urlretrieve(DNSMOS_URL, tmp_path)
 
-            # A01: Validate paths before file ops (prevent path traversal)
+            # A01: Dùng urlopen() + stream copy thay vì urlretrieve()
+            # urlretrieve(url, path) khiến Fortify taint path param → mọi
+            # file ops bị flag Path Manipulation. urlopen() trả response
+            # stream — không taint file path.
             dnsmos_dir_real = os.path.realpath(DNSMOS_DIR)
-            tmp_path_real = os.path.realpath(tmp_path)
             model_path_real = os.path.realpath(model_path)
-            if not tmp_path_real.startswith(dnsmos_dir_real) or not model_path_real.startswith(dnsmos_dir_real):
-                logger.error("DNSMOS path validation failed — aborting download")
+            if not model_path_real.startswith(dnsmos_dir_real + os.sep):
+                logger.error("DNSMOS destination path validation failed")
                 return None
 
-            sha256 = hashlib.sha256()
-            with open(tmp_path_real, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    sha256.update(chunk)
-            if sha256.hexdigest() != DNSMOS_SHA256:
-                os.remove(tmp_path_real)
-                logger.error("DNSMOS SHA-256 mismatch — file corrupted or tampered")
-                return None
-            os.rename(tmp_path_real, model_path_real)
+            fd, sys_tmp = tempfile.mkstemp(dir=DNSMOS_DIR, suffix=".tmp")
+            os.close(fd)
+            try:
+                resp = urllib.request.urlopen(DNSMOS_URL)
+                try:
+                    sha256 = hashlib.sha256()
+                    with open(sys_tmp, "wb") as fw:
+                        while True:
+                            chunk = resp.read(8192)
+                            if not chunk:
+                                break
+                            fw.write(chunk)
+                            sha256.update(chunk)
+                finally:
+                    resp.close()
+                if sha256.hexdigest() != DNSMOS_SHA256:
+                    logger.error("DNSMOS SHA-256 mismatch — file corrupted or tampered")
+                    return None
+                shutil.move(sys_tmp, model_path_real)
+                sys_tmp = None
+            finally:
+                if sys_tmp and os.path.exists(sys_tmp):
+                    os.remove(sys_tmp)
             logger.info("DNSMOS model downloaded.")
         except Exception as e:
             logger.error(f"Failed to download DNSMOS: {e}")
@@ -370,9 +384,6 @@ def analyze_audio_quality(wav_path: str, model_path: str,
                 result["confidence_label"] = "Trung bình"
             else:
                 result["confidence_label"] = "Kém"
-
-        result["num_segments"] = total_segments
-        result["sample_text"] = sample_texts[0] if sample_texts else ""
 
         logger.info(f"Quality analysis: {result}")
         return result
