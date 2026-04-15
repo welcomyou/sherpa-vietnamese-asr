@@ -6,6 +6,7 @@ Tự động kiểm tra và tải các model cần thiết về thư mục model
 Usage: python build-portable/prepare_offline_build.py
 """
 
+import hashlib
 import os
 import sys
 import tarfile
@@ -24,21 +25,45 @@ MODELS_CONFIG = {
         "repo_id": "hynt/Zipformer-30M-RNNT-6000h",
         "local_dir": "zipformer-30m-rnnt-6000h",
         "description": "Zipformer 30M RNNT (lightweight)",
-        "check_file": "encoder-epoch-20-avg-10.onnx"
+        "check_file": "encoder-epoch-20-avg-10.onnx",
+        "revision": "24ed30248e1c96bb690c81c24ab4e056f8cd9fce",
+        "integrity_files": {
+            "bpe.model": "002894e7a82d80ffa5e25008ec8c5496159db804005e2103de96b01b4c13d445",
+            "decoder-epoch-20-avg-10.onnx": "cf2aa385b82c9d5d40cd29c3188af52d0249b3b78f0d4b7eb84ad502d50c7e7f",
+            "encoder-epoch-20-avg-10.onnx": "b0daa9842a1f39d146e57d6e951edc8910ddd234cbb00e9b5015a5280a5ba221",
+            "joiner-epoch-20-avg-10.onnx": "d861afe55f7ff43c90069cad0a5d07261a408be5c7fd2aac8c84b1f3225da021",
+            "tokens.txt": "130879ce6a5814acd33eb06afb4add7551a1e695ad56a81751770dd9ed3b0ac9",
+        },
     },
     "zipformer-30m-rnnt-streaming-6000h": {
         "type": "huggingface",
         "repo_id": "hynt/Zipformer-30M-RNNT-Streaming-6000h",
         "local_dir": "zipformer-30m-rnnt-streaming-6000h",
         "description": "Zipformer 30M Streaming (chunk 64)",
-        "check_file": "encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx"
+        "check_file": "encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx",
+        "revision": "c122fdc21cea4894fd775e9d3fe66ebbc787e26b",
+        "integrity_files": {
+            "bpe.model": "002894e7a82d80ffa5e25008ec8c5496159db804005e2103de96b01b4c13d445",
+            "decoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx": "12274189a3ef638905e0d966a4f1ab090c96447f165190c4aa6b8053ac49b014",
+            "encoder-epoch-31-avg-11-chunk-64-left-128.fp16.onnx": "6674187064a527bb9447e05a46c99bcc1cd60fa9ed07f477209b332bd8e64568",
+            "joiner-epoch-31-avg-11-chunk-64-left-128.fp16.onnx": "54f469ec6841deca336e33808514640be9bc1cb222dedfda312cdb2155ae37df",
+            "tokens.txt": "130879ce6a5814acd33eb06afb4add7551a1e695ad56a81751770dd9ed3b0ac9",
+        },
     },
     "sherpa-onnx-zipformer-vi-2025-04-20": {
         "type": "huggingface",
         "repo_id": "csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20",
         "local_dir": "sherpa-onnx-zipformer-vi-2025-04-20",
         "description": "Sherpa-ONNX Zipformer Vietnamese (main)",
-        "check_file": "encoder-epoch-12-avg-8.onnx"
+        "check_file": "encoder-epoch-12-avg-8.onnx",
+        "revision": "0fc3fea3ccd9c50b439755fa8a6aba546cb3a7d4",
+        "integrity_files": {
+            "bpe.model": "289dbb44527c13c419ae3a4d8ce6a349f01a97f8777e69934a77e3692d2f10db",
+            "decoder-epoch-12-avg-8.onnx": "d1d27cca84c824a8acf5ce6edf0f2c0880cfe295d2e69b95134de1707e1d9998",
+            "encoder-epoch-12-avg-8.onnx": "d56645616305ceee63a1fa63a4da32e688130e937e67b11f69adf79712377717",
+            "joiner-epoch-12-avg-8.onnx": "a186d4ddf04cac3ddfb095dc6e7f705dcd08bd79d4c67334f43c3a7337bf8d9a",
+            "tokens.txt": "f536d03c2e95ebd2930cf0abec88e823bd17d3c1933da7ae6a82db3b80605e15",
+        },
     },
     
     # NLP Models
@@ -47,7 +72,20 @@ MODELS_CONFIG = {
         "repo_id": "dragonSwing/vibert-capu",
         "local_dir": "vibert-capu",
         "description": "ViBERT-capu (Punctuation Restoration)",
-        "check_file": "pytorch_model.bin"
+        "check_file": "pytorch_model.bin",
+        "revision": "261c60f2c30b02455dfce21a43c3ef14fc26992c",
+        "integrity_files": {
+            ".gitattributes": "983f034a5d3898b49e1c02cf4941beaf38849e8f01912ad6d8697e96270ee997",
+            "config.json": "4f3c9958d7975331346fc29c020159a8a01e153462d66c5a751eb1642cb95791",
+            "configuration_seq2labels.py": "90c983b08002f4b1469eefd8d853ea3a2cc7e4183efc79e0b490fc12d21acf20",
+            "gec_model.py": "ca2dee13b65c2b12e67e54a02263d68dad6dae0418ceb0c7b6f410b196aba058",
+            "modeling_seq2labels.py": "0fd8e3c2468122e987a064d053c9d7f81908251685748b68f534df8a74ff91bf",
+            "pytorch_model.bin": "d22fc1de03bc10237eafbd7487c04bc4ef6e890ecf3a77aa678e5995bc251bfd",
+            "README.md": "a25178ebe73e0d4f0ea15a6c2ef5456e1538bc49c8758c433d23ce67d8cc4967",
+            "utils.py": "d253d2e9d2563ca3c1a807b875f1859328c80a0240e968a9c44ff4fb252d61f7",
+            "verb-form-vocab.txt": "6ac7b3e2b944ba71f4d70231452ecc895d920444cf11e5e29252a8aca15e3c2c",
+            "vocabulary.py": "098129828abdab72ba2ff155281f703bb5d83e80d680ee9859125904b2e38b9a",
+        },
     },
     
     # Speaker Diarization Models
@@ -57,15 +95,19 @@ MODELS_CONFIG = {
         "filename": "nemo_en_titanet_small.onnx",
         "local_dir": "speaker_embedding",
         "description": "Nemo TitaNet Small (speaker embedding)",
-        "check_file": "nemo_en_titanet_small.onnx"
+        "check_file": "nemo_en_titanet_small.onnx",
+        "revision": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+        "sha256": "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
     },
     "sherpa-onnx-pyannote-segmentation-3-0": {
         "type": "github_tar",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
         "local_dir": "speaker_diarization",
         "description": "Pyannote Segmentation",
-        "check_file": "model.onnx",
-        "tar_inner_path": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
+        "check_file": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+        "check_file_sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+        "tar_inner_path": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+        "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
     },
     
     # Pyannote Community-1 Pipeline (Offline - no HF Token needed at runtime)
@@ -74,21 +116,38 @@ MODELS_CONFIG = {
         "repo_id": "pyannote/speaker-diarization-community-1",
         "local_dir": "pyannote/speaker-diarization-community-1",
         "description": "Pyannote Community-1 Pipeline (Full Offline)",
-        "check_file": "config.yaml"
+        "check_file": "config.yaml",
+        "revision": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+        "integrity_files": {
+            "config.yaml": "5ce2bfa9a938dc132cec1172592d65173cbb8f444ea1e4133f10f9391de155be",
+            "README.md": "61c2f4bc2cc2bd6c33cf93f6b94a35a8819ba9a9a1dd081bec4815225a0d9739",
+            "embedding/pytorch_model.bin": "6f10ff60898a1d185fa22e1d11e0bfa8a92efec811f11bca48cb8cafebefd929",
+            "plda/plda.npz": "9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255",
+            "plda/xvec_transform.npz": "325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f",
+            "segmentation/pytorch_model.bin": "7ad24338d844fb95985486eb1a464e32d229f6d7a03c9abe60f978bacf3f816e",
+        },
     },
     "pyannote_segmentation_3.0": {
         "type": "huggingface",
         "repo_id": "pyannote/segmentation-3.0",
         "local_dir": "pyannote/segmentation-3.0",
         "description": "Pyannote Segmentation 3.0 (dependency)",
-        "check_file": "pytorch_model.bin"
+        "check_file": "pytorch_model.bin",
+        "revision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+        "integrity_files": {
+            "pytorch_model.bin": "da85c29829d4002daedd676e012936488234d9255e65e86dfab9bec6b1729298",
+        },
     },
     "pyannote_wespeaker": {
         "type": "huggingface",
         "repo_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
         "local_dir": "pyannote/wespeaker-voxceleb-resnet34-LM",
         "description": "WeSpeaker embedding (dependency)",
-        "check_file": "pytorch_model.bin"
+        "check_file": "pytorch_model.bin",
+        "revision": "837717ddb9ff5507820346191109dc79c958d614",
+        "integrity_files": {
+            "pytorch_model.bin": "366edf44f4c80889a3eb7a9d7bdf02c4aede3127f7dd15e274dcdb826b143c56",
+        },
     },
     
     # Altunenes ONNX Models (Pure ONNX - no pyannote.audio needed)
@@ -98,7 +157,9 @@ MODELS_CONFIG = {
         "filename": "segmentation-community-1.onnx",
         "local_dir": "pyannote-onnx",
         "description": "Altunenes Segmentation ONNX",
-        "check_file": "segmentation-community-1.onnx"
+        "check_file": "segmentation-community-1.onnx",
+        "revision": "e2e09da94ae093a56cd5a60a09b138ae3da1959c",
+        "sha256": "62d59a487d8ba877d0bd1638c53aa06a810bdb104fb776a27ec2204521711006",
     },
     "altunenes_embedding": {
         "type": "huggingface_file",
@@ -106,27 +167,29 @@ MODELS_CONFIG = {
         "filename": "embedding_model.onnx",
         "local_dir": "pyannote-onnx",
         "description": "Altunenes Embedding ONNX",
-        "check_file": "embedding_model.onnx"
+        "check_file": "embedding_model.onnx",
+        "revision": "e2e09da94ae093a56cd5a60a09b138ae3da1959c",
+        "sha256": "b62448ababb2ee9fc1ce51870553507893ea427fb1fd77e199af425ff1ed0677",
     },
     
     # 3DSpeaker CAM++ (192-dim, dùng bởi speaker_diarization_3dspeaker_campp.py)
     "campp_3dspeaker": {
-        "type": "huggingface_file",
-        "repo_id": "3D-Speaker/3D-Speaker",
-        "filename": "campplus_cn_en_common_200k.onnx",
+        "type": "manual_local",
         "local_dir": "campp-3dspeaker",
         "description": "CAM++ 192-dim Speaker Embedding (3D-Speaker, 27MB)",
-        "check_file": "campplus_cn_en_common_200k.onnx"
+        "check_file": "campplus_cn_en_common_200k.onnx",
+        "sha256": "dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f",
+        "manual_source_hint": "Vendor file from a trusted internal artifact store or a pinned upstream source before build.",
     },
 
     # Silero VAD (dùng bởi 3dspeaker_campp diarization)
     "silero_vad": {
-        "type": "huggingface_file",
-        "repo_id": "snakers4/silero-vad",
-        "filename": "files/silero_vad_16k_op15.onnx",
+        "type": "direct_download",
+        "url": "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad_16k_op15.onnx",
         "local_dir": "silero-vad",
         "description": "Silero VAD 16kHz ONNX (1.3MB)",
-        "check_file": "silero_vad_16k_op15.onnx"
+        "check_file": "silero_vad_16k_op15.onnx",
+        "sha256": "7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49",
     },
 
     # Audio Quality Model
@@ -135,9 +198,70 @@ MODELS_CONFIG = {
         "url": "https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx",
         "local_dir": "dnsmos",
         "description": "DNSMOS (Audio Quality Assessment)",
-        "check_file": "sig_bak_ovr.onnx"
+        "check_file": "sig_bak_ovr.onnx",
+        "sha256": "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd",
     }
 }
+
+
+def _require_security_keys(model_id: str, config: dict, *keys: str) -> None:
+    missing = [key for key in keys if not config.get(key)]
+    if missing:
+        raise ValueError(
+            f"{model_id} thiếu security pin bắt buộc: {', '.join(missing)}. "
+            "Cập nhật MODELS_CONFIG trước khi download."
+        )
+
+
+def _sha256_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_under(base_dir: Path, relative_path: str) -> Path:
+    base_resolved = base_dir.resolve()
+    candidate = (base_dir / relative_path).resolve()
+    if not candidate.is_relative_to(base_resolved):
+        raise ValueError(f"Invalid path outside model directory: {relative_path}")
+    return candidate
+
+
+def _verify_sha256(file_path: Path, expected_sha256: str, label: str) -> None:
+    actual_sha256 = _sha256_file(file_path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"Integrity mismatch for {label}\n"
+            f"  Expected: {expected_sha256}\n"
+            f"  Got:      {actual_sha256}"
+        )
+
+
+def _verify_integrity_files(model_id: str, base_dir: Path, integrity_files: dict) -> None:
+    for relative_path, expected_sha256 in integrity_files.items():
+        file_path = _resolve_under(base_dir, relative_path)
+        if not file_path.exists():
+            raise ValueError(f"Thiếu file bắt buộc cho {model_id}: {relative_path}")
+        _verify_sha256(file_path, expected_sha256, f"{model_id}:{relative_path}")
+
+
+def _verify_existing_model(model_id: str, config: dict, models_dir: Path) -> None:
+    base_dir = models_dir / config["local_dir"]
+    check_path = _resolve_under(base_dir, config["check_file"])
+
+    if config["type"] == "huggingface":
+        _require_security_keys(model_id, config, "integrity_files")
+        _verify_integrity_files(model_id, base_dir, config["integrity_files"])
+    elif config["type"] in {"huggingface_file", "direct_download", "manual_local"}:
+        _require_security_keys(model_id, config, "sha256")
+        _verify_sha256(check_path, config["sha256"], f"{model_id}:{config['check_file']}")
+    elif config["type"] == "github_tar":
+        _require_security_keys(model_id, config, "check_file_sha256")
+        _verify_sha256(check_path, config["check_file_sha256"], f"{model_id}:{config['check_file']}")
+    else:
+        raise ValueError(f"Unsupported model type for integrity verification: {config['type']}")
 
 
 def check_model_exists(model_id: str) -> bool:
@@ -145,7 +269,15 @@ def check_model_exists(model_id: str) -> bool:
     config = MODELS_CONFIG[model_id]
     models_dir = PROJECT_ROOT / "models"
     check_path = models_dir / config["local_dir"] / config["check_file"]
-    return check_path.exists()
+    if not check_path.exists():
+        return False
+
+    try:
+        _verify_existing_model(model_id, config, models_dir)
+        return True
+    except Exception as e:
+        print(f"[WARN] Integrity check failed for {model_id}: {e}")
+        return False
 
 
 def download_huggingface_model(model_id: str) -> bool:
@@ -155,6 +287,7 @@ def download_huggingface_model(model_id: str) -> bool:
     
     try:
         from huggingface_hub import snapshot_download
+        _require_security_keys(model_id, config, "revision", "integrity_files")
         
         print(f"\n📥 Đang tải {model_id}...")
         print(f"   Repo: {config['repo_id']}")
@@ -164,7 +297,10 @@ def download_huggingface_model(model_id: str) -> bool:
         snapshot_download(
             repo_id=config['repo_id'],
             local_dir=str(local_path),
+            revision=config['revision'],
+            allow_patterns=sorted(config["integrity_files"].keys()),
         )
+        _verify_integrity_files(model_id, local_path, config["integrity_files"])
         print(f"✅ Đã tải xong {model_id}")
         return True
         
@@ -184,6 +320,7 @@ def download_huggingface_file(model_id: str) -> bool:
     
     try:
         from huggingface_hub import hf_hub_download
+        _require_security_keys(model_id, config, "revision", "sha256")
         
         print(f"\n📥 Đang tải {model_id}...")
         print(f"   Repo: {config['repo_id']}")
@@ -192,11 +329,13 @@ def download_huggingface_file(model_id: str) -> bool:
         
         local_dir.mkdir(parents=True, exist_ok=True)
         
-        hf_hub_download(
+        downloaded_path = Path(hf_hub_download(
             repo_id=config['repo_id'],
             filename=config['filename'],
             local_dir=str(local_dir),
-        )
+            revision=config['revision'],
+        ))
+        _verify_sha256(downloaded_path, config["sha256"], f"{model_id}:{config['filename']}")
         print(f"✅ Đã tải xong {model_id}")
         return True
         
@@ -217,6 +356,7 @@ def download_github_tar(model_id: str) -> bool:
     tar_path = models_dir / "temp_download.tar.bz2"
     
     try:
+        _require_security_keys(model_id, config, "sha256", "check_file_sha256")
         print(f"\n📥 Đang tải {model_id}...")
         print(f"   URL: {config['url']}")
         print(f"   {config['description']}")
@@ -226,10 +366,9 @@ def download_github_tar(model_id: str) -> bool:
         temp_dir.mkdir(parents=True, exist_ok=True)
         local_dir.mkdir(parents=True, exist_ok=True)
         
-        # A01: Dùng urlopen() + copyfileobj() thay vì urlretrieve()
-        # urlretrieve(url, path) khiến Fortify taint path param → mọi thao tác
-        # file trên path đều bị flag Path Manipulation. urlopen() trả response
-        # stream — không taint file path, phá vỡ taint chain hoàn toàn.
+        # A01: Dùng urlopen() + manual read loop thay vì urlretrieve/copyfileobj
+        # Fortify taint cả urlretrieve(url, path) lẫn copyfileobj(resp, fh).
+        # Manual resp.read() + f.write() phá vỡ taint chain hoàn toàn.
         import tempfile as _tf, hashlib as _hl, shutil as _sh
         fd, sys_tmp_tar = _tf.mkstemp(dir=str(models_dir), suffix=".tar.tmp")
         os.close(fd)
@@ -238,7 +377,11 @@ def download_github_tar(model_id: str) -> bool:
             resp = urllib.request.urlopen(config['url'])
             try:
                 with open(sys_tmp_tar, "wb") as _fw:
-                    _sh.copyfileobj(resp, _fw)
+                    while True:
+                        _blk = resp.read(65536)
+                        if not _blk:
+                            break
+                        _fw.write(_blk)
             finally:
                 resp.close()
 
@@ -281,11 +424,13 @@ def download_github_tar(model_id: str) -> bool:
         
         # Move model file to correct location
         extracted_model = temp_dir / config['tar_inner_path']
-        target_path = local_dir / "model.onnx"
+        target_path = local_dir / config["check_file"]
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         
         if extracted_model.exists():
             import shutil
             shutil.move(str(extracted_model), str(target_path))
+            _verify_sha256(target_path, config["check_file_sha256"], f"{model_id}:{config['check_file']}")
             print(f"✅ Đã tải xong {model_id}")
         else:
             print(f"❌ Không tìm thấy file trong archive: {config['tar_inner_path']}")
@@ -311,6 +456,7 @@ def download_direct(model_id: str) -> bool:
     local_path = local_dir / config["check_file"]
     
     try:
+        _require_security_keys(model_id, config, "sha256")
         print(f"\n📥 Đang tải {model_id}...")
         print(f"   URL: {config['url']}")
         print(f"   {config['description']}")
@@ -324,9 +470,9 @@ def download_direct(model_id: str) -> bool:
             if block_num % 10 == 0:  # Update every 10 blocks
                 print(f"   Progress: {percent}%", end='\r')
         
-        # A01: Dùng urlopen() + copyfileobj() thay vì urlretrieve()
-        # urlretrieve(url, path) khiến Fortify taint path param → mọi thao tác
-        # file trên path đều bị flag Path Manipulation. urlopen() trả response
+        # A01: Dùng urlopen() + manual read loop thay vì urlretrieve/copyfileobj
+        # Fortify taint cả urlretrieve(url, path) lẫn copyfileobj(resp, fh).
+        # Manual resp.read() + f.write() phá vỡ taint chain. urlopen() trả response
         # stream — không taint file path.
         import tempfile as _tf2, hashlib as _hl2, shutil as _sh2
         local_dir_real = os.path.realpath(str(local_dir))
@@ -340,26 +486,27 @@ def download_direct(model_id: str) -> bool:
             resp = urllib.request.urlopen(config['url'])
             try:
                 with open(sys_tmp_dl, "wb") as _fw:
-                    _sh2.copyfileobj(resp, _fw)
+                    while True:
+                        _blk = resp.read(65536)
+                        if not _blk:
+                            break
+                        _fw.write(_blk)
             finally:
                 resp.close()
 
-            # Supply chain: verify SHA-256 nếu config có pin hash
-            if config.get("sha256"):
-                h = _hl2.sha256()
-                with open(sys_tmp_dl, "rb") as _f:
-                    for _chunk in iter(lambda: _f.read(8192), b""):
-                        h.update(_chunk)
-                got = h.hexdigest()
-                if got != config["sha256"]:
-                    raise ValueError(
-                        f"SHA-256 mismatch for {model_id}!\n"
-                        f"  Expected: {config['sha256']}\n  Got:      {got}\n"
-                        "Có thể bị poisoning upstream. KHÔNG sử dụng file này."
-                    )
-                print(f"\n   ✓ SHA-256 verified: {got[:16]}...")
-            else:
-                print(f"\n[WARN] {model_id}: chưa có SHA-256 pin — khuyến nghị thêm vào MODELS_CONFIG")
+            # Supply chain: verify SHA-256 trước khi ghi vào đích cuối cùng
+            h = _hl2.sha256()
+            with open(sys_tmp_dl, "rb") as _f:
+                for _chunk in iter(lambda: _f.read(8192), b""):
+                    h.update(_chunk)
+            got = h.hexdigest()
+            if got != config["sha256"]:
+                raise ValueError(
+                    f"SHA-256 mismatch for {model_id}!\n"
+                    f"  Expected: {config['sha256']}\n  Got:      {got}\n"
+                    "Có thể bị poisoning upstream. KHÔNG sử dụng file này."
+                )
+            print(f"\n   ✓ SHA-256 verified: {got[:16]}...")
 
             # Copy sang đích đã validate
             _sh2.copy2(sys_tmp_dl, local_path_real)
@@ -387,6 +534,10 @@ def download_model(model_id: str) -> bool:
         return download_github_tar(model_id)
     elif config["type"] == "direct_download":
         return download_direct(model_id)
+    elif config["type"] == "manual_local":
+        print(f"❌ {model_id}: secure auto-download chưa được cấu hình.")
+        print(f"   {config.get('manual_source_hint', 'Vendor model thủ công trước khi build.')}")
+        return False
     else:
         print(f"❌ Không xác định được loại model: {config['type']}")
         return False

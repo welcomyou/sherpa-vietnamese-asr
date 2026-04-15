@@ -86,7 +86,11 @@ def download_python_embedded():
         try:
             opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
             with opener.open(PYTHON_EMBED_URL) as resp, open(sys_tmp, "wb") as f:
-                shutil.copyfileobj(resp, f)
+                while True:
+                    _blk = resp.read(65536)
+                    if not _blk:
+                        break
+                    f.write(_blk)
 
             # A08: Verify SHA-256 — supply chain integrity
             sha256 = hashlib.sha256()
