@@ -2,6 +2,21 @@
 import sys
 import os
 
+# ─── Splash screen NGAY TỪ ĐẦU (Win32 ctypes, zero deps) ───
+# Dùng Win32 API qua ctypes:
+# 1. ctypes là stdlib → load <10ms, không cần đợi numpy/ORT/sherpa (~1-2s)
+# 2. Không xung đột DLL với onnxruntime (khác Qt6)
+# 3. WS_EX_TOPMOST → luôn nổi trên các cửa sổ khác
+# Module splash_win32 ở root (KHÔNG nằm trong core/ vì core/__init__.py
+# sẽ trigger import nặng).
+_splash_ok = False
+if __name__ == "__main__" and sys.platform == "win32":
+    try:
+        import splash_win32
+        _splash_ok = splash_win32.show()
+    except Exception as _e:
+        print(f"[Splash] Import failed: {_e}")
+
 # ─── Setup logging sớm nhất có thể (không import Qt6/ORT) ───
 from core.log_config import setup_logging
 setup_logging("desktop")
@@ -23,35 +38,19 @@ try:
 except ImportError as e:
     print(f"[Init] sherpa_onnx not available: {e}")
 
-# ─── Splash screen (hiện trước khi load model, phần tốn thời gian nhất) ───
-# ORT đã load (~0.5s), model loading mới là phần lâu thực sự (10-20s)
-_splash = None
+# Pump message queue để splash repaint sau khi ORT load xong (~1-2s)
+if _splash_ok:
+    try:
+        splash_win32.pump()
+    except Exception:
+        pass
+
 if __name__ == "__main__":
     os.environ["QT_MEDIA_BACKEND"] = "windows"
-    from PyQt6.QtWidgets import QApplication, QSplashScreen
-    from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+    from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import Qt
 
     _app = QApplication(sys.argv)
-    # Vẽ splash
-    _pw, _ph = 420, 200
-    _pm = QPixmap(_pw, _ph)
-    _pt = QPainter(_pm)
-    _pt.fillRect(0, 0, _pw, _ph, QColor("#1e1e2e"))
-    _pt.setPen(QColor("#3d5afe"))
-    _pt.drawRect(0, 0, _pw - 1, _ph - 1)
-    _pt.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
-    _pt.drawText(_pm.rect().adjusted(0, 40, 0, 0), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, "sherpa-vietnamese-asr")
-    _pt.setPen(QColor("#e0e0e0"))
-    _pt.setFont(QFont("Segoe UI", 11))
-    _pt.drawText(_pm.rect(), Qt.AlignmentFlag.AlignCenter, "Đang khởi động...")
-    _pt.setPen(QColor("#888888"))
-    _pt.setFont(QFont("Segoe UI", 8))
-    _pt.drawText(_pm.rect().adjusted(0, 0, 0, -15), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, "Nhận dạng giọng nói tiếng Việt — Offline, CPU")
-    _pt.end()
-    _splash = QSplashScreen(_pm)
-    _splash.show()
-    _app.processEvents()
 
 import configparser
 
@@ -703,14 +702,23 @@ if __name__ == "__main__":
     # Dọn dẹp file tạm từ lần chạy trước (nếu bị crash)
     cleanup_temp_files()
 
-    # _app và _splash đã tạo ở đầu file (trước imports nặng)
+    # _app đã tạo ở đầu file (trước imports nặng)
     app = _app
 
     # Load MainWindow
     window = MainWindow()
     window.show()
-    if _splash:
-        _splash.finish(window)
+
+    # Đóng Win32 splash sau khi MainWindow hiển thị
+    if _splash_ok:
+        try:
+            splash_win32.destroy()
+        except Exception:
+            pass
+
+    # Raise MainWindow lên trên cùng một lần sau khi splash đóng
+    window.raise_()
+    window.activateWindow()
 
     ret = app.exec()
     os._exit(ret)

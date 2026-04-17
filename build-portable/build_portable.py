@@ -34,6 +34,7 @@ SOURCE_FILES = [
     "tab_file.py", "tab_live.py",
     "quality_result_dialog.py",
     "streaming_asr.py", "streaming_asr_online.py",
+    "splash_win32.py",
     "config.ini", "hotword.txt", "verb-form-vocab.txt",
     "speaker_hotkeys.json", "ffmpeg.exe", "ffprobe.exe",
     "resource_monitor.py",
