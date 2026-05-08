@@ -2033,6 +2033,9 @@ class TranscriberPipeline:
         concat_audio = None  # audio chỉ chứa speech (dùng cho ASR)
 
         try:
+            if self.config.get("bypass_vad", False):
+                raise RuntimeError("VAD_BYPASSED_BY_USER")
+
             self._emit("PHASE:VAD|Đang phát hiện vùng có tiếng nói|0")
             vad_segments = get_vad_segments(audio, progress_callback=self._emit)
             self._emit(f"PHASE:VAD|Phát hiện {len(vad_segments)} đoạn nói|100")
@@ -2116,9 +2119,13 @@ class TranscriberPipeline:
                 gc.collect()
 
         except Exception as e:
-            # Fallback: silence-based chunking trên original audio nếu VAD lỗi
-            print(f"[VAD] Error: {e}, fallback to silence-based chunking")
-            self._emit("PHASE:LoadAudio|Đang phân tích khoảng lặng (fallback)|60")
+            # Fallback: silence-based chunking trên original audio nếu VAD lỗi hoặc user bypass
+            if str(e) == "VAD_BYPASSED_BY_USER":
+                print("[VAD] Bypassed by user — silence-based chunking trên toàn audio")
+                self._emit("PHASE:LoadAudio|Bỏ qua VAD, đang phân tích khoảng lặng|60")
+            else:
+                print(f"[VAD] Error: {e}, fallback to silence-based chunking")
+                self._emit("PHASE:LoadAudio|Đang phân tích khoảng lặng (fallback)|60")
 
             concat_audio = audio  # fallback: dùng nguyên audio gốc
             offset_map = [(0, 0, total_samples)]  # identity map

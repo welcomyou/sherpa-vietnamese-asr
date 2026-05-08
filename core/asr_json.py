@@ -8,7 +8,8 @@ from datetime import datetime
 
 def serialize_segments(segments, speaker_name_mapping=None, speaker_colors=None,
                        model_name='unknown', model_type='file',
-                       duration_sec=0.0, timing=None):
+                       duration_sec=0.0, timing=None,
+                       overlap_segments=None):
     """
     Chuyển đổi segments nội bộ thành cấu trúc JSON chuẩn.
 
@@ -104,6 +105,36 @@ def serialize_segments(segments, speaker_name_mapping=None, speaker_colors=None,
         'segments': json_segments
     }
 
+    # Optional: overlap segments (parallel entries cho vùng 2-speaker overlap).
+    # Additive field — reader cũ không biết về overlap_segments sẽ bỏ qua, vẫn
+    # đọc segments như bình thường.
+    if overlap_segments:
+        ov_out = []
+        for ov in overlap_segments:
+            spk_id = ov.get('speaker_id', 0)
+            sid_str = str(spk_id)
+            display_name = ov.get('speaker', f"Người nói {spk_id + 1}")
+            if speaker_name_mapping and sid_str in speaker_name_mapping:
+                display_name = speaker_name_mapping[sid_str]
+            ov_entry = {
+                'speaker': display_name,
+                'speaker_id': int(spk_id) if isinstance(spk_id, (int, float)) else spk_id,
+                'start_time': round(float(ov.get('start', 0)), 3),
+                'end_time': round(float(ov.get('end', 0)), 3),
+                'text': ov.get('text', ''),
+            }
+            if ov.get('raw_words'):
+                rw_out = []
+                for w in ov['raw_words']:
+                    rw_out.append({
+                        'text': w.get('word') or w.get('text') or '',
+                        'start': round(float(w.get('start', 0)), 3),
+                        'end': round(float(w.get('end', 0)), 3),
+                    })
+                ov_entry['raw_words'] = rw_out
+            ov_out.append(ov_entry)
+        json_data['overlap_segments'] = ov_out
+
     return json_data
 
 
@@ -177,6 +208,29 @@ def deserialize_segments(data):
             seg_counter += 1
 
     return segments, speaker_mapping, speaker_colors, has_speakers
+
+
+def deserialize_overlap_segments(data):
+    """Đọc overlap_segments từ JSON data (trả [] nếu không có).
+
+    Mỗi entry có: speaker, speaker_id, start_time, end_time, text, raw_words.
+    """
+    ov = data.get('overlap_segments') or []
+    out = []
+    for o in ov:
+        try:
+            out.append({
+                'speaker': o.get('speaker', ''),
+                'speaker_id': int(o.get('speaker_id', 0)),
+                'start': float(o.get('start_time', 0)),
+                'end': float(o.get('end_time', 0)),
+                'text': o.get('text', ''),
+                'raw_words': o.get('raw_words', []),
+                'overlap': True,
+            })
+        except (ValueError, TypeError):
+            continue
+    return out
 
 
 def load_asr_json(json_path):

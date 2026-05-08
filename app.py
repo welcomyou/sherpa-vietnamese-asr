@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
                 'save_ram': 'True',
                 'auto_analyze_quality': 'True',
                 'rms_normalize': 'False',
+                'bypass_vad': 'False',
             }
             config['LiveSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
@@ -182,6 +183,7 @@ class MainWindow(QMainWindow):
                 'save_ram': old.get('save_ram', 'True'),
                 'auto_analyze_quality': 'True',
                 'rms_normalize': 'False',
+                'bypass_vad': 'False',
             }
             config['LiveSettings'] = {
                 'model': old.get('model', 'a-little-better-model'),
@@ -204,6 +206,7 @@ class MainWindow(QMainWindow):
                 'num_speakers': '0',
                 'speaker_model': 'community1_pure_ort',
                 'save_ram': 'True',
+                'bypass_vad': 'False',
             }
         if 'LiveSettings' not in config:
             config['LiveSettings'] = {
@@ -242,7 +245,7 @@ class MainWindow(QMainWindow):
                 file_tab.combo_model, file_tab.slider_threads, file_tab.slider_punct_conf,
                 file_tab.slider_case_conf, file_tab.check_speaker_diarization, file_tab.check_show_speaker_labels,
                 file_tab.spin_num_speakers, file_tab.combo_speaker_model, file_tab.check_save_ram,
-                file_tab.check_rms_normalize,
+                file_tab.check_rms_normalize, file_tab.check_bypass_vad,
             ]
             for w in widgets_to_block:
                 w.blockSignals(True)
@@ -298,6 +301,9 @@ class MainWindow(QMainWindow):
 
                 rms_normalize = file_settings.getboolean('rms_normalize', True)
                 file_tab.check_rms_normalize.setChecked(rms_normalize)
+
+                bypass_vad = file_settings.getboolean('bypass_vad', False)
+                file_tab.check_bypass_vad.setChecked(bypass_vad)
 
 
 
@@ -376,6 +382,7 @@ class MainWindow(QMainWindow):
             self.config['FileSettings']['speaker_model'] = speaker_model
             self.config['FileSettings']['save_ram'] = str(file_tab.check_save_ram.isChecked())
             self.config['FileSettings']['rms_normalize'] = str(file_tab.check_rms_normalize.isChecked())
+            self.config['FileSettings']['bypass_vad'] = str(file_tab.check_bypass_vad.isChecked())
 
             self.save_config()
         finally:
@@ -534,6 +541,7 @@ class MainWindow(QMainWindow):
         file_tab.combo_speaker_model.currentIndexChanged.connect(self.save_file_config)
         file_tab.check_save_ram.stateChanged.connect(self.save_file_config)
         file_tab.check_rms_normalize.stateChanged.connect(self.save_file_config)
+        file_tab.check_bypass_vad.stateChanged.connect(self.save_file_config)
 
         # threshold slider removed from UI — no signal to connect
     
@@ -582,6 +590,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             file_tab.check_rms_normalize.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_bypass_vad.stateChanged.disconnect(self.save_file_config)
         except:
             pass
         try:

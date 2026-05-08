@@ -782,6 +782,7 @@ async def process_file(
                                           int(server_config.get("default_diarization_threshold"))),
 
         "rms_normalize": body.get("rms_normalize", False),
+        "bypass_vad": body.get("bypass_vad", False),
     }
 
     # Tạo meeting record cho user đã login (skip nếu đã có)

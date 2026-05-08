@@ -26,6 +26,7 @@ from core.utils import (
 from core.asr_json import (
     serialize_segments,
     deserialize_segments,
+    deserialize_overlap_segments,
     load_asr_json,
     save_asr_json,
 )

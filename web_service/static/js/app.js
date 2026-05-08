@@ -540,6 +540,7 @@ function getASRConfig() {
         diarization_threshold: parseInt(document.getElementById('cfg-threshold').value),
         gap_recover: false,
         rms_normalize: document.getElementById('cfg-rms-normalize').checked,
+        bypass_vad: document.getElementById('cfg-bypass-vad').checked,
     };
 }
 

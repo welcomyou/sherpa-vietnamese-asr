@@ -379,6 +379,7 @@ class QueueManager:
                 "rover_mode": is_rover,
 
                 "preprocess_rms_normalize": config.get("rms_normalize", False),
+                "bypass_vad": config.get("bypass_vad", False),
             }
 
             logger.info(f"Pipeline config: {pipeline_config}")

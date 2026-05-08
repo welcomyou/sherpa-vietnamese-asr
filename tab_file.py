@@ -550,6 +550,17 @@ class FileProcessingTab(QWidget):
         )
         form_config.addRow(self.check_rms_normalize)
 
+        # Bypass VAD Option (cho audio cực kỳ khó nghe)
+        self.check_bypass_vad = QCheckBox("Audio cực kỳ khó nghe (có thể làm giảm độ chính xác nếu Audio tốt)")
+        self.check_bypass_vad.setChecked(False)
+        self.check_bypass_vad.setToolTip(
+            "Bỏ qua bước phát hiện giọng nói (VAD) và transcribe toàn bộ audio.\n"
+            "• Chỉ bật khi VAD bỏ sót quá nhiều giọng nói (giọng xa mic, qua điện thoại, có nhiễu nền)\n"
+            "• Khi bật: thời gian xử lý có thể tăng 5-20 lần do phải chạy ASR trên toàn bộ file\n"
+            "• Tắt: Mặc định, dùng VAD để bỏ silence trước khi ASR (nhanh hơn)"
+        )
+        form_config.addRow(self.check_bypass_vad)
+
         # Save RAM Option
         self.check_save_ram = QCheckBox("Tiết kiệm RAM (unload model sau mỗi bước)")
         self.check_save_ram.setChecked(True)  # Mặc định bật cho desktop
@@ -1364,6 +1375,7 @@ class FileProcessingTab(QWidget):
             "speaker_model": self.combo_speaker_model.currentData(),
             "save_ram": self.check_save_ram.isChecked(),
             "preprocess_rms_normalize": self.check_rms_normalize.isChecked(),
+            "bypass_vad": self.check_bypass_vad.isChecked(),
             "resample_quality": "soxr_hq",
         }
 
@@ -1952,16 +1964,24 @@ class FileProcessingTab(QWidget):
             
             # Tạo text từ segments - giống format hiển thị trên view
             paragraphs = []
-            current_speaker = None
+            current_speaker = None  # None = chưa init; '' = không có speaker; tên = có speaker
             current_texts = []
-            
+
+            def _flush_paragraph():
+                if not current_texts:
+                    return
+                if current_speaker:
+                    paragraphs.append(f"{current_speaker}:\n{' '.join(current_texts)}")
+                else:
+                    paragraphs.append(' '.join(current_texts))
+
             for seg in self.segments:
                 speaker = seg.get('speaker', '')
                 text = seg.get('text', '').strip()
-                
+
                 if not text:
                     continue
-                
+
                 # Kiểm tra speaker name mapping
                 speaker_id = seg.get('speaker_id', 0)
                 sid_str = str(speaker_id)
@@ -1969,20 +1989,18 @@ class FileProcessingTab(QWidget):
                     display_name = self.speaker_name_mapping[sid_str]
                 else:
                     display_name = speaker
-                
-                # Nếu đổi speaker, lưu paragraph cũ và bắt đầu paragraph mới
-                if display_name != current_speaker and display_name:
-                    if current_speaker and current_texts:
-                        paragraphs.append(f"{current_speaker}:\n{' '.join(current_texts)}")
+                display_name = display_name or ''
+
+                # Đổi speaker (kể cả khi từ có sang không có hoặc ngược lại) → flush paragraph cũ
+                if display_name != current_speaker:
+                    _flush_paragraph()
                     current_speaker = display_name
                     current_texts = [text]
                 else:
                     current_texts.append(text)
-            
-            # Thêm paragraph cuối cùng
-            if current_speaker and current_texts:
-                paragraphs.append(f"{current_speaker}:\n{' '.join(current_texts)}")
-            
+
+            _flush_paragraph()
+
             full_text = '\n'.join(paragraphs)
             
             # Copy vào clipboard
