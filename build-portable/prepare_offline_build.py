@@ -67,24 +67,29 @@ MODELS_CONFIG = {
     },
     
     # NLP Models
+    # ViBERT-capu: ONNX export (FP32 + INT8) đã làm sẵn — không cần kéo pytorch_model.bin 440MB
+    # Source code conversion: convert_onnx/export_vibert_onnx.py (gốc dragonSwing/vibert-capu)
     "vibert-capu": {
         "type": "huggingface",
-        "repo_id": "dragonSwing/vibert-capu",
+        "repo_id": "welcomyou/vibert-capu-onnx",
         "local_dir": "vibert-capu",
-        "description": "ViBERT-capu (Punctuation Restoration)",
-        "check_file": "pytorch_model.bin",
-        "revision": "261c60f2c30b02455dfce21a43c3ef14fc26992c",
+        "description": "ViBERT-capu ONNX (Punctuation + Capitalization, FP32 + INT8)",
+        "check_file": "vibert-capu.onnx",
+        "revision": "a7754d037f4a9e29f7f3224f27acb60149eab874",
         "integrity_files": {
-            ".gitattributes": "983f034a5d3898b49e1c02cf4941beaf38849e8f01912ad6d8697e96270ee997",
             "config.json": "4f3c9958d7975331346fc29c020159a8a01e153462d66c5a751eb1642cb95791",
             "configuration_seq2labels.py": "90c983b08002f4b1469eefd8d853ea3a2cc7e4183efc79e0b490fc12d21acf20",
             "gec_model.py": "ca2dee13b65c2b12e67e54a02263d68dad6dae0418ceb0c7b6f410b196aba058",
             "modeling_seq2labels.py": "0fd8e3c2468122e987a064d053c9d7f81908251685748b68f534df8a74ff91bf",
-            "pytorch_model.bin": "d22fc1de03bc10237eafbd7487c04bc4ef6e890ecf3a77aa678e5995bc251bfd",
-            "README.md": "a25178ebe73e0d4f0ea15a6c2ef5456e1538bc49c8758c433d23ce67d8cc4967",
             "utils.py": "d253d2e9d2563ca3c1a807b875f1859328c80a0240e968a9c44ff4fb252d61f7",
             "verb-form-vocab.txt": "6ac7b3e2b944ba71f4d70231452ecc895d920444cf11e5e29252a8aca15e3c2c",
+            "vibert-capu.int8.onnx": "67278b23502bbd744538e2bd9a6748b61cce171cfba6c671c2e2a46f892166fa",
+            "vibert-capu.onnx": "269a59c50977cef010292b1530a77df3073420ff6be409c1a55eeb77a8444e44",
+            "vocab.txt": "b32ccb4ca8bee5eda7a0f55f7adebaa515be742c9f765151ffefcd29fcb542a1",
             "vocabulary.py": "098129828abdab72ba2ff155281f703bb5d83e80d680ee9859125904b2e38b9a",
+            "vocabulary/d_tags.txt": "926596d65d7b928a3d4dfb553c0cd2a8189f8f2ca7cb0ba26cfbb935b5c5dfad",
+            "vocabulary/labels.txt": "a31075cfa185b5d24c3b65c009ad0740636b286090f78419eaba2d34202c2b45",
+            "vocabulary/non_padded_namespaces.txt": "863044919d9f9c1c04aba282ac981ab0157d6ab08737a96c72f7e15887911db0",
         },
     },
     
@@ -166,20 +171,42 @@ MODELS_CONFIG = {
         "repo_id": "altunenes/speaker-diarization-community-1-onnx",
         "filename": "embedding_model.onnx",
         "local_dir": "pyannote-onnx",
-        "description": "Altunenes Embedding ONNX",
+        "description": "Altunenes Embedding ONNX (fallback nếu không có split)",
         "check_file": "embedding_model.onnx",
         "revision": "e2e09da94ae093a56cd5a60a09b138ae3da1959c",
         "sha256": "b62448ababb2ee9fc1ce51870553507893ea427fb1fd77e199af425ff1ed0677",
     },
+
+    # Pyannote Embedding Split (encoder-only + Gemm projection .npy)
+    # Cho phép masked stats pooling — cần thiết để diarization xử lý overlap đúng và nhanh.
+    # ~30x nhanh hơn full embedding model trên long-form audio (xem speaker_diarization_pure_ort.py).
+    # Source code conversion: convert_onnx/split_pyannote_embedding.py (gốc altunenes embedding_model.onnx)
+    "pyannote_split_encoder": {
+        "type": "huggingface",
+        "repo_id": "welcomyou/pyannote-community-1-onnx-split",
+        "local_dir": "pyannote-onnx",
+        "description": "Pyannote Community-1 Embedding split (encoder + Gemm .npy, masked pooling)",
+        "check_file": "embedding_encoder.onnx",
+        "revision": "cde44c2db938c8abb755853b9a87cb3179c47803",
+        "integrity_files": {
+            "embedding_encoder.onnx": "9903474d6230e5e858dc6b6382a0e3f6e402ea9b4210e1e2f2bee60a33830e7a",
+            "resnet_seg_1_weight.npy": "ca91250bb69bea25bdc7c710e253a74450a415b3da587e53e04fd5a01abbe4da",
+            "resnet_seg_1_bias.npy": "51fcb6d0530993ad044a797310f4bfd6af266af0dbf364f6bc0008fdd63520cd",
+        },
+    },
     
     # 3DSpeaker CAM++ (192-dim, dùng bởi speaker_diarization_3dspeaker_campp.py)
+    # ONNX export tự làm — gốc PyTorch trên ModelScope (không có ONNX official trên HF/ModelScope)
+    # Source code conversion: temp/export_campplus_onnx.py (gốc github.com/modelscope/3D-Speaker)
     "campp_3dspeaker": {
-        "type": "manual_local",
+        "type": "huggingface_file",
+        "repo_id": "welcomyou/campplus-3dspeaker-200k-onnx",
+        "filename": "campplus_cn_en_common_200k.onnx",
         "local_dir": "campp-3dspeaker",
-        "description": "CAM++ 192-dim Speaker Embedding (3D-Speaker, 27MB)",
+        "description": "CAM++ 192-dim Speaker Embedding (3D-Speaker, 200k speakers, 27MB)",
         "check_file": "campplus_cn_en_common_200k.onnx",
+        "revision": "cf8f96b6ca0255d3af39bd12b41e49be955eefa6",
         "sha256": "dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f",
-        "manual_source_hint": "Vendor file from a trusted internal artifact store or a pinned upstream source before build.",
     },
 
     # Silero VAD (dùng bởi 3dspeaker_campp diarization)
