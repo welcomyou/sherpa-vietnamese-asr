@@ -9,7 +9,7 @@ Dự án đã loại bỏ PyTorch khỏi 3 pipeline chính:
 |----------|-----------|------------|--------|
 | **Thêm dấu câu + viết hoa** | ViBERT ([dragonSwing/vibert-capu](https://huggingface.co/dragonSwing/vibert-capu)) | ONNX — xong (FP32 + INT8) | [`export_vibert_onnx.py`](export_vibert_onnx.py) |
 | **Phân biệt người nói** | pyannote Community-1 (seg + emb + PLDA) | ONNX — xong (Pure ORT pipeline + masked-pool split) | [`split_pyannote_embedding.py`](split_pyannote_embedding.py) |
-| **Speaker embedding (Senko)** | CAM++ 3D-Speaker 200k ([ModelScope](https://www.modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced)) | ONNX — xong | [`../temp/export_campplus_onnx.py`](../temp/export_campplus_onnx.py) |
+| **Speaker embedding (Senko)** | CAM++ 3D-Speaker 200k ([ModelScope](https://www.modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced)) | ONNX — xong | [`export_campplus_onnx.py`](export_campplus_onnx.py) |
 
 ## Models đã upload lên HuggingFace
 

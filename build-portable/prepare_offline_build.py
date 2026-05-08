@@ -205,7 +205,7 @@ MODELS_CONFIG = {
         "local_dir": "campp-3dspeaker",
         "description": "CAM++ 192-dim Speaker Embedding (3D-Speaker, 200k speakers, 27MB)",
         "check_file": "campplus_cn_en_common_200k.onnx",
-        "revision": "cf8f96b6ca0255d3af39bd12b41e49be955eefa6",
+        "revision": "6265ff7af2a104d745b4389026ed9815c6c1c6ff",
         "sha256": "dd1740aa1e1ffa3895f96aef2166b8af2bb2ad09c00769dd275ee36aef6a2a7f",
     },
 
