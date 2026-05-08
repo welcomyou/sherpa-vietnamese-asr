@@ -15,7 +15,7 @@ from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from core.config import BASE_DIR, COLORS, MODEL_DOWNLOAD_INFO, DEBUG_LOGGING, ALLOWED_THREADS
 from core.config import get_speaker_embedding_models, is_diarization_available
 from core.utils import normalize_vietnamese
-from core.asr_json import serialize_segments, deserialize_segments, load_asr_json, save_asr_json as _save_asr_json_file
+from core.asr_json import serialize_segments, deserialize_segments, load_asr_json, save_asr_json as _save_asr_json_file, deserialize_overlap_segments
 from common import (DragDropLabel, SearchWidget, ClickableTextEdit,
                     SpeakerRenameDialog, SplitSpeakerDialog, SpeakerDiarizationThread,
                     TranscriberThread, show_missing_model_dialog)
@@ -169,7 +169,9 @@ class FileProcessingTab(QWidget):
         self.transcriber = None
         self.default_model_path = os.path.join(BASE_DIR, "models", "zipformer-30m-rnnt-6000h")
         self.segments = []
+        self.overlap_segments = []  # parallel entries for overlap regions (opt-in)
         self.current_highlight_index = -1
+        self.current_highlight_partner_index = -1  # dual-highlight cho overlap segments
         self._playback_cache = {}  # {original_file_path: temp_wav_path}
         
         # Search state
@@ -516,8 +518,24 @@ class FileProcessingTab(QWidget):
         
         embedding_layout.addWidget(self.combo_speaker_model, stretch=1)
         embedding_layout.addWidget(self.btn_rerun_diarization)
-        
+
         form_config.addRow("  └─ Model embedding:", embedding_layout)
+
+        # Overlap separation (2 người nói cùng lúc)
+        self.check_overlap_separation = QCheckBox(
+            "Tách giọng khi nhiều người nói chen lẫn nhau (chạy chậm hơn)")
+        self.check_overlap_separation.setChecked(False)
+        self.check_overlap_separation.setEnabled(False)
+        self.check_overlap_separation.setToolTip(
+            "Phát hiện các đoạn có 2 người nói cùng lúc và tách riêng giọng của mỗi\n"
+            "người để ASR riêng. Kết quả: mỗi người có transcript riêng trong vùng\n"
+            "overlap, khi phát lại UI highlight đồng thời cả 2 dòng text.\n\n"
+            "Yêu cầu: Pyannote Community-1 hoặc Senko CAM++ (đã hỗ trợ).\n"
+            "Chi phí: Conv-TasNet chạy thêm trên các vùng overlap (~0.2s/1s overlap).\n"
+            "File 1 giờ có 5% overlap → thêm ~30s xử lý."
+        )
+        self.check_overlap_separation.stateChanged.connect(self.on_overlap_separation_changed)
+        form_config.addRow("  └─", self.check_overlap_separation)
 
         # Merge short speaker islands
         # NaturalTurn luôn bật — merge_short_speaker luôn True, không cần UI
@@ -841,7 +859,11 @@ class FileProcessingTab(QWidget):
         self.spin_num_speakers.setEnabled(is_checked)
         self.combo_speaker_model.setEnabled(is_checked)
         self.check_show_speaker_labels.setEnabled(is_checked)
+        self.check_overlap_separation.setEnabled(is_checked)
         self.btn_rerun_diarization.setEnabled(is_checked and bool(self.segments))
+
+    def on_overlap_separation_changed(self, state):
+        pass
 
     def on_show_speaker_labels_changed(self, state):
         self.render_text_content(immediate=True)
@@ -1082,6 +1104,7 @@ class FileProcessingTab(QWidget):
             self.speaker_colors = thread.result_speaker_colors
         self.has_speaker_diarization = thread.result_has_speakers
         self.current_highlight_index = -1
+        self.current_highlight_partner_index = -1
         self._last_rendered_highlight = -1
 
         # Hiển thị tab Người nói từ JSON
@@ -1336,6 +1359,7 @@ class FileProcessingTab(QWidget):
             "punctuation_confidence": confidence,
             "case_confidence": case_confidence,
             "speaker_diarization": self.check_speaker_diarization.isChecked() and DIARIZATION_AVAILABLE,
+            "overlap_separation": self.check_overlap_separation.isChecked() and self.check_speaker_diarization.isChecked() and DIARIZATION_AVAILABLE,
             "num_speakers": -1 if self.spin_num_speakers.currentIndex() == 0 else int(self.spin_num_speakers.currentText()),
             "speaker_model": self.combo_speaker_model.currentData(),
             "save_ram": self.check_save_ram.isChecked(),
@@ -1453,6 +1477,7 @@ class FileProcessingTab(QWidget):
         self.paragraphs = []
         self.search_matches = []
         self.current_highlight_index = -1
+        self.current_highlight_partner_index = -1
         self.loaded_from_json = False
         self.text_output.clear()
         
@@ -1660,6 +1685,34 @@ class FileProcessingTab(QWidget):
         
         return new_segments
     
+    def _merge_overlap_segments(self):
+        """Merge overlap_segments vào self.segments tại đúng timestamp.
+
+        Mỗi overlap entry (2 người nói cùng thời điểm) được insert vào timeline
+        sorted by start. Mỗi segment được đánh dấu `overlap=True`.
+
+        Render logic hiện tại sẽ hiển thị như segment bình thường, nhưng với
+        flag `overlap` để UI có thể styling khác (prefix/icon).
+        """
+        if not getattr(self, 'overlap_segments', None):
+            return
+        # Convert overlap entries sang format segment chuẩn
+        for ov in self.overlap_segments:
+            seg = {
+                'text': ov.get('text', ''),
+                'start': float(ov.get('start', 0)),
+                'start_time': float(ov.get('start', 0)),
+                'end': float(ov.get('end', 0)),
+                'speaker': ov.get('speaker', f"Người nói {ov.get('speaker_id', 0) + 1}"),
+                'speaker_id': ov.get('speaker_id', 0),
+                'overlap': True,
+                'raw_words': ov.get('raw_words', []),
+                'partials': [{'text': ov.get('text', ''), 'timestamp': float(ov.get('end', 0))}],
+            }
+            self.segments.append(seg)
+        # Re-sort theo start
+        self.segments.sort(key=lambda s: s.get('start', s.get('start_time', 0)))
+
     def on_finished(self, text, result_data):
         try:
             self.segments = result_data.get("segments", [])
@@ -1668,6 +1721,11 @@ class FileProcessingTab(QWidget):
             self.paragraphs = result_data.get("paragraphs", [])
             self.has_speaker_diarization = result_data.get("has_speaker_diarization", False)
             self.speaker_segments_raw = result_data.get("speaker_segments_raw", [])
+            # Overlap segments (parallel entries cho vùng overlap) — additive field
+            self.overlap_segments = result_data.get("overlap_segments", []) or []
+            # Merge overlap segments vào timeline chính với flag overlap=True
+            # để UI có thể render + highlight cùng lúc với non-overlap segments.
+            self._merge_overlap_segments()
             timing = result_data.get("timing", {})
             
             # Nếu đang ở mode text-only, map speaker từ segments cũ sang mới
@@ -1861,7 +1919,8 @@ class FileProcessingTab(QWidget):
                 speaker_colors=self.speaker_colors,
                 model_name=model_name,
                 model_type='file',
-                duration_sec=duration_sec
+                duration_sec=duration_sec,
+                overlap_segments=getattr(self, 'overlap_segments', None),
             )
 
             # Lưu nội dung tab Người nói vào JSON
@@ -1944,10 +2003,13 @@ class FileProcessingTab(QWidget):
             segments, speaker_mapping, speaker_colors, has_speakers = deserialize_segments(data)
 
             self.segments = segments
+            self.overlap_segments = deserialize_overlap_segments(data)
+            self._merge_overlap_segments()
             self.speaker_name_mapping = speaker_mapping
             self.speaker_colors = speaker_colors
             self.has_speaker_diarization = has_speakers
             self.current_highlight_index = -1
+            self.current_highlight_partner_index = -1
             self._last_rendered_highlight = -1
 
             # Hiển thị tab Người nói từ JSON
@@ -2345,7 +2407,8 @@ class FileProcessingTab(QWidget):
         # Escape HTML trước
         display_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-        is_audio_highlight = (self.current_highlight_index == anchor_id)
+        is_audio_highlight = (self.current_highlight_index == anchor_id or
+                              self.current_highlight_partner_index == anchor_id)
 
         # Kiểm tra có search matches không
         if not self.search_matches or self.current_search_index < 0:
@@ -2401,7 +2464,8 @@ class FileProcessingTab(QWidget):
         
         if not matches_in_chunk:
             # Không có match trong chunk này
-            is_audio_highlight = (self.current_highlight_index == anchor_id)
+            is_audio_highlight = (self.current_highlight_index == anchor_id or
+                              self.current_highlight_partner_index == anchor_id)
             if is_audio_highlight:
                 return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{display_text}</a>"
             else:
@@ -2455,7 +2519,8 @@ class FileProcessingTab(QWidget):
             parts.append(post_text)
 
         # Audio highlight cho toàn chunk nếu cần
-        is_audio_highlight = (self.current_highlight_index == anchor_id)
+        is_audio_highlight = (self.current_highlight_index == anchor_id or
+                              self.current_highlight_partner_index == anchor_id)
         if is_audio_highlight:
             return f"<a href='s_{anchor_id}' style='color: {COLORS['text_dark']}; text-decoration: none; background-color: {COLORS['highlight']}; padding: 2px 4px; border-radius: 3px; border: 1px solid {COLORS['highlight']};'>{''.join(parts)}</a>"
         else:
@@ -2469,8 +2534,11 @@ class FileProcessingTab(QWidget):
             self._do_render_speaker_view()
             return
 
-        highlight_changed = (self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1))
+        highlight_changed = (
+            self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1) or
+            self.current_highlight_partner_index != getattr(self, '_last_rendered_partner', -1))
         self._last_rendered_highlight = self.current_highlight_index
+        self._last_rendered_partner = self.current_highlight_partner_index
 
         para_boundaries = set()
         if self.paragraphs:
@@ -2632,8 +2700,11 @@ class FileProcessingTab(QWidget):
         return merged
 
     def _do_render_speaker_view(self):
-        highlight_changed = (self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1))
+        highlight_changed = (
+            self.current_highlight_index != getattr(self, '_last_rendered_highlight', -1) or
+            self.current_highlight_partner_index != getattr(self, '_last_rendered_partner', -1))
         self._last_rendered_highlight = self.current_highlight_index
+        self._last_rendered_partner = self.current_highlight_partner_index
 
         self._block_render_count = 0
         self.merged_speaker_blocks = []
@@ -3177,7 +3248,7 @@ class FileProcessingTab(QWidget):
         # Tính anchor_id từ best_idx
         if best_idx != -1:
             best_anchor = 1000000 + best_idx * 1000
-            
+
             # Phân giải đến mức partial chunk nếu có
             seg = self.segments[best_idx]
             partials = seg.get('partials', [])
@@ -3189,8 +3260,45 @@ class FileProcessingTab(QWidget):
                         break
                 best_anchor += best_chunk_idx
 
-            if best_anchor != self.current_highlight_index:
-                self.highlight_segment(best_anchor)
+            # Dual-highlight cho overlap region: nếu best segment có overlap=True,
+            # tìm partner segment (cùng time range, speaker khác, overlap=True) để
+            # highlight đồng thời cả 2 dòng text.
+            partner_anchor = self._find_overlap_partner(best_idx)
+
+            if (best_anchor != self.current_highlight_index or
+                    partner_anchor != self.current_highlight_partner_index):
+                self.highlight_segment(best_anchor, partner_anchor)
+
+    def _find_overlap_partner(self, seg_idx):
+        """Tìm partner segment cho dual-highlight overlap region.
+
+        Return anchor_id của partner (int) hoặc -1 nếu segment không phải overlap
+        hoặc không tìm thấy partner.
+
+        Partner = segment cùng (start, end, overlap=True) nhưng speaker_id khác.
+        """
+        if not (0 <= seg_idx < len(self.segments)):
+            return -1
+        seg = self.segments[seg_idx]
+        if not seg.get('overlap', False):
+            return -1
+        s_start = seg.get('start', seg.get('start_time', 0))
+        s_end = seg.get('end', s_start)
+        s_spk = seg.get('speaker_id', -1)
+        for j, other in enumerate(self.segments):
+            if j == seg_idx:
+                continue
+            if not other.get('overlap', False):
+                continue
+            o_start = other.get('start', other.get('start_time', 0))
+            o_end = other.get('end', o_start)
+            o_spk = other.get('speaker_id', -1)
+            # Match same time window (tolerance 0.05s) + different speaker
+            if (abs(o_start - s_start) < 0.05 and abs(o_end - s_end) < 0.05
+                    and o_spk != s_spk):
+                # Partner anchor: dùng chunk_idx=0 (partials của overlap chỉ có 1 entry)
+                return 1000000 + j * 1000
+        return -1
 
     def fmt_ms(self, ms):
         s = int(ms / 1000)
@@ -3198,10 +3306,14 @@ class FileProcessingTab(QWidget):
         s = s % 60
         return f"{m:02}:{s:02}"
 
-    def highlight_segment(self, idx):
-        if idx == self.current_highlight_index:
+    def highlight_segment(self, idx, partner_idx=-1):
+        """Update highlight. `partner_idx` cho overlap dual-highlight (nếu có).
+        Pass -1 nếu không phải overlap hoặc không có partner.
+        """
+        if idx == self.current_highlight_index and partner_idx == self.current_highlight_partner_index:
             return
         self.current_highlight_index = idx
+        self.current_highlight_partner_index = partner_idx
         self.pending_highlight_idx = idx
         self.render_debounce_timer.stop()
         self.render_debounce_timer.start(50)
@@ -3260,6 +3372,9 @@ class FileProcessingTab(QWidget):
             self._user_clicked_timestamp = time.time() * 1000
 
             self.current_highlight_index = idx
+            # Khi click manual, compute partner cho overlap segment
+            seg_idx_only = (idx - 1000000) // 1000 if idx >= 1000000 else idx
+            self.current_highlight_partner_index = self._find_overlap_partner(seg_idx_only)
             self.player.setPosition(int(timestamp_sec * 1000))
             if DEBUG_LOGGING:
                 print(f"[seek_to_sentence] setPosition({int(timestamp_sec * 1000)}ms)")

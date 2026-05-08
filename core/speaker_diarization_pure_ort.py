@@ -396,6 +396,9 @@ class PureOrtDiarizer:
         self.emb_b = None  # Gemm bias
         self.plda_data = None
         self.speaker_centroids = None  # (n_speakers, 256) — saved after clustering
+        # Overlap regions (populated sau process()) — additive API cho feature
+        # "tách giọng khi overlap". Format: list of (start_sec, end_sec).
+        self._last_overlap_regions = []
 
     def initialize(self):
         import onnxruntime as ort
@@ -445,6 +448,57 @@ class PureOrtDiarizer:
 
         self.plda_data = load_plda(self.model_dir)
 
+    @property
+    def overlap_regions(self):
+        """List of (start_sec, end_sec) where 2 speakers overlap.
+
+        Populated sau process(). Additive API — không phá segments cũ.
+        Mức 1: chỉ time ranges. Downstream dùng segments[] để suy participants.
+        """
+        return list(self._last_overlap_regions)
+
+    def _extract_overlap_regions(self, binarized, chunk_starts, num_seg_frames,
+                                  duration, min_duration=0.3):
+        """Trả về [(start_sec, end_sec), ...] với 2-speaker overlap.
+
+        Aggregate frame-level overlap probability across sliding-window chunks.
+        """
+        frame_dur = CHUNK_DURATION / num_seg_frames
+        n_out = int(duration / frame_dur) + 1
+        overlap_count = np.zeros(n_out, dtype=np.float32)
+        total_count = np.zeros(n_out, dtype=np.float32)
+        for c_idx, cs in enumerate(chunk_starts):
+            t0 = cs / SAMPLE_RATE
+            # sum across speaker slot per frame → > 1 = overlap (powerset code has 2-spk classes)
+            sums = binarized[c_idx].sum(axis=-1)  # (num_seg_frames,)
+            for f in range(num_seg_frames):
+                out_f = int((t0 + f * frame_dur) / frame_dur)
+                if 0 <= out_f < n_out:
+                    total_count[out_f] += 1
+                    if sums[f] >= 2:
+                        overlap_count[out_f] += 1
+        with np.errstate(divide='ignore', invalid='ignore'):
+            overlap_prob = np.where(total_count > 0, overlap_count / total_count, 0.0)
+        is_overlap = overlap_prob > 0.5
+
+        regions = []
+        in_reg = False
+        start_t = 0.0
+        for f, active in enumerate(is_overlap):
+            t = f * frame_dur
+            if active and not in_reg:
+                start_t = t
+                in_reg = True
+            elif not active and in_reg:
+                if t - start_t >= min_duration:
+                    regions.append((start_t, min(t, duration)))
+                in_reg = False
+        if in_reg:
+            t = len(is_overlap) * frame_dur
+            if t - start_t >= min_duration:
+                regions.append((start_t, min(t, duration)))
+        return regions
+
     def process(self, audio_file, progress_callback=None,
                 audio_data=None, audio_sample_rate=None):
         import soundfile
@@ -477,6 +531,11 @@ class PureOrtDiarizer:
         # 3. Powerset decode (argmax → one_hot → mapping = HARD binary)
         binarized = POWERSET_MAP[np.argmax(seg_logits, axis=-1)]
         del seg_logits  # đã dùng xong, giải phóng ~119MB (2hr)
+
+        # 3b. Extract overlap regions từ powerset (additive, không phá clustering flow).
+        # Frame nào có >=2 speaker slot active → overlap. Aggregate qua overlapping chunks.
+        self._last_overlap_regions = self._extract_overlap_regions(
+            binarized, chunk_starts, num_seg_frames, duration)
 
         # 4. Speaker count (pyannote: trim(0.0,0.0) → aggregate → round)
         t0 = time.perf_counter()

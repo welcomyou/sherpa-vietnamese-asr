@@ -3,23 +3,25 @@
 Hướng dẫn export tất cả model từ PyTorch sang ONNX Runtime.
 Sau khi export, toàn bộ pipeline chạy **không cần PyTorch** (~2GB).
 
-Dự án đã loại bỏ PyTorch khỏi 3 pipeline chính:
+Dự án đã loại bỏ PyTorch khỏi 4 pipeline chính:
 
 | Pipeline | Model gốc | Trạng thái | Script |
 |----------|-----------|------------|--------|
 | **Thêm dấu câu + viết hoa** | ViBERT ([dragonSwing/vibert-capu](https://huggingface.co/dragonSwing/vibert-capu)) | ONNX — xong (FP32 + INT8) | [`export_vibert_onnx.py`](export_vibert_onnx.py) |
 | **Phân biệt người nói** | pyannote Community-1 (seg + emb + PLDA) | ONNX — xong (Pure ORT pipeline + masked-pool split) | [`split_pyannote_embedding.py`](split_pyannote_embedding.py) |
 | **Speaker embedding (Senko)** | CAM++ 3D-Speaker 200k ([ModelScope](https://www.modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced)) | ONNX — xong | [`export_campplus_onnx.py`](export_campplus_onnx.py) |
+| **Tách giọng overlap (2-speaker)** | Conv-TasNet ([JorisCos/ConvTasNet_Libri2Mix_sepclean_16k](https://huggingface.co/JorisCos/ConvTasNet_Libri2Mix_sepclean_16k)) | ONNX — xong (FP32, INT8 broken) | [`export_convtasnet_onnx.py`](export_convtasnet_onnx.py) |
 
 ## Models đã upload lên HuggingFace
 
-Tất cả 3 ONNX export đã được publish (license inherited từ source) — `prepare_offline_build.py` tự download và verify SHA256:
+Tất cả 4 ONNX export đã được publish (license inherited từ source) — `prepare_offline_build.py` tự download và verify SHA256:
 
 | HF Repo | License | Source |
 |---------|---------|--------|
 | [welcomyou/vibert-capu-onnx](https://huggingface.co/welcomyou/vibert-capu-onnx) | CC-BY-SA-4.0 | dragonSwing/vibert-capu |
 | [welcomyou/campplus-3dspeaker-200k-onnx](https://huggingface.co/welcomyou/campplus-3dspeaker-200k-onnx) | Apache-2.0 | github.com/modelscope/3D-Speaker |
 | [welcomyou/pyannote-community-1-onnx-split](https://huggingface.co/welcomyou/pyannote-community-1-onnx-split) | CC-BY-4.0 | pyannote/speaker-diarization-community-1 (via altunenes ONNX) |
+| [welcomyou/convtasnet-libri2mix-16k-onnx](https://huggingface.co/welcomyou/convtasnet-libri2mix-16k-onnx) | CC-BY-SA-4.0 | JorisCos/ConvTasNet_Libri2Mix_sepclean_16k (asteroid) |
 
 Collection: [welcomyou/sherpa-vietnamese-asr](https://huggingface.co/collections/welcomyou/sherpa-vietnamese-asr-69fd2a837f318846d84c15d4)
 

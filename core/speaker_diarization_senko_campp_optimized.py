@@ -335,6 +335,9 @@ class SenkoCamppDiarizerOptimized:
         self.emb_sess = None
         self.seg_sess = None
         self.batch_size = 32  # OPT-1: batch inference
+        # Overlap regions (populated by _pyannote_vad) — additive API cho feature
+        # "tách giọng khi overlap". Format: list of (start_sec, end_sec).
+        self._last_overlap_regions = []
 
     def initialize(self):
         """Load CAM++ 192-dim ONNX + pyannote segmentation ONNX."""
@@ -375,6 +378,15 @@ class SenkoCamppDiarizerOptimized:
               f" | window={self.window}s, step={self.step}s, mer_cos={self.mer_cos}"
               f" | batch={self.batch_size}, vad_step=5s")
 
+    @property
+    def overlap_regions(self):
+        """List of (start_sec, end_sec) where 2 speakers overlap.
+
+        Populated sau process(). Additive API — không phá output cũ.
+        Mức 1: chỉ time ranges, không kèm participant IDs. Downstream map qua segments[].
+        """
+        return list(self._last_overlap_regions)
+
     def _pyannote_vad(self, audio, sr=SAMPLE_RATE, min_speech=0.25, min_silence=0.1):
         """Pyannote segmentation as VAD — OPT-3: step=5s (was 1s)."""
         chunk_samples = int(10.0 * sr)
@@ -412,22 +424,48 @@ class SenkoCamppDiarizerOptimized:
         frame_dur = 10.0 / n_seg_frames
         total_dur = total / sr
 
-        # Aggregate speech probability
+        # Aggregate speech probability + overlap (2-speaker simultaneous) probability.
+        # Info overlap đã có trong binarized (powerset), chỉ thêm accumulator.
         n_out = int(total_dur / frame_dur) + 1
         speech_count = np.zeros(n_out, dtype=np.float32)
+        overlap_count = np.zeros(n_out, dtype=np.float32)
         total_count = np.zeros(n_out, dtype=np.float32)
         for c_idx, cs in enumerate(starts):
             t0 = cs / sr
             for f in range(n_seg_frames):
                 out_f = int((t0 + f * frame_dur) / frame_dur)
                 if 0 <= out_f < n_out:
-                    if binarized[c_idx, f].sum() > 0:
+                    active_spk = int(binarized[c_idx, f].sum())
+                    if active_spk > 0:
                         speech_count[out_f] += 1
+                    if active_spk >= 2:
+                        overlap_count[out_f] += 1
                     total_count[out_f] += 1
 
         with np.errstate(divide='ignore', invalid='ignore'):
             speech_prob = np.where(total_count > 0, speech_count / total_count, 0)
+            overlap_prob = np.where(total_count > 0, overlap_count / total_count, 0)
         is_speech = speech_prob > 0.5
+        is_overlap = overlap_prob > 0.5
+
+        # Build overlap regions (additive — không phá speech VAD cũ)
+        _overlap_regs = []
+        _in_reg = False
+        _reg_start = 0.0
+        for _f, _active in enumerate(is_overlap):
+            _t = _f * frame_dur
+            if _active and not _in_reg:
+                _reg_start = _t
+                _in_reg = True
+            elif not _active and _in_reg:
+                if _t - _reg_start >= 0.3:
+                    _overlap_regs.append((_reg_start, min(_t, total_dur)))
+                _in_reg = False
+        if _in_reg:
+            _t = len(is_overlap) * frame_dur
+            if _t - _reg_start >= 0.3:
+                _overlap_regs.append((_reg_start, min(_t, total_dur)))
+        self._last_overlap_regions = _overlap_regs
 
         # Convert to regions
         regions = []

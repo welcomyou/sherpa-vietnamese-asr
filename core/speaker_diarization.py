@@ -431,6 +431,18 @@ class SpeakerDiarizer:
         self._pyannote_backend.initialize()
         self.model_info = get_model_info("community1_pure_ort")
 
+    @property
+    def overlap_regions(self):
+        """Passthrough cho overlap_regions từ backend (PureOrtDiarizer hoặc
+        PureOrtDiarizerCampp). Trả [] nếu backend chưa chạy hoặc không có.
+
+        Dùng cho feature overlap_separation — asr_engine.py truy cập
+        diarizer.overlap_regions ở đây mà không cần biết backend cụ thể.
+        """
+        if self._pyannote_backend is not None and hasattr(self._pyannote_backend, 'overlap_regions'):
+            return list(self._pyannote_backend.overlap_regions)
+        return []
+
     def process(self,
                 audio_file: str,
                 progress_callback: Optional[Callable[[int, int], int]] = None,

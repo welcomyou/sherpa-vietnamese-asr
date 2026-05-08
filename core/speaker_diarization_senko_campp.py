@@ -373,6 +373,10 @@ class SenkoCamppDiarizer:
         self.min_duration_off = min_duration_off
         self.emb_sess = None
         self.seg_sess = None
+        # Overlap regions (populated by _pyannote_vad) — additive API, không phá code cũ.
+        # Format: list of (start_sec, end_sec). Không chứa participant IDs — chỉ biết
+        # "vùng này có overlap". Pipeline downstream dùng segments[] để resolve participants.
+        self._last_overlap_regions = []
 
     def initialize(self):
         """Load CAM++ 192-dim ONNX + Silero VAD ONNX."""
@@ -413,6 +417,40 @@ class SenkoCamppDiarizer:
         print(f"[Senko-CAM++] Loaded CAM++ 192-dim + {vad_name}"
               f" | window={self.window}s, step={self.step}s, mer_cos={self.mer_cos}")
 
+    @staticmethod
+    def _regions_from_mask(mask, frame_dur, total_dur, min_duration=0.3):
+        """Convert per-frame bool mask to list of (start_sec, end_sec) regions.
+
+        min_duration: bỏ qua region ngắn hơn (tránh nhiễu nhỏ).
+        """
+        regions = []
+        in_reg = False
+        start_t = 0.0
+        for f, active in enumerate(mask):
+            t = f * frame_dur
+            if active and not in_reg:
+                start_t = t
+                in_reg = True
+            elif not active and in_reg:
+                if t - start_t >= min_duration:
+                    regions.append((start_t, min(t, total_dur)))
+                in_reg = False
+        if in_reg:
+            t = len(mask) * frame_dur
+            if t - start_t >= min_duration:
+                regions.append((start_t, min(t, total_dur)))
+        return regions
+
+    @property
+    def overlap_regions(self):
+        """Public accessor: list of (start_sec, end_sec) với overlap 2-người nói.
+
+        Populated sau khi process() chạy. Trả [] nếu chưa process hoặc không có overlap.
+        API phát hiện ở Mức 1: chỉ time ranges, không có participant IDs. Downstream dùng
+        kết hợp với segments[] (từ process()) để suy ra participants overlap trong mỗi vùng.
+        """
+        return list(self._last_overlap_regions)
+
     def _pyannote_vad(self, audio, sr=SAMPLE_RATE, min_speech=0.25, min_silence=0.1):
         """Pyannote segmentation as VAD — detect speech regions from powerset output."""
         chunk_samples = int(10.0 * sr)
@@ -449,22 +487,34 @@ class SenkoCamppDiarizer:
         frame_dur = 10.0 / n_seg_frames
         total_dur = total / sr
 
-        # Aggregate: frame-level speech probability across overlapping chunks
+        # Aggregate: frame-level speech probability across overlapping chunks.
+        # ALSO track 2-speaker overlap (powerset sum >= 2) — needed by overlap separation
+        # feature. Data đã có sẵn trong binarized, chỉ cần đếm thêm một accumulator.
         n_out = int(total_dur / frame_dur) + 1
         speech_count = np.zeros(n_out, dtype=np.float32)
+        overlap_count = np.zeros(n_out, dtype=np.float32)
         total_count = np.zeros(n_out, dtype=np.float32)
         for c_idx, cs in enumerate(starts):
             t0 = cs / sr
             for f in range(n_seg_frames):
                 out_f = int((t0 + f * frame_dur) / frame_dur)
                 if 0 <= out_f < n_out:
-                    if binarized[c_idx, f].sum() > 0:
+                    active_spk = int(binarized[c_idx, f].sum())
+                    if active_spk > 0:
                         speech_count[out_f] += 1
+                    if active_spk >= 2:
+                        overlap_count[out_f] += 1
                     total_count[out_f] += 1
 
         with np.errstate(divide='ignore', invalid='ignore'):
             speech_prob = np.where(total_count > 0, speech_count / total_count, 0)
+            overlap_prob = np.where(total_count > 0, overlap_count / total_count, 0)
         is_speech = speech_prob > 0.5
+        is_overlap = overlap_prob > 0.5
+
+        # Build overlap regions from is_overlap (additive API — không phá segments cũ)
+        self._last_overlap_regions = self._regions_from_mask(
+            is_overlap, frame_dur, total_dur, min_duration=0.3)
 
         # Convert to regions
         regions = []

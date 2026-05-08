@@ -271,7 +271,10 @@ class MainWindow(QMainWindow):
                 speaker_diarization = file_settings.getboolean('speaker_diarization', True)
                 file_tab.check_speaker_diarization.setChecked(speaker_diarization)
                 file_tab.on_speaker_diarization_changed(file_tab.check_speaker_diarization.checkState().value)
-                
+
+                overlap_separation = file_settings.getboolean('overlap_separation', False)
+                file_tab.check_overlap_separation.setChecked(overlap_separation)
+
                 show_speaker_labels = file_settings.getboolean('show_speaker_labels', True)
                 file_tab.check_show_speaker_labels.setChecked(show_speaker_labels)
                 
@@ -367,6 +370,7 @@ class MainWindow(QMainWindow):
             self.config['FileSettings']['punctuation_confidence_slider'] = str(file_tab.slider_punct_conf.value())
             self.config['FileSettings']['case_confidence_slider'] = str(file_tab.slider_case_conf.value())
             self.config['FileSettings']['speaker_diarization'] = str(file_tab.check_speaker_diarization.isChecked())
+            self.config['FileSettings']['overlap_separation'] = str(file_tab.check_overlap_separation.isChecked())
             self.config['FileSettings']['show_speaker_labels'] = str(file_tab.check_show_speaker_labels.isChecked())
             self.config['FileSettings']['num_speakers'] = str(num_speakers)
             self.config['FileSettings']['speaker_model'] = speaker_model
@@ -524,6 +528,7 @@ class MainWindow(QMainWindow):
         file_tab.slider_punct_conf.valueChanged.connect(self.save_file_config)
         file_tab.slider_case_conf.valueChanged.connect(self.save_file_config)
         file_tab.check_speaker_diarization.stateChanged.connect(self.save_file_config)
+        file_tab.check_overlap_separation.stateChanged.connect(self.save_file_config)
         file_tab.check_show_speaker_labels.stateChanged.connect(self.save_file_config)
         file_tab.spin_num_speakers.currentIndexChanged.connect(self.save_file_config)
         file_tab.combo_speaker_model.currentIndexChanged.connect(self.save_file_config)
@@ -553,6 +558,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             file_tab.check_speaker_diarization.stateChanged.disconnect(self.save_file_config)
+        except:
+            pass
+        try:
+            file_tab.check_overlap_separation.stateChanged.disconnect(self.save_file_config)
         except:
             pass
         try:

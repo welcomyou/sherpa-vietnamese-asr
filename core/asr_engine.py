@@ -2675,6 +2675,88 @@ class TranscriberPipeline:
                     if diarization_start:
                         timing_details["diarization"] = time.time() - diarization_start
 
+                    # ═══════════════════════════════════════════════════════
+                    # Overlap speaker separation (opt-in via config flag)
+                    # Chạy Conv-TasNet trên các vùng overlap do pyannote detect,
+                    # match streams ↔ speakers bằng CAM++ embedding, ASR từng stream
+                    # với context ghép thêm → 2 parallel segments cho mỗi region.
+                    # ═══════════════════════════════════════════════════════
+                    self._overlap_segments = []
+                    if self.config.get("overlap_separation", False) and raw_segments:
+                        try:
+                            # Lấy overlap_regions từ diarizer vừa chạy (Senko hoặc pure_ort)
+                            _active_diar = locals().get('diarizer_3d') or locals().get('diarizer')
+                            _overlap_regions = []
+                            if _active_diar is not None and hasattr(_active_diar, 'overlap_regions'):
+                                _overlap_regions = list(_active_diar.overlap_regions)
+
+                            if _overlap_regions:
+                                self._emit(f"PHASE:OverlapSep|Đang tách giọng overlap ({len(_overlap_regions)} vùng)|0")
+                                overlap_start_t = time.time()
+                                from core.overlap_separator import OverlapSeparator
+                                sep = OverlapSeparator(num_threads=self.config.get("cpu_threads", 4))
+
+                                def _ov_progress(pct):
+                                    self._emit(f"PHASE:OverlapSep|Đang tách giọng overlap|{int(pct)}")
+
+                                _ov_results = sep.process(audio, raw_segments,
+                                                          _overlap_regions,
+                                                          progress_callback=_ov_progress)
+
+                                # ASR từng per-speaker audio + filter words vào window
+                                ov_segments = []
+                                for ri, reg in enumerate(_ov_results):
+                                    region_start = reg['start']; region_end = reg['end']
+                                    self._emit(f"PHASE:OverlapSep|ASR overlap {ri+1}/{len(_ov_results)}|"
+                                               f"{int(50 + (ri+1)/max(1,len(_ov_results))*40)}")
+                                    for spk, spk_audio in reg['audio_per_speaker'].items():
+                                        real_s = reg['real_start_per_speaker'][spk]
+                                        real_e = reg['real_end_per_speaker'][spk]
+                                        try:
+                                            words_concat = decode_chunk(recognizer, spk_audio.astype(np.float32), time_offset=0.0)
+                                        except Exception as _asr_err:
+                                            logger.warning(f"[OverlapSep] ASR fail region {ri} spk {spk}: {_asr_err}")
+                                            continue
+                                        # shift global: real time = concat_time + (region_start - real_s)
+                                        shift = region_start - real_s
+                                        kept_words = []
+                                        for w in words_concat:
+                                            ws = float(w.get('start', 0)); we = float(w.get('end', ws))
+                                            mid = (ws + we) / 2.0
+                                            if real_s <= mid <= real_e:
+                                                nw = dict(w)
+                                                nw['start'] = ws + shift
+                                                nw['end'] = we + shift
+                                                kept_words.append(nw)
+                                        if not kept_words:
+                                            continue
+                                        text = ' '.join(
+                                            (w.get('word') or w.get('text') or '').strip()
+                                            for w in kept_words
+                                            if (w.get('word') or w.get('text'))).strip()
+                                        if not text:
+                                            continue
+                                        ov_segments.append({
+                                            'speaker': f"Người nói {spk + 1}",
+                                            'speaker_id': int(spk),
+                                            'start': region_start,
+                                            'end': region_end,
+                                            'text': text,
+                                            'raw_words': kept_words,
+                                            'overlap': True,
+                                        })
+                                self._overlap_segments = ov_segments
+                                timing_details["overlap_separation"] = time.time() - overlap_start_t
+                                self._emit(f"PHASE:OverlapSep|Tách giọng overlap xong ({len(ov_segments)} dòng)|100")
+                                logger.info(f"[OverlapSep] {len(_overlap_regions)} regions → {len(ov_segments)} parallel segments ({timing_details['overlap_separation']:.1f}s)")
+                            else:
+                                logger.info("[OverlapSep] No overlap regions detected, skipping.")
+                        except Exception as _ov_err:
+                            import traceback
+                            logger.error(f"[OverlapSep] Overlap separation FAILED: {_ov_err}")
+                            logger.error(traceback.format_exc())
+                            self._overlap_segments = []
+
                     if self.config.get("save_ram", False):
                         clear_model_cache("diarizer")
 
@@ -3254,6 +3336,10 @@ class TranscriberPipeline:
             "speaker_names": {},
             "asr_confidence": asr_confidence,
             "quality_info": _dnsmos_result,
+            # Overlap separation results (parallel segments for vùng 2-speaker overlap).
+            # Empty list nếu feature không bật hoặc không có overlap. Additive —
+            # downstream cũ bỏ qua field này không ảnh hưởng.
+            "overlap_segments": getattr(self, "_overlap_segments", []) or [],
         }
 
         logger.info(f"TRANSCRIPTION COMPLETED: {len(full_text)} chars, "

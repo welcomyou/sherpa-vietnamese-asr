@@ -52,17 +52,10 @@ class _LocalAPI:
 
     @host.setter
     def host(self, value):
-        # 0.0.0.0 listens on all interfaces → connect via 127.0.0.1
-        self._host = "127.0.0.1" if value == "0.0.0.0" else value
-        # P3 MITM: cảnh báo nếu GUI kết nối tới host không phải loopback
-        _loopback = {"127.0.0.1", "::1", "localhost"}
-        if self._host not in _loopback:
-            logger.warning(
-                "P3 MITM risk: Admin GUI kết nối tới %s (không phải localhost). "
-                "Traffic quản trị có thể bị chặn trên LAN. "
-                "Khuyến nghị: chỉ dùng 127.0.0.1 hoặc dùng VPN/SSH tunnel.",
-                self._host,
-            )
+        # Admin GUI luôn chạy cùng máy với server (quản lý subprocess) → ép về loopback.
+        # Config host (0.0.0.0, IP LAN, ...) là địa chỉ server LISTEN, không phải địa chỉ GUI CONNECT.
+        # Dùng 127.0.0.1 để tránh SSL verify fail với self-signed cert và loại bỏ MITM risk trên LAN.
+        self._host = "127.0.0.1"
 
     def _ssl_ctx(self):
         import ssl

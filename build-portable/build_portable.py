@@ -210,7 +210,9 @@ def copy_venv_packages():
         'pyannote', 'pyannote_audio', 'pyannote_core', 'pyannote_pipeline',
         'pyannote_database', 'pyannote_metrics', 'pyannote_onnx_extended',
         'pyannoteai', 'pyannoteai_sdk',
-        'asteroid_filterbanks', 'julius', 'einops',
+        # asteroid + asteroid_filterbanks + julius + einops: BỎ — overlap_separation
+        # giờ dùng welcomyou/convtasnet-libri2mix-16k-onnx via ORT (không cần PyTorch).
+        'asteroid', 'asteroid_filterbanks', 'julius', 'einops',
 
         # numba/llvmlite: GIỮ LẠI — umap-learn (Senko diarization) cần numba.njit thật
         # 'numba', 'llvmlite',

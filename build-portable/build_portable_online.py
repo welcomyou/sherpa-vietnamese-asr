@@ -92,7 +92,7 @@ EXCLUDE_PACKAGES_SERVICES = {
     'pyannote', 'pyannote_audio', 'pyannote_core', 'pyannote_pipeline',
     'pyannote_database', 'pyannote_metrics', 'pyannote_onnx_extended',
     'pyannoteai', 'pyannoteai_sdk',
-    'asteroid_filterbanks', 'julius', 'einops',
+    'asteroid', 'asteroid_filterbanks', 'julius', 'einops',
 
     # numba/llvmlite: GIỮ LẠI — umap-learn (Senko diarization) cần numba.njit thật
     # 'numba', 'llvmlite',

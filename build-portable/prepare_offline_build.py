@@ -219,6 +219,20 @@ MODELS_CONFIG = {
         "sha256": "7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49",
     },
 
+    # Conv-TasNet 2-speaker overlap separation (16kHz, asteroid Libri2Mix sepclean)
+    # ONNX export tự làm — gốc PyTorch JorisCos/ConvTasNet_Libri2Mix_sepclean_16k
+    # Source code conversion: convert_onnx/export_convtasnet_onnx.py
+    "convtasnet_libri2mix_16k": {
+        "type": "huggingface_file",
+        "repo_id": "welcomyou/convtasnet-libri2mix-16k-onnx",
+        "filename": "convtasnet_16k.onnx",
+        "local_dir": "convtasnet-libri2mix-16k",
+        "description": "Conv-TasNet 16kHz Libri2Mix sepclean (2-speaker overlap separation, 19MB)",
+        "check_file": "convtasnet_16k.onnx",
+        "revision": "da50e0fa7789356790994bc898290134fef5d42d",
+        "sha256": "22185d8e13bf5251c0eeab09e52099ac76c063cd9a5e5df1f5c242f535f6f151",
+    },
+
     # Audio Quality Model
     "dnsmos": {
         "type": "direct_download",
