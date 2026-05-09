@@ -20,9 +20,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.absolute()
 PROJECT_ROOT = SCRIPT_DIR.parent
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from core.version import get_version_short
+_VERSION = get_version_short()
+
 # Configuration
 VENV_DIR = PROJECT_ROOT / ".envtietkiem"
-DIST_DIR = PROJECT_ROOT / "dist" / "sherpa-vietnamese-asr"
+DIST_DIR = PROJECT_ROOT / "dist" / f"sherpa-vietnamese-asr-{_VERSION}"
 BUILD_DIR = PROJECT_ROOT / "build"
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed-amd64.zip"
 # A08: SHA-256 pin cho Python embedded — supply chain defense-in-depth

@@ -31,8 +31,12 @@ from build_portable import (
     get_venv_path, clean_build, calculate_size,
 )
 
+sys.path.insert(0, str(PROJECT_ROOT))
+from core.version import get_version_short
+_VERSION = get_version_short()
+
 # Override output directory
-DIST_DIR_ONLINE = PROJECT_ROOT / "dist" / "sherpa-vietnamese-asr-service"
+DIST_DIR_ONLINE = PROJECT_ROOT / "dist" / f"sherpa-vietnamese-asr-service-{_VERSION}"
 
 # Source files cho ban online (KHONG co tab_live, streaming)
 ONLINE_SOURCE_FILES = [
@@ -486,26 +490,12 @@ def create_launcher_online():
 
     (DIST_DIR_ONLINE / "sherpa-vietnamese-asr-service.bat").write_text(bat_content, encoding="utf-8")
 
-    # start-gui.bat
-    (DIST_DIR_ONLINE / "start-gui.bat").write_text(
-        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-gui.bat").read_text(encoding="utf-8")
-        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-gui.bat").exists()
-        else "", encoding="utf-8"
-    )
-
-    # start-server.bat
-    (DIST_DIR_ONLINE / "start-server.bat").write_text(
-        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-server.bat").read_text(encoding="utf-8")
-        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "start-server.bat").exists()
-        else "", encoding="utf-8"
-    )
-
-    # install-service.bat
-    (DIST_DIR_ONLINE / "install-service.bat").write_text(
-        (SCRIPT_DIR / ".." / "dist" / "sherpa-vietnamese-asr-service" / "install-service.bat").read_text(encoding="utf-8")
-        if (DIST_DIR_ONLINE / ".." / ".." / "dist" / "sherpa-vietnamese-asr-service" / "install-service.bat").exists()
-        else "", encoding="utf-8"
-    )
+    # Copy bat templates từ build-portable/server-bats/
+    bats_template_dir = SCRIPT_DIR / "server-bats"
+    for bat_name in ("start-gui.bat", "start-server.bat", "install-service.bat"):
+        src = bats_template_dir / bat_name
+        if src.exists():
+            (DIST_DIR_ONLINE / bat_name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
     # README
     readme = '''Sherpa Vietnamese ASR - Service
