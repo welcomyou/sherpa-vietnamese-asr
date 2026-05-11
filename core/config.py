@@ -19,7 +19,11 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.ini")
 # Source of Truth — mọi UI surface (Desktop, Web, Admin) phải dùng dict này.
 # Web CSS vars (:root) trong static/css/style.css phải mirror chính xác.
 # KHÔNG hardcode hex — luôn dùng COLORS['key'] hoặc var(--key).
-COLORS = {
+#
+# COLORS là dict mutable, được cập nhật in-place bởi apply_theme() trước
+# khi UI khởi tạo. Mọi import `from core.config import COLORS` vẫn tham
+# chiếu cùng object → đổi theme = đổi giá trị trong dict (không reassign).
+COLORS_DARK = {
     'bg_dark': '#2b2b2b',
     'bg_card': '#3a3a3a',
     'bg_elevated': '#464646',
@@ -39,6 +43,67 @@ COLORS = {
     'search_current': '#ff4500',
     'low_confidence': '#DFC8B0',
 }
+
+# Light theme — mirror cấu trúc Dark nhưng đảo chiều surface (card nổi lên
+# trên page xám nhạt), text-primary đậm để đạt WCAG AA (≥4.5:1), semantic
+# color (success/warning/danger) đậm hơn so với Dark để giữ tương phản
+# khi dùng làm text trên nền trắng. Vẫn đủ saturated khi dùng làm button bg.
+COLORS_LIGHT = {
+    # Surfaces (card nổi trên page xám nhạt, giống Linear/Slack)
+    'bg_dark': '#eef1f5',          # page bg, cool light gray
+    'bg_card': '#ffffff',          # cards/panels nổi lên
+    'bg_elevated': '#f5f7fa',      # input/elevated subtle
+    'bg_input': '#ffffff',         # input fields trắng, dựa vào border
+    # Text (AAA primary, AA secondary)
+    'text_primary': '#1f2937',     # slate-800, 12.6:1 trên trắng
+    'text_secondary': '#5b6776',   # slate-600, 5.9:1 trên trắng
+    'text_dark': '#1f2937',        # text trên nền vàng (highlight/warning)
+    # Brand
+    'accent': '#0b66d8',           # blue, 5.4:1 trên trắng (text + bg ok)
+    'accent_hover': '#094a9c',     # darker hover, 7:1
+    # Borders
+    'border': '#d1d5db',           # gray-300, đủ visible trên page xám nhạt
+    'border_light': '#9ca3af',     # gray-400, separator mạnh
+    # Semantic — đậm hơn Dark để text đọc được trên trắng (>=4.5:1)
+    'highlight': '#fcd34d',        # amber-300 bg với text_dark = 9.4:1
+    'success': '#15803d',          # green-700, text 5.7:1 / bg+white 5.0:1
+    'warning': '#d97706',          # amber-600, text 4.5:1 / bg+text_dark 5.1:1
+    'danger': '#b91c1c',           # red-700, text 6.7:1 / bg+white 6.4:1
+    # Search highlights (giữ saturated, đảm bảo text_dark đọc được)
+    'search_match': '#a5f3fc',     # cyan-200 bg + text_dark = 13:1
+    'search_current': '#fb923c',   # orange-400 bg + text_dark = 6:1, nổi bật hơn match
+    # Low confidence text — màu ấm/ochre nhưng vẫn AA trên trắng
+    'low_confidence': '#92400e',   # amber-800, 6.5:1 trên trắng
+}
+
+# COLORS là alias trỏ đến theme đang dùng. Mặc định Dark; apply_theme()
+# cập nhật in-place để các module đã import vẫn thấy giá trị mới.
+COLORS = dict(COLORS_DARK)
+
+# Theme hiện tại — chỉ đọc, set qua apply_theme()
+CURRENT_THEME = 'dark'
+
+
+def apply_theme(theme_name):
+    """
+    Áp dụng theme bằng cách cập nhật COLORS in-place.
+
+    Phải gọi TRƯỚC khi tạo bất kỳ widget nào, vì PyQt6 stylesheet được
+    đọc tại thời điểm setStyleSheet() — đổi theme runtime không cập nhật
+    widget đã render.
+
+    Args:
+        theme_name: 'light' hoặc 'dark' (case-insensitive, fallback 'dark')
+    """
+    global CURRENT_THEME
+    theme_name = (theme_name or 'dark').lower().strip()
+    if theme_name not in ('light', 'dark'):
+        theme_name = 'dark'
+    source = COLORS_LIGHT if theme_name == 'light' else COLORS_DARK
+    COLORS.clear()
+    COLORS.update(source)
+    CURRENT_THEME = theme_name
+    return theme_name
 
 
 # === CPU Detection ===

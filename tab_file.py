@@ -324,9 +324,28 @@ class FileProcessingTab(QWidget):
             QCheckBox {{
                 color: {COLORS['text_secondary']};
                 border: none;
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 1.5px solid {COLORS['border_light']};
+                border-radius: 3px;
+                background-color: {COLORS['bg_input']};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {COLORS['accent']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {COLORS['accent']};
+                border-color: {COLORS['accent']};
+            }}
+            QCheckBox::indicator:disabled {{
+                background-color: {COLORS['bg_dark']};
+                border-color: {COLORS['border']};
             }}
         """)
-        
+
         form_config = QFormLayout(self.config_content)
         form_config.setSpacing(2)
         form_config.setContentsMargins(8, 4, 8, 4)
@@ -571,8 +590,8 @@ class FileProcessingTab(QWidget):
         )
         self.check_save_ram.stateChanged.connect(self._on_save_ram_changed)
         form_config.addRow(self.check_save_ram)
-        
-        
+
+
         config_layout.addWidget(self.config_content)
 
         # Disable scroll wheel trên tất cả config widgets (tránh thay đổi nhầm)

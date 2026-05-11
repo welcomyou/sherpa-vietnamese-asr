@@ -83,11 +83,11 @@ if "QT_MEDIA_BACKEND" not in os.environ:
     os.environ["QT_MEDIA_BACKEND"] = "windows"
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QTabWidget, QLabel, QPushButton)
+                             QHBoxLayout, QTabWidget, QLabel, QPushButton, QMessageBox)
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeyEvent
 
-from core.config import BASE_DIR, CONFIG_FILE, COLORS, ALLOWED_THREADS
+from core.config import BASE_DIR, CONFIG_FILE, COLORS, ALLOWED_THREADS, apply_theme
 from tab_file import FileProcessingTab
 from tab_live import LiveProcessingTab
 
@@ -104,7 +104,11 @@ class MainWindow(QMainWindow):
         
         # Load config
         self.config = self.load_config()
-        
+
+        # Áp dụng theme TRƯỚC init_ui — stylesheet đọc COLORS tại lúc tạo widget
+        theme = self.config['Appearance'].get('theme', 'dark') if 'Appearance' in self.config else 'dark'
+        apply_theme(theme)
+
         self.init_ui()
         self.apply_config()
 
@@ -166,8 +170,11 @@ class MainWindow(QMainWindow):
                 'microphone_list': '',
                 'selected_microphone': '',
             }
+            config['Appearance'] = {
+                'theme': 'dark',
+            }
             self.save_config(config)
-        
+
         # Migrate old config format (single Settings section) to new format
         if 'Settings' in config and 'FileSettings' not in config:
             old = config['Settings']
@@ -215,7 +222,9 @@ class MainWindow(QMainWindow):
                 'microphone_list': '',
                 'selected_microphone': '',
             }
-        
+        if 'Appearance' not in config:
+            config['Appearance'] = {'theme': 'dark'}
+
         return config
 
     def save_config(self, config=None):
@@ -304,8 +313,6 @@ class MainWindow(QMainWindow):
 
                 bypass_vad = file_settings.getboolean('bypass_vad', False)
                 file_tab.check_bypass_vad.setChecked(bypass_vad)
-
-
 
                 # Auto analyze quality setting
             finally:
@@ -516,12 +523,77 @@ class MainWindow(QMainWindow):
         # Tab 2: Xử lý trực tiếp
         self.tab_live = LiveProcessingTab(main_window=self)
         self.main_tabs.addTab(self.tab_live, "🎤 Xử lý trực tiếp")
-        
+
+        # Theme toggle (top-right corner, ngang hàng với tab bar)
+        self.btn_theme = QPushButton()
+        self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_theme.setToolTip("Đổi giao diện Sáng / Tối (cần khởi động lại)")
+        self.btn_theme.clicked.connect(self.toggle_theme)
+        self._refresh_theme_button()
+        # Wrapper để có margin phải, button không dính sát cạnh
+        corner = QWidget()
+        corner_layout = QHBoxLayout(corner)
+        corner_layout.setContentsMargins(0, 4, 8, 4)
+        corner_layout.addWidget(self.btn_theme)
+        self.main_tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+
         main_layout.addWidget(self.main_tabs)
-        
+
         # Connect signals to save config when settings change
         self.connect_config_signals()
     
+    def _refresh_theme_button(self):
+        """Render nút theme theo theme đang dùng (gọi sau apply_theme).
+
+        Nút hiển thị icon + label của theme HIỆN TẠI để user biết đang ở đâu.
+        Click sẽ chuyển sang theme còn lại + nhắc restart.
+        """
+        from core.config import CURRENT_THEME
+        is_dark = CURRENT_THEME == 'dark'
+        # Hiện theme hiện tại — icon + tên ngắn
+        self.btn_theme.setText("🌙 Tối" if is_dark else "☀️ Sáng")
+        # Pill button — nền card, chữ primary, viền border
+        self.btn_theme.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 14px;
+                padding: 4px 14px;
+                font-size: 12px;
+                font-weight: 600;
+                min-height: 22px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['accent']};
+                color: white;
+                border-color: {COLORS['accent']};
+            }}
+            QPushButton:pressed {{
+                background-color: {COLORS['accent_hover']};
+            }}
+        """)
+
+    def toggle_theme(self):
+        """Chuyển theme Light ↔ Dark, lưu config, nhắc restart."""
+        from core.config import CURRENT_THEME
+        new_theme = 'light' if CURRENT_THEME == 'dark' else 'dark'
+
+        if 'Appearance' not in self.config:
+            self.config['Appearance'] = {}
+        self.config['Appearance']['theme'] = new_theme
+        self.save_config()
+
+        # Feedback ngay: đổi label nút sang theme mới để user thấy click có hiệu lực
+        self.btn_theme.setText("🌙 Tối" if new_theme == 'dark' else "☀️ Sáng")
+
+        label = "Sáng" if new_theme == 'light' else "Tối"
+        QMessageBox.information(
+            self, "Đổi giao diện",
+            f"Đã chuyển sang giao diện {label}.\n\n"
+            f"Vui lòng khởi động lại ứng dụng để áp dụng theme mới."
+        )
+
     def connect_config_signals(self):
         """Connect UI signals to auto-save config when settings change"""
         self._connect_file_signals()

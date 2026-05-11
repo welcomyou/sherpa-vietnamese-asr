@@ -195,6 +195,25 @@ class LiveProcessingTab(QWidget):
             QCheckBox {{
                 color: {COLORS['text_secondary']};
                 border: none;
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 1.5px solid {COLORS['border_light']};
+                border-radius: 3px;
+                background-color: {COLORS['bg_input']};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {COLORS['accent']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {COLORS['accent']};
+                border-color: {COLORS['accent']};
+            }}
+            QCheckBox::indicator:disabled {{
+                background-color: {COLORS['bg_dark']};
+                border-color: {COLORS['border']};
             }}
         """)
         
