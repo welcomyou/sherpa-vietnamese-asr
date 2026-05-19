@@ -938,7 +938,7 @@ function normalizeUserConfig(config = {}) {
     rmsNormalize: Boolean(merged.rmsNormalize),
     bypassVad: Boolean(merged.bypassVad),
     resumeAfterKill: true,
-    overlapSeparation: Boolean(merged.overlapSeparation),
+    overlapSeparation: false,
     saveRam: merged.saveRam !== false,
     hotwordsEnabled: merged.hotwordsEnabled !== false,
     hotwordsScore: boundedFloat(merged.hotwordsScore, DEFAULT_HOTWORDS_SCORE, 0, 8),
@@ -971,7 +971,7 @@ function applyUserConfig(config) {
     setControlValue("speaker-model", normalized.speakerModel);
     setControlChecked("rms-normalize", normalized.rmsNormalize);
     setControlChecked("bypass-vad", normalized.bypassVad);
-    setControlChecked("overlap-separation", normalized.overlapSeparation && normalized.speakerDiarization);
+    setControlChecked("overlap-separation", false);
     setControlChecked("save-ram", normalized.saveRam);
     setControlChecked("hotwords-enabled", normalized.hotwordsEnabled);
     setControlValue("hotwords-score", normalized.hotwordsScore);
@@ -997,7 +997,7 @@ function collectUserConfigFromUi() {
     rmsNormalize: Boolean($("rms-normalize")?.checked),
     bypassVad: Boolean($("bypass-vad")?.checked),
     resumeAfterKill: true,
-    overlapSeparation: Boolean($("overlap-separation")?.checked),
+    overlapSeparation: false,
     saveRam: Boolean($("save-ram")?.checked),
     hotwordsEnabled: Boolean($("hotwords-enabled")?.checked),
     hotwordsScore: currentHotwordsDefaultScore(),
@@ -1388,7 +1388,7 @@ function getPipelineOptions() {
   const speakerDiarization = Boolean($("speaker-diarization")?.checked);
   const speakerModel = $("speaker-model")?.value || "senko_campp_optimized";
   const numSpeakers = boundedNumber($("speaker-count")?.value, 0, 0, 20);
-  const overlapSeparation = Boolean($("overlap-separation")?.checked);
+  const overlapSeparation = false;
   const hotwords = readHotwordItemsFromUi();
   const hotwordsEnabled = Boolean($("hotwords-enabled")?.checked);
   const hotwordsScore = currentHotwordsDefaultScore();
@@ -2199,7 +2199,6 @@ async function loadManifest() {
     loaded = cachedFirst;
     log("Using cached model manifest.");
   }
-  if (!loaded) {
   try {
     const response = await fetchWithTimeout(
       "/api/model-manifest",
@@ -2209,10 +2208,9 @@ async function loadManifest() {
     if (!response.ok) throw new Error(`model manifest failed: ${response.status}`);
     loaded = normalizeManifestForOfflineUse(await response.json());
     saveManifestSnapshot(loaded);
+    log(cachedFirst ? "Updated model manifest from server." : "Loaded model manifest from server.");
   } catch (error) {
-    const cached = await loadCachedManifestSnapshot();
-    if (cached) {
-      loaded = cached;
+    if (loaded) {
       log(`Using cached model manifest because server manifest is unavailable: ${error.message || String(error)}`);
     } else {
       loaded = normalizeManifestForOfflineUse({
@@ -2230,12 +2228,14 @@ async function loadManifest() {
       log(`Model manifest is unavailable and no cached snapshot exists: ${error.message || String(error)}`);
     }
   }
-  }
   manifest = loaded;
   const bundle = manifest.server_model_bundle;
   if (bundle && !bundle.ready) {
     log(`Server model bundle is incomplete: ${bundle.available}/${bundle.total} file(s) available.`);
   }
+  await pruneUnusedModelFiles().catch((error) => {
+    log(`Prune unused model files failed: ${error.message || String(error)}`);
+  });
   await renderPacks();
   await refreshOfflineBootstrapState();
 }
@@ -6550,32 +6550,7 @@ async function ensureCamppReady() {
 }
 
 async function ensureOverlapReady() {
-  if (overlapInitPromise) return overlapInitPromise;
-
-  overlapInitPromise = (async () => {
-    configureOrt();
-    log("Loading Conv-TasNet overlap separation ONNX session.");
-    const model = await loadModelArrayBuffer("overlap.convtasnet");
-    const created = await createOrtSession(model, {
-      name: "Conv-TasNet overlap separation",
-      webgpuPreferred: true,
-      webgpuBenchmarkOnly: true,
-    });
-    overlapSession = created.session;
-    overlapExecutionProvider = created.provider;
-    const warmup = new Float32Array(VAD_SAMPLE_RATE);
-    await overlapSession.run({
-      mixture: new window.ort.Tensor("float32", warmup, [1, warmup.length]),
-    });
-    log(`Conv-TasNet overlap separation session ready (${overlapExecutionProvider}).`);
-  })().catch((error) => {
-    overlapInitPromise = null;
-    overlapSession = null;
-    overlapExecutionProvider = "wasm";
-    throw error;
-  });
-
-  return overlapInitPromise;
+  throw new Error("Overlap separation is not included in the main offline PWA model pack.");
 }
 
 async function ensurePyannoteCommunityReady() {
@@ -14944,6 +14919,76 @@ async function clearModels() {
   await updateRuntimeStatus();
 }
 
+function requiredModelFileNames() {
+  const names = new Set();
+  for (const pack of requiredOfflinePacks()) {
+    for (const file of pack.files || []) {
+      names.add(modelFileName(file));
+    }
+  }
+  return names;
+}
+
+function clearObsoleteModelIntegrityRecords(allowedNames) {
+  const prefix = "asr-vn-model-integrity:";
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(prefix)) continue;
+      const name = key.slice(prefix.length);
+      if (!allowedNames.has(name)) localStorage.removeItem(key);
+    }
+  } catch (_) {
+    // ignore
+  }
+}
+
+async function pruneUnusedModelFiles() {
+  const allowedNames = requiredModelFileNames();
+  if (!allowedNames.size) return;
+
+  let removed = 0;
+  const dir = await opfsModelDir();
+  if (dir.kind === "idb") {
+    const names = await idbListFileNames(dir.scope).catch(() => []);
+    for (const name of names) {
+      if (allowedNames.has(name)) continue;
+      await idbDeleteFile(dir.scope, name).catch(() => null);
+      removed += 1;
+    }
+  } else {
+    for await (const name of dir.keys()) {
+      if (allowedNames.has(name)) continue;
+      await removeOpfsFile(dir, name);
+      removed += 1;
+    }
+    const fallbackNames = await idbListFileNames("models").catch(() => []);
+    for (const name of fallbackNames) {
+      if (allowedNames.has(name)) continue;
+      await idbDeleteFile("models", name).catch(() => null);
+      removed += 1;
+    }
+  }
+
+  if (window.caches) {
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    const keys = await cache.keys();
+    for (const request of keys) {
+      const url = new URL(request.url);
+      if (!url.pathname.startsWith("/__asr_vn_model_cache__/")) continue;
+      const name = decodeURIComponent(url.pathname.split("/").pop() || "");
+      if (allowedNames.has(name)) continue;
+      await cache.delete(request).catch(() => null);
+      removed += 1;
+    }
+  }
+
+  clearObsoleteModelIntegrityRecords(allowedNames);
+  if (removed > 0) {
+    log(`Deleted ${removed} unused model file(s) no longer required by the offline PWA.`);
+  }
+}
+
 function setupInstallPrompt() {
   updateStandaloneUi();
   window.addEventListener("beforeinstallprompt", (event) => {
@@ -15244,7 +15289,6 @@ function benchmarkReportTemplate(kind, mode, file, baseOptions) {
       "Pyannote Community-1 segmentation",
       "Speaker VBx core JavaScript",
       "CAM++ / Pyannote clustering JavaScript",
-      "Conv-TasNet overlap pipeline",
       "Zstandard result compression",
     ],
     environment: null,
@@ -15493,7 +15537,6 @@ async function runBenchmarkSelectedAudioFile() {
       "Pyannote Community-1 segmentation",
       "Speaker VBx core JavaScript",
       "CAM++ / Pyannote clustering JavaScript",
-      "Conv-TasNet overlap pipeline",
       "Zstandard result compression",
     ],
     environment: null,

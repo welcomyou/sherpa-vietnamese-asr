@@ -40,15 +40,6 @@
           "sha256": "d861afe55f7ff43c90069cad0a5d07261a408be5c7fd2aac8c84b1f3225da021"
         },
         {
-          "id": "asr30.bpe",
-          "target_path": "models/zipformer-30m-rnnt-6000h/bpe.model",
-          "local_path": "models/zipformer-30m-rnnt-6000h/bpe.model",
-          "repo": "hynt/Zipformer-30M-RNNT-6000h",
-          "path": "bpe.model",
-          "bytes": 268106,
-          "sha256": "002894e7a82d80ffa5e25008ec8c5496159db804005e2103de96b01b4c13d445"
-        },
-        {
           "id": "asr30.bpe_vocab",
           "target_path": "models/zipformer-30m-rnnt-6000h/bpe.vocab",
           "local_path": "models/zipformer-30m-rnnt-6000h/bpe.vocab",
@@ -69,25 +60,9 @@
       ]
     },
     {
-      "id": "vad_preview",
-      "name": "Silero VAD browser proof",
-      "description": "Small ONNX pack used by the PWA to verify local browser inference before full ASR.",
-      "files": [
-        {
-          "id": "vad.silero",
-          "target_path": "models/silero-vad/silero_vad_16k_op15.onnx",
-          "local_path": "models/silero-vad/silero_vad_16k_op15.onnx",
-          "repo": "snakers4/silero-vad",
-          "path": "files/silero_vad_16k_op15.onnx",
-          "bytes": 1289603,
-          "sha256": "7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49"
-        }
-      ]
-    },
-    {
       "id": "required_pwa_offline_models",
       "name": "Required PWA offline models",
-      "description": "ASR 68M, punctuation, VAD, speaker diarization, quality, and overlap assets.",
+      "description": "ASR 68M, punctuation, VAD, speaker diarization, and quality assets used by the main offline PWA pipeline.",
       "files": [
         {
           "id": "asr68.encoder",
@@ -115,15 +90,6 @@
           "path": "joiner-epoch-12-avg-8.onnx",
           "bytes": 4104465,
           "sha256": "a186d4ddf04cac3ddfb095dc6e7f705dcd08bd79d4c67334f43c3a7337bf8d9a"
-        },
-        {
-          "id": "asr68.bpe",
-          "target_path": "models/sherpa-onnx-zipformer-vi-2025-04-20/bpe.model",
-          "local_path": "models/sherpa-onnx-zipformer-vi-2025-04-20/bpe.model",
-          "repo": "csukuangfj/sherpa-onnx-zipformer-vi-2025-04-20",
-          "path": "bpe.model",
-          "bytes": 270695,
-          "sha256": "289dbb44527c13c419ae3a4d8ce6a349f01a97f8777e69934a77e3692d2f10db"
         },
         {
           "id": "asr68.bpe_vocab",
@@ -216,24 +182,6 @@
           "sha256": "e763fd133f539651e340a49709fdd2dbf4fc5df78b984f91b92e02d6e0741ce9"
         },
         {
-          "id": "speaker.pyannote_plda",
-          "target_path": "models/pyannote/speaker-diarization-community-1/plda/plda.npz",
-          "local_path": "models/pyannote/speaker-diarization-community-1/plda/plda.npz",
-          "repo": "pyannote/speaker-diarization-community-1",
-          "path": "plda/plda.npz",
-          "bytes": 133852,
-          "sha256": "9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255"
-        },
-        {
-          "id": "speaker.pyannote_xvec_transform",
-          "target_path": "models/pyannote/speaker-diarization-community-1/plda/xvec_transform.npz",
-          "local_path": "models/pyannote/speaker-diarization-community-1/plda/xvec_transform.npz",
-          "repo": "pyannote/speaker-diarization-community-1",
-          "path": "plda/xvec_transform.npz",
-          "bytes": 134376,
-          "sha256": "325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f"
-        },
-        {
           "id": "speaker.campp",
           "target_path": "models/campp-3dspeaker/campplus_cn_en_common_200k.onnx",
           "local_path": "models/campp-3dspeaker/campplus_cn_en_common_200k.onnx",
@@ -251,93 +199,6 @@
           "url": "https://github.com/microsoft/DNS-Challenge/raw/master/DNSMOS/DNSMOS/sig_bak_ovr.onnx",
           "bytes": 1157965,
           "sha256": "269fbebdb513aa23cddfbb593542ecc540284a91849ac50516870e1ac78f6edd"
-        },
-        {
-          "id": "overlap.convtasnet",
-          "target_path": "models/convtasnet-libri2mix-16k/convtasnet_16k.onnx",
-          "local_path": "models/convtasnet-libri2mix-16k/convtasnet_16k.onnx",
-          "repo": "welcomyou/convtasnet-libri2mix-16k-onnx",
-          "path": "convtasnet_16k.onnx",
-          "bytes": 20154131,
-          "sha256": "22185d8e13bf5251c0eeab09e52099ac76c063cd9a5e5df1f5c242f535f6f151"
-        }
-      ]
-    },
-    {
-      "id": "experimental_non_default_models",
-      "name": "Experimental non-default model registry",
-      "description": "Models present in the desktop repository but not used by the default desktop-parity offline pipeline.",
-      "required": false,
-      "files": [
-        {
-          "id": "enhance.gtcrn",
-          "target_path": "models/gtcrn/gtcrn_simple.onnx",
-          "local_path": "models/gtcrn/gtcrn_simple.onnx",
-          "bytes": 535638,
-          "sha256": "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534"
-        },
-        {
-          "id": "speaker.diarizen_wavlm_large",
-          "target_path": "models/diarizen/diarizen-wavlm-large-s80-md.onnx",
-          "local_path": "models/diarizen/diarizen-wavlm-large-s80-md.onnx",
-          "bytes": 278449363,
-          "sha256": "7b07dbbcae087fa83c998ef356f09d2c1914888bfe4185126de283c945d7fa94"
-        },
-        {
-          "id": "speaker.ecapa_wespeaker",
-          "target_path": "models/ecapa-wespeaker/voxceleb_ECAPA512_LM.onnx",
-          "local_path": "models/ecapa-wespeaker/voxceleb_ECAPA512_LM.onnx",
-          "bytes": 24861931,
-          "sha256": "d71b85d9b48058ef68004f04f1b78acebefb9dfcf542e19b976a12a5ad1f10b0"
-        },
-        {
-          "id": "speaker.titanet_small",
-          "target_path": "models/speaker_embedding/nemo_en_titanet_small.onnx",
-          "local_path": "models/speaker_embedding/nemo_en_titanet_small.onnx",
-          "bytes": 40257283,
-          "sha256": "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e"
-        },
-        {
-          "id": "confidence.cem_lev",
-          "target_path": "models/cem_lev.onnx",
-          "local_path": "models/cem_lev.onnx",
-          "bytes": 67199025,
-          "sha256": "795e3ed092be6cd8e551ff199c39ce26e362c40a857048038a18a156e0e3b5b8"
-        },
-        {
-          "id": "confidence.cem_lev_norm",
-          "target_path": "models/cem_lev_normalization.json",
-          "local_path": "models/cem_lev_normalization.json",
-          "bytes": 86707,
-          "sha256": "d03108386b4c09ccfa364edb52d47f4b3c6db0088aadc6c80ecb7d643dafd393"
-        },
-        {
-          "id": "confidence.cem_extended",
-          "target_path": "models/cem_extended.onnx",
-          "local_path": "models/cem_extended.onnx",
-          "bytes": 67313769,
-          "sha256": "e1b727d5543b829d86de410dbf902f3c3f777410a4222afeb79fff54e515c2ea"
-        },
-        {
-          "id": "confidence.cem_extended_norm",
-          "target_path": "models/cem_extended_normalization.json",
-          "local_path": "models/cem_extended_normalization.json",
-          "bytes": 86993,
-          "sha256": "e48143fc85910aea0904e6c558e64e37abf3cd3ab5664b9c50db5cb21b993cd6"
-        },
-        {
-          "id": "confidence.cem_trucles",
-          "target_path": "models/cem_trucles.onnx",
-          "local_path": "models/cem_trucles.onnx",
-          "bytes": 67199025,
-          "sha256": "f49bd74f8600661199dded721930fc727bc514e34ba5490126e49c11fac35388"
-        },
-        {
-          "id": "confidence.cem_trucles_norm",
-          "target_path": "models/cem_trucles_normalization.json",
-          "local_path": "models/cem_trucles_normalization.json",
-          "bytes": 86707,
-          "sha256": "d03108386b4c09ccfa364edb52d47f4b3c6db0088aadc6c80ecb7d643dafd393"
         }
       ]
     }
