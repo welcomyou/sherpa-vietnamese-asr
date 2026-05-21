@@ -1055,7 +1055,15 @@ main {
 }
 
 .seg-span:hover {
-    background: rgba(0, 123, 255, 0.12);
+    background: rgba(255, 193, 7, 0.16);
+}
+
+.seg-word {
+    border-radius: 2px;
+}
+
+.seg-word:hover {
+    background: rgba(255, 193, 7, 0.24);
 }
 
 /* Vùng nghi ngờ ASR lỗi — chỉ đổi màu chữ, tinh tế */
@@ -1065,11 +1073,12 @@ main {
 
 /* Khi segment đang highlight, suspect text đổi sang nâu nhạt — gần đen nhưng ấm hơn, nhẹ nhàng */
 .seg-highlight .word-suspect {
-    color: #888888;
+    color: #3a2a00;
 }
 
 .seg-highlight {
-    background: rgba(0, 123, 255, 0.18) !important;
+    background: rgba(255, 193, 7, 0.36) !important;
+    color: var(--text-dark);
     border-radius: 3px;
 }
 
@@ -1659,6 +1668,7 @@ main {
 .status-processing { background: var(--accent); color: var(--text-primary); }
 .status-waiting { background: var(--warning); color: var(--text-dark); }
 .status-error { background: var(--danger); color: var(--text-primary); }
+.status-cancelled { background: var(--border-light); color: var(--text-primary); }
 
 /* Pagination */
 .mg-pager {

@@ -2,7 +2,7 @@
 
 All non-direct audio file paths should become mono float32 PCM at 16 kHz via
 the same FFmpeg + SoXR command so MP3/M4A/video decoding does not drift across
-desktop and PWA/server implementations.
+Desktop, PWA, and Android implementations.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "offline-pwa-";
-const CACHE_VERSION = "offline-pwa-v123";
+const CACHE_VERSION = "offline-pwa-v141";
 const NETWORK_TIMEOUT_MS = 1500;
 const INSTALL_CORE_TIMEOUT_MS = 15000;
 const CORE_SHELL = [
@@ -177,4 +177,26 @@ self.addEventListener("fetch", (event) => {
   if (event.request.mode === "navigate") {
     event.respondWith(localFirst(event, "/"));
   }
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification?.data?.url || "/";
+  event.waitUntil((async () => {
+    const allClients = await self.clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    const sameOriginUrl = new URL(targetUrl, self.location.origin);
+    for (const client of allClients) {
+      const clientUrl = new URL(client.url);
+      if (clientUrl.origin === sameOriginUrl.origin && "focus" in client) {
+        await client.focus();
+        return;
+      }
+    }
+    if (self.clients.openWindow) {
+      await self.clients.openWindow(sameOriginUrl.pathname + sameOriginUrl.search + sameOriginUrl.hash);
+    }
+  })());
 });

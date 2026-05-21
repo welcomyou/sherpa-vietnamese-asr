@@ -955,23 +955,25 @@ async function initRecognizer(files, options = {}) {
   });
 }
 
-async function decode(samples, modelId, timeOffset = 0) {
-  let recognizer = null;
+function getRecognizerForDecode(modelId = null) {
   if (modelId) {
-    recognizer = recognizers.get(modelId);
+    const recognizer = recognizers.get(modelId);
+    if (!recognizer) {
+      throw new Error(`PureORT recognizer is not initialized for ${modelId}.`);
+    }
+    return recognizer;
   } else if (recognizers.size === 1) {
-    recognizer = recognizers.values().next().value;
+    return recognizers.values().next().value;
   }
-  if (!recognizer) {
-    throw new Error(`PureORT recognizer is not initialized${modelId ? ` for ${modelId}` : ""}.`);
-  }
+  throw new Error(`PureORT recognizer is not initialized${modelId ? ` for ${modelId}` : ""}.`);
+}
 
-  const fbankStarted = performance.now();
-  const features = computeFbank(samples);
-  const fbankMs = performance.now() - fbankStarted;
-  if (!features.frames) return { text: "", words: [], backend: "pure_ort", frames: 0 };
+async function decodeWithFeatures(recognizer, features, sampleCount, timeOffset = 0, fbankMs = 0) {
+  if (!features.frames) {
+    return { text: "", words: [], backend: "pure_ort", frames: 0 };
+  }
   const search = await ortBeamSearch(recognizer, features, recognizer.maxActivePaths);
-  const words = tokensToWords(recognizer, search, samples.length, Number(timeOffset) || 0);
+  const words = tokensToWords(recognizer, search, sampleCount, Number(timeOffset) || 0);
   return {
     text: words.map((word) => word.text).join(" "),
     words,
@@ -983,6 +985,31 @@ async function decode(samples, modelId, timeOffset = 0) {
       fbankMs,
       ...(search.timings || {}),
     },
+  };
+}
+
+async function decode(samples, modelId, timeOffset = 0) {
+  const recognizer = getRecognizerForDecode(modelId);
+  const fbankStarted = performance.now();
+  const features = computeFbank(samples);
+  const fbankMs = performance.now() - fbankStarted;
+  return decodeWithFeatures(recognizer, features, samples.length, timeOffset, fbankMs);
+}
+
+async function decodePair(samples, primaryModelId, secondaryModelId, timeOffset = 0) {
+  const primary = getRecognizerForDecode(primaryModelId);
+  const secondary = getRecognizerForDecode(secondaryModelId);
+  const fbankStarted = performance.now();
+  const features = computeFbank(samples);
+  const fbankMs = performance.now() - fbankStarted;
+  const primaryResult = await decodeWithFeatures(primary, features, samples.length, timeOffset, fbankMs);
+  const secondaryResult = await decodeWithFeatures(secondary, features, samples.length, timeOffset, 0);
+  return {
+    primary: primaryResult,
+    secondary: secondaryResult,
+    backend: "pure_ort",
+    sharedFbank: true,
+    timings: { fbankMs },
   };
 }
 
@@ -1006,6 +1033,17 @@ self.onmessage = async (event) => {
 
     if (type === "decode") {
       const result = await decode(event.data.samples, event.data.modelId, event.data.timeOffset);
+      post("decoded", { id, result });
+      return;
+    }
+
+    if (type === "decode_pair") {
+      const result = await decodePair(
+        event.data.samples,
+        event.data.primaryModelId,
+        event.data.secondaryModelId,
+        event.data.timeOffset
+      );
       post("decoded", { id, result });
       return;
     }

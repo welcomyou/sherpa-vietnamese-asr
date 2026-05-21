@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey)
-![Version](https://img.shields.io/badge/Version-2.5.2-orange)
+![Version](https://img.shields.io/badge/Version-2.5.3-orange)
 ![Runtime](https://img.shields.io/badge/Runtime-ONNX%20only-success)
 
 ## Ba chế độ sử dụng
@@ -53,9 +53,9 @@
 
 - **Chạy ASR trong trình duyệt** — Sherpa-ONNX WASM, ONNX Runtime Web, WebGPU cho dấu câu FP32 khi trình duyệt hỗ trợ
 - **Model bootstrap đầy đủ** — tải model pack từ server nội bộ, cache bằng OPFS/Cache Storage để dùng sau khi mất mạng
-- **Pipeline gần tương đương desktop** — VAD, ROVER 2 model, hotwords, punctuation, CAM++ diarization, Pyannote Community-1 VBx, overlap separation
+- **Pipeline gần tương đương desktop** — VAD, ROVER 2 model, hotwords, punctuation, CAM++ diarization, Pyannote Community-1 VBx
 - **Quản lý file cục bộ** — thư viện nguồn, panel kết quả, editor transcript, export/import `.asr.json`
-- **Benchmark/calibration thiết bị** — profile hiệu năng theo thiết bị và metadata nghi ngờ ASR trong báo cáo
+- **Benchmark/calibration thiết bị** — profile hiệu năng theo thiết bị, re-calibration thủ công và metadata nghi ngờ ASR trong báo cáo
 
 ## Công nghệ
 

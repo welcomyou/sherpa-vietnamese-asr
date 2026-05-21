@@ -4,6 +4,9 @@ const CORE_URL = "/vendor/ffmpeg/core/ffmpeg-core.js";
 const WASM_URL = "/vendor/ffmpeg/core/ffmpeg-core.wasm";
 const TARGET_RATE = 16000;
 const DEFAULT_DECODE_TIMEOUT_MS = 180000;
+const LONG_DECODE_SECONDS = 30 * 60;
+const LONG_DECODE_CHUNK_SECONDS = 5 * 60;
+const LONG_DECODE_MIN_BYTES = 96 * 1024 * 1024;
 
 let ffmpeg = null;
 let ffmpegLoadPromise = null;
@@ -63,7 +66,7 @@ async function probeAudio(inputPath) {
     const ret = await ffmpeg.ffprobe([
       "-v", "error",
       "-select_streams", "a:0",
-      "-show_entries", "stream=sample_rate,channels,duration",
+      "-show_entries", "stream=sample_rate,channels,duration,bit_rate:format=duration,bit_rate,size",
       "-of", "json",
       inputPath,
       "-o", probePath,
@@ -78,16 +81,46 @@ async function probeAudio(inputPath) {
   }
 }
 
-function summarizeProbe(probe) {
+function summarizeProbe(probe, byteLength = 0) {
   const stream = probe?.streams?.[0] || {};
+  const format = probe?.format || {};
   const sampleRate = Number.parseInt(stream.sample_rate, 10);
   const channels = Number.parseInt(stream.channels, 10);
-  const duration = Number.parseFloat(stream.duration);
+  let duration = Number.parseFloat(stream.duration);
+  let durationEstimated = false;
+  if (!Number.isFinite(duration)) {
+    duration = Number.parseFloat(format.duration);
+  }
+  const bitRate = Number.parseFloat(stream.bit_rate) || Number.parseFloat(format.bit_rate);
+  const formatSize = Number.parseFloat(format.size);
+  const inputBytes = Number.isFinite(byteLength) && byteLength > 0
+    ? byteLength
+    : (Number.isFinite(formatSize) && formatSize > 0 ? formatSize : 0);
+  if (!Number.isFinite(duration) && bitRate > 0 && inputBytes > 0) {
+    duration = inputBytes * 8 / bitRate;
+    durationEstimated = true;
+  }
   return {
     sampleRate: Number.isFinite(sampleRate) ? sampleRate : null,
     channels: Number.isFinite(channels) ? channels : null,
     duration: Number.isFinite(duration) ? duration : null,
+    durationEstimated,
+    bitRate: Number.isFinite(bitRate) ? bitRate : null,
+    inputBytes,
   };
+}
+
+function shouldUseChunkedDecode(probeSummary, byteLength) {
+  return (Number.isFinite(probeSummary?.duration) && probeSummary.duration >= LONG_DECODE_SECONDS)
+    || (Number.isFinite(byteLength) && byteLength >= LONG_DECODE_MIN_BYTES);
+}
+
+function ensureByteCapacity(buffer, needed) {
+  if (buffer && buffer.length >= needed) return buffer;
+  const nextLength = Math.max(needed, Math.ceil((buffer?.length || 0 || 1024) * 1.5));
+  const next = new Uint8Array(nextLength);
+  if (buffer?.length) next.set(buffer);
+  return next;
 }
 
 function readFloat32Array(raw) {
@@ -141,6 +174,165 @@ async function runDecodeAttempt(args, outputPath, timeoutMs = DEFAULT_DECODE_TIM
   return ffmpeg.readFile(outputPath);
 }
 
+async function decodeWithFfmpegChunked(inputPath, probeSummary, totalTimeoutMs) {
+  const duration = Number(probeSummary?.duration || 0);
+  if (!(duration > 0)) {
+    throw new Error(
+      "FFmpeg chunked decode requires a known audio duration " +
+      `(bitrate=${probeSummary?.bitRate || "n/a"}, bytes=${probeSummary?.inputBytes || 0}).`
+    );
+  }
+
+  const chunkCount = Math.ceil(duration / LONG_DECODE_CHUNK_SECONDS);
+  const expectedBytes = Math.ceil(duration * TARGET_RATE) * 4;
+  let pcmBytes = new Uint8Array(Math.max(4, expectedBytes + TARGET_RATE * 4));
+  let writeOffset = 0;
+  const perChunkTimeoutMs = Math.min(
+    Math.max(120000, Math.ceil(totalTimeoutMs / Math.max(1, chunkCount))),
+    300000
+  );
+
+  post("log", {
+    message: `FFmpeg chunked decode: ${chunkCount} chunk(s), ${LONG_DECODE_CHUNK_SECONDS}s each.`,
+  });
+
+  for (let index = 0; index < chunkCount; index += 1) {
+    const start = index * LONG_DECODE_CHUNK_SECONDS;
+    const length = Math.min(LONG_DECODE_CHUNK_SECONDS, duration - start);
+    if (!(length > 0)) break;
+    const outputPath = `chunk_${index}.f32`;
+    const args = [
+      "-y",
+      "-hide_banner",
+      "-nostdin",
+      "-loglevel", "error",
+      "-ss", start.toFixed(3),
+      "-t", length.toFixed(3),
+      "-i", inputPath,
+      "-map", "0:a:0",
+      "-vn",
+      "-ac", "1",
+      "-ar", String(TARGET_RATE),
+      "-f", "f32le",
+      "-acodec", "pcm_f32le",
+      outputPath,
+    ];
+    let raw;
+    try {
+      raw = await runDecodeAttempt(args, outputPath, perChunkTimeoutMs);
+    } catch (error) {
+      if (probeSummary.durationEstimated && index > 0) {
+        post("log", { message: `FFmpeg chunk ${index + 1} ended early from estimated duration.` });
+        break;
+      }
+      throw error;
+    }
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    if (!bytes.byteLength && probeSummary.durationEstimated && index > 0) {
+      break;
+    }
+    pcmBytes = ensureByteCapacity(pcmBytes, writeOffset + bytes.byteLength);
+    pcmBytes.set(bytes, writeOffset);
+    writeOffset += bytes.byteLength;
+    await cleanup([outputPath]);
+    post("progress", { progress: Math.min(0.995, (index + 1) / chunkCount) });
+  }
+
+  const finalBuffer = pcmBytes.buffer.slice(0, writeOffset);
+  if (finalBuffer.byteLength % 4 !== 0) {
+    throw new Error(`FFmpeg chunked decode returned invalid f32 byte count: ${finalBuffer.byteLength}`);
+  }
+  return {
+    pcmBuffer: finalBuffer,
+    sampleRate: TARGET_RATE,
+    originalSampleRate: probeSummary.sampleRate || null,
+    channels: 1,
+    duration: finalBuffer.byteLength / 4 / TARGET_RATE,
+    decoder: "ffmpeg-wasm-chunked",
+    resampler: "ffmpeg-default",
+  };
+}
+
+async function decodeWithFfmpegChunkedToMessages(id, inputPath, probeSummary, totalTimeoutMs) {
+  const duration = Number(probeSummary?.duration || 0);
+  if (!(duration > 0)) {
+    throw new Error(
+      "FFmpeg streamed chunk decode requires a known audio duration " +
+      `(bitrate=${probeSummary?.bitRate || "n/a"}, bytes=${probeSummary?.inputBytes || 0}).`
+    );
+  }
+
+  const chunkCount = Math.ceil(duration / LONG_DECODE_CHUNK_SECONDS);
+  const perChunkTimeoutMs = Math.min(
+    Math.max(120000, Math.ceil(totalTimeoutMs / Math.max(1, chunkCount))),
+    300000
+  );
+  let sampleOffset = 0;
+
+  post("decoded-chunks-start", {
+    id,
+    chunkCount,
+    sampleRate: TARGET_RATE,
+    originalSampleRate: probeSummary.sampleRate || null,
+    channels: 1,
+    duration,
+    decoder: "ffmpeg-wasm-chunked-stream",
+    resampler: "ffmpeg-default",
+  });
+
+  for (let index = 0; index < chunkCount; index += 1) {
+    const start = index * LONG_DECODE_CHUNK_SECONDS;
+    const length = Math.min(LONG_DECODE_CHUNK_SECONDS, duration - start);
+    if (!(length > 0)) break;
+    const outputPath = `chunk_${index}.f32`;
+    const args = [
+      "-y",
+      "-hide_banner",
+      "-nostdin",
+      "-loglevel", "error",
+      "-ss", start.toFixed(3),
+      "-t", length.toFixed(3),
+      "-i", inputPath,
+      "-map", "0:a:0",
+      "-vn",
+      "-ac", "1",
+      "-ar", String(TARGET_RATE),
+      "-f", "f32le",
+      "-acodec", "pcm_f32le",
+      outputPath,
+    ];
+    const raw = await runDecodeAttempt(args, outputPath, perChunkTimeoutMs);
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    if (buffer.byteLength % 4 !== 0) {
+      throw new Error(`FFmpeg chunk ${index + 1} returned invalid f32 byte count: ${buffer.byteLength}`);
+    }
+    const samples = buffer.byteLength / 4;
+    post("decoded-chunk", {
+      id,
+      chunkIndex: index,
+      chunkCount,
+      sampleOffset,
+      samples,
+      pcmBuffer: buffer,
+    }, [buffer]);
+    sampleOffset += samples;
+    await cleanup([outputPath]);
+    post("progress", { progress: Math.min(0.995, (index + 1) / chunkCount) });
+  }
+
+  post("decoded-chunks-complete", {
+    id,
+    sampleRate: TARGET_RATE,
+    originalSampleRate: probeSummary.sampleRate || null,
+    channels: 1,
+    sampleCount: sampleOffset,
+    duration: sampleOffset / TARGET_RATE,
+    decoder: "ffmpeg-wasm-chunked-stream",
+    resampler: "ffmpeg-default",
+  });
+}
+
 async function decodeWithFfmpeg({ fileName, bytes, timeoutMs }) {
   await ensureFfmpeg();
   lastLogLines = [];
@@ -150,6 +342,13 @@ async function decodeWithFfmpeg({ fileName, bytes, timeoutMs }) {
   const rawOutputPath = "output.raw.f32";
   await ffmpeg.writeFile(inputPath, new Uint8Array(bytes));
   try {
+    const probe = await probeAudio(inputPath);
+    const sourceByteLength = bytes?.byteLength || bytes?.length || 0;
+    const probeSummary = summarizeProbe(probe, sourceByteLength);
+    if (shouldUseChunkedDecode(probeSummary, bytes?.byteLength || bytes?.length || 0)) {
+      return await decodeWithFfmpegChunked(inputPath, probeSummary, timeoutMs || DEFAULT_DECODE_TIMEOUT_MS);
+    }
+
     const primaryArgs = [
       "-y",
       "-hide_banner",
@@ -183,6 +382,37 @@ async function decodeWithFfmpeg({ fileName, bytes, timeoutMs }) {
     throw primaryError;
   } finally {
     await cleanup([inputPath, outputPath, rawOutputPath]);
+  }
+}
+
+async function decodeWithFfmpegToChunks({ id, fileName, file, bytes, timeoutMs, durationHint }) {
+  await ensureFfmpeg();
+  lastLogLines = [];
+
+  const inputName = fileName || file?.name || "input";
+  const inputPath = sanitizeName(inputName);
+  const sourceBytes = bytes || (file && await file.arrayBuffer());
+  if (!sourceBytes) throw new Error("No input bytes for FFmpeg streamed chunk decode.");
+  const sourceByteLength = sourceBytes?.byteLength || sourceBytes?.length || 0;
+  post("log", { message: `FFmpeg streamed input bytes: ${sourceByteLength}.` });
+  await ffmpeg.writeFile(inputPath, new Uint8Array(sourceBytes));
+  try {
+    const probe = await probeAudio(inputPath);
+    const probeSummary = summarizeProbe(probe, sourceByteLength);
+    const hintedDuration = Number(durationHint || 0);
+    if (!(probeSummary.duration > 0) && hintedDuration > 0) {
+      probeSummary.duration = hintedDuration;
+      probeSummary.durationEstimated = true;
+      post("log", { message: `FFmpeg using browser duration hint: ${hintedDuration.toFixed(3)}s.` });
+    }
+    await decodeWithFfmpegChunkedToMessages(
+      id,
+      inputPath,
+      probeSummary,
+      timeoutMs || DEFAULT_DECODE_TIMEOUT_MS
+    );
+  } finally {
+    await cleanup([inputPath]);
   }
 }
 
@@ -226,6 +456,10 @@ self.onmessage = async (event) => {
     if (type === "decode") {
       const result = await decodeWithFfmpeg(event.data);
       post("decoded", { id, ...result }, [result.pcmBuffer]);
+      return;
+    }
+    if (type === "decode-chunks") {
+      await decodeWithFfmpegToChunks(event.data);
       return;
     }
     if (type === "extract") {

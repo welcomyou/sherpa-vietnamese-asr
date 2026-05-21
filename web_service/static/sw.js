@@ -1,5 +1,5 @@
 // Service Worker cho Sherpa Vietnamese ASR PWA
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = 'asr-vn-' + CACHE_VERSION;
 
 const STATIC_ASSETS = [

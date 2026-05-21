@@ -67,7 +67,16 @@ let screenWakeLock = null;
 let screenWakeLockRequest = null;
 let screenWakeLockUnsupportedLogged = false;
 const screenWakeLockReasons = new Set();
+let processingNotificationActive = false;
+let processingNotificationEnabled = false;
+let processingNotificationKind = "processing";
+let processingNotificationFileName = "";
+let processingNotificationLastAt = 0;
+let processingNotificationLastPct = -1;
+let processingNotificationUnsupportedLogged = false;
 let activeResumeAfterKillContext = null;
+let activeProcessingController = null;
+let activeProcessingFileName = "";
 let opfsWritableSupportPromise = null;
 const RESUME_AFTER_KILL_PREFIX = "resume_after_kill_";
 const RESUME_AFTER_KILL_KEEP_SNAPSHOTS = 2;
@@ -83,6 +92,78 @@ const RESUME_AFTER_KILL_DURABLE_STAGES = new Set([
   "overlap",
 ]);
 
+class PipelineCancelledError extends Error {
+  constructor(message = "Đã hủy xử lý.") {
+    super(message);
+    this.name = "PipelineCancelledError";
+    this.cancelled = true;
+  }
+}
+
+function abortReasonMessage(signal, fallback = "Đã hủy xử lý.") {
+  const reason = signal?.reason;
+  if (!reason) return fallback;
+  if (typeof reason === "string") return reason;
+  return reason.message || fallback;
+}
+
+function isPipelineCancelledError(error, options = {}) {
+  return Boolean(
+    error?.cancelled ||
+    error?.name === "PipelineCancelledError" ||
+    ((options.signal?.aborted || activeProcessingController?.signal?.aborted) && (
+      error?.name === "AbortError" ||
+      /reset|terminated|cancel|abort/i.test(error?.message || "")
+    ))
+  );
+}
+
+function throwIfProcessingCancelled(options = {}) {
+  const signal = options.signal;
+  if (signal?.aborted) {
+    throw new PipelineCancelledError(abortReasonMessage(signal));
+  }
+  const activeSignal = activeProcessingController?.signal;
+  if (activeSignal?.aborted) {
+    throw new PipelineCancelledError(abortReasonMessage(activeSignal));
+  }
+}
+
+async function markProcessingCancelledInLibrary(itemId, message = "") {
+  if (!itemId) return;
+  await clearResumeAfterKillForItem(itemId).catch((error) => {
+    log(`[resume_after_kill] Cleanup after cancellation failed: ${error.message || String(error)}`);
+  });
+  await updateLibraryItem(itemId, {
+    status: "cancelled",
+    errorMessage: message || "",
+  }).catch((error) => {
+    log(`Mark cancelled failed: ${error.message || String(error)}`);
+  });
+}
+
+function setProcessingCancelButton(active, pending = false) {
+  const button = $("btn-cancel");
+  if (!button) return;
+  button.style.display = active ? "" : "none";
+  button.disabled = Boolean(pending);
+  button.textContent = pending ? "Đang hủy..." : "Kết thúc";
+}
+
+function requestCancelProcessing(message = "Đã hủy xử lý.") {
+  const controller = activeProcessingController;
+  if (!controller || controller.signal.aborted) return false;
+  setProcessingCancelButton(true, true);
+  setPipelineProgress("Đang hủy xử lý", processingNotificationLastPct >= 0 ? processingNotificationLastPct : 99);
+  const itemId = selectedLibraryItemId || activeResumeAfterKillContext?.itemId;
+  if (activeResumeAfterKillContext) activeResumeAfterKillContext.disabled = true;
+  markProcessingCancelledInLibrary(itemId, "").catch(() => null);
+  log(`Processing cancelled: ${activeProcessingFileName || "audio"}.`);
+  controller.abort(new PipelineCancelledError(message));
+  resetAsrWorker("cancelled");
+  return true;
+}
+
 // --- Buffer Pool: preallocated TypedArrays để giảm GC pressure trong inference loops ---
 let diarBatchBuf = null;         // Float32Array[batchSize * DIAR_CHUNK_SAMPLES] — dùng cho cả 2 diar fns
 let camppDataBuf = null;         // Float32Array[batch * maxFrames * 80] — CAM++ batch input
@@ -96,7 +177,7 @@ function ensureBuf(current, needed) {
 }
 
 const VAD_SAMPLE_RATE = 16000;
-const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js";
+const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js?app=offline-pwa-v141";
 // FFmpeg WASM must not force soxr/swr: some browser builds do not expose those engine names.
 const AUDIO_DECODER_RESAMPLER = "ffmpeg-default";
 const VAD_WINDOW_SIZE = 512;
@@ -141,7 +222,8 @@ const USER_CONFIG_SCHEMA = 8;
 const CALIBRATION_PROFILE_KEY = "asr-vn-offline-calibration-v1";
 const CALIBRATION_LAST_REPORT_KEY = "asr-vn-offline-calibration-report-v1";
 const MANIFEST_STORAGE_KEY = "asr-vn-offline-model-manifest-v1";
-const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v123";
+const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v141";
+window.__OFFLINE_PWA_CODE_VERSION = OFFLINE_PWA_CODE_VERSION;
 const OFFLINE_RUNTIME_CACHE_NAME = OFFLINE_PWA_CODE_VERSION;
 const CALIBRATION_CODE_VERSION = "calibration-v1-provider-stage-tolerance";
 const CALIBRATION_SAMPLE_URL = "/calibration/1hour_qh_10min.mp3";
@@ -150,6 +232,9 @@ const STARTUP_FETCH_TIMEOUT_MS = 1500;
 const DOWNLOAD_RESPONSE_TIMEOUT_MS = 15000;
 const MODEL_DOWNLOAD_STALL_TIMEOUT_MS = 45000;
 const PWA_INSTALLED_FLAG_KEY = "asr-vn-offline-installed-v1";
+const PROCESSING_NOTIFICATION_TAG = "asr-vn-processing";
+const PROCESSING_NOTIFICATION_MIN_INTERVAL_MS = 15000;
+const PROCESSING_NOTIFICATION_MIN_DELTA_PCT = 5;
 const WEBGPU_CALIBRATION_STAGE_NAMES = new Set([
   "CAM++ speaker embedding",
   "Pyannote Community-1 embedding encoder",
@@ -251,6 +336,12 @@ const DIAR_CHUNK_SAMPLES = DIAR_CHUNK_SECONDS * VAD_SAMPLE_RATE;
 const DIAR_STEP_SAMPLES = DIAR_STEP_SECONDS * VAD_SAMPLE_RATE;
 const DIAR_BATCH_SIZE = 16;
 const WEBGPU_DIAR_BATCH_SIZE = 64;
+const WEBGPU_LONG_DIARIZATION_SECONDS = 30 * 60;
+const WEBGPU_LONG_CAMPP_BATCH_MAX = 64;
+const WEBGPU_LONG_PYANNOTE_BATCH_MAX = 16;
+const WEBGPU_LONG_CAMPP_RECYCLE_BATCHES = 64;
+const WEBGPU_LONG_PYANNOTE_RECYCLE_BATCHES = 96;
+const WEBGPU_CONTEXT_RECOVERY_LIMIT = 4;
 const PYANNOTE_STEP_SECONDS = 1;
 const PYANNOTE_STEP_SAMPLES = PYANNOTE_STEP_SECONDS * VAD_SAMPLE_RATE;
 const PYANNOTE_MAX_SPEAKERS_PER_CHUNK = 3;
@@ -488,6 +579,92 @@ function throwIfWebGpuRuntimeSlower(options, started, completed = null, total = 
     total,
   };
   throw error;
+}
+
+function isOrtWebGpuContextLostError(error) {
+  const message = String(error?.message || error || "");
+  if (!message) return false;
+  return /webgpu|gpu|OrtRun|GPUBuffer|mapAsync|buffer_manager|download data from buffer/i.test(message) &&
+    /mapAsync|external Instance|Instance reference|device lost|context lost|GPUBuffer|download data from buffer/i.test(message);
+}
+
+function longWebGpuBatchSize(stageName, requested, totalItems, durationSeconds) {
+  const value = Math.max(1, Number(requested) || 1);
+  if (!(durationSeconds >= WEBGPU_LONG_DIARIZATION_SECONDS)) return value;
+  if (!(totalItems > 0)) return value;
+  if (stageName === "CAM++ speaker embedding") {
+    return Math.max(16, Math.min(value, WEBGPU_LONG_CAMPP_BATCH_MAX));
+  }
+  if (stageName === "Pyannote Community-1 embedding encoder") {
+    return Math.max(4, Math.min(value, WEBGPU_LONG_PYANNOTE_BATCH_MAX));
+  }
+  return value;
+}
+
+function longWebGpuRecycleEvery(stageName, totalItems, durationSeconds) {
+  if (!(durationSeconds >= WEBGPU_LONG_DIARIZATION_SECONDS)) return 0;
+  if (!(totalItems > 0)) return 0;
+  if (stageName === "CAM++ speaker embedding") return WEBGPU_LONG_CAMPP_RECYCLE_BATCHES;
+  if (stageName === "Pyannote Community-1 embedding encoder") return WEBGPU_LONG_PYANNOTE_RECYCLE_BATCHES;
+  return 0;
+}
+
+function smallerWebGpuBatchSize(stageName, current) {
+  const value = Math.max(1, Number(current) || 1);
+  const minimum = stageName === "CAM++ speaker embedding" ? 16 : 4;
+  if (value <= minimum) return value;
+  return Math.max(minimum, Math.floor(value / 2));
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function recreateCamppWebGpuSession(reason = "recovery") {
+  await releaseOrtSession(camppSession).catch((error) => log(`CAM++ WebGPU ${reason} release failed: ${error.message}`));
+  camppSession = null;
+  camppInitPromise = null;
+  camppExecutionProvider = "wasm";
+  await waitMs(150);
+  const model = await loadModelArrayBuffer("speaker.campp");
+  const created = await createOrtSession(model, {
+    name: "CAM++ speaker embedding",
+    webgpuPreferred: true,
+    strictWebgpu: true,
+  });
+  if (created.provider !== "webgpu") {
+    throw new Error(`CAM++ WebGPU ${reason} did not recreate a WebGPU session.`);
+  }
+  camppSession = created.session;
+  camppExecutionProvider = created.provider;
+  log(`CAM++ speaker embedding WebGPU session recreated (${reason}).`);
+}
+
+async function recreatePyannoteEmbeddingWebGpuSession(reason = "recovery") {
+  await releaseOrtSession(pyannoteEmbeddingSession).catch((error) => log(`Pyannote WebGPU ${reason} release failed: ${error.message}`));
+  pyannoteEmbeddingSession = null;
+  pyannoteCommunityInitPromise = null;
+  pyannoteEmbeddingExecutionProvider = "wasm";
+  await waitMs(150);
+  if (!pyannoteCommunityAssets) {
+    await ensurePyannoteCommunityReady();
+    if (pyannoteEmbeddingSession) {
+      await releaseOrtSession(pyannoteEmbeddingSession).catch(() => null);
+      pyannoteEmbeddingSession = null;
+    }
+  }
+  const encoderModel = await loadModelArrayBuffer("speaker.pyannote_embedding_encoder");
+  const created = await createOrtSession(encoderModel, {
+    name: "Pyannote Community-1 embedding encoder",
+    webgpuPreferred: true,
+    strictWebgpu: true,
+  });
+  if (created.provider !== "webgpu") {
+    throw new Error(`Pyannote embedding WebGPU ${reason} did not recreate a WebGPU session.`);
+  }
+  pyannoteEmbeddingSession = created.session;
+  pyannoteEmbeddingExecutionProvider = created.provider;
+  log(`Pyannote Community-1 embedding encoder WebGPU session recreated (${reason}).`);
 }
 
 function webGpuTuneAbortError(stageName, tuning, baselineSeconds) {
@@ -1089,7 +1266,6 @@ async function currentCalibrationSignature(environment = null) {
   const env = environment || await collectBenchmarkEnvironment();
   return hashString(JSON.stringify({
     schema: 1,
-    appCodeVersion: OFFLINE_PWA_CODE_VERSION,
     codeVersion: CALIBRATION_CODE_VERSION,
     sampleUrl: CALIBRATION_SAMPLE_URL,
     manifestSignature: calibrationManifestSignature(),
@@ -1105,18 +1281,12 @@ async function currentCalibrationSignature(environment = null) {
 
 async function loadCalibrationProfileForCurrentDevice() {
   const stored = readStoredCalibrationProfile();
-  if (!stored?.signature) {
+  if (!stored) {
     calibrationProfile = null;
-    return null;
-  }
-  const signature = await currentCalibrationSignature().catch(() => null);
-  if (!signature || stored.signature !== signature) {
-    calibrationProfile = null;
-    log("Device calibration profile is stale or for another runtime; calibration will run again when possible.");
     return null;
   }
   calibrationProfile = stored;
-  log(`Device calibration profile loaded (${stored.createdAt || "unknown"}).`);
+  log(`Device calibration profile loaded (${stored.createdAt || "unknown"}). Re-Calibration is manual only.`);
   return calibrationProfile;
 }
 
@@ -1510,11 +1680,11 @@ function formatBytes(bytes) {
 }
 
 function formatTime(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return "00:00.00";
-  const minutes = Math.floor(seconds / 60);
+  if (!Number.isFinite(seconds) || seconds < 0) return "00:00:00";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
   const wholeSeconds = Math.floor(seconds % 60);
-  const centiseconds = Math.floor((seconds - Math.floor(seconds)) * 100);
-  return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}`;
 }
 
 function safeFileBaseName(name, fallback = "result") {
@@ -1537,6 +1707,139 @@ function log(message) {
     box.textContent += `${line}\n`;
     box.scrollTop = box.scrollHeight;
   }
+}
+
+function notificationApiAvailable() {
+  return Boolean(
+    window.isSecureContext &&
+    "Notification" in window &&
+    "serviceWorker" in navigator &&
+    navigator.serviceWorker?.ready
+  );
+}
+
+async function requestProcessingNotificationPermission() {
+  if (!notificationApiAvailable()) {
+    if (!processingNotificationUnsupportedLogged) {
+      processingNotificationUnsupportedLogged = true;
+      log("[Notification] Processing notifications are not supported in this browser/context.");
+    }
+    return false;
+  }
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied") {
+    log("[Notification] Permission was denied; processing progress will stay in the app UI.");
+    return false;
+  }
+  try {
+    const result = await Notification.requestPermission();
+    const ok = result === "granted";
+    log(ok
+      ? "[Notification] Processing progress notification permission granted."
+      : "[Notification] Processing progress notification permission was not granted.");
+    return ok;
+  } catch (error) {
+    log(`[Notification] Permission request failed: ${error.message || String(error)}`);
+    return false;
+  }
+}
+
+function processingNotificationTitle(done = false, error = false) {
+  if (error) return "Sherpa Vietnamese ASR lỗi xử lý";
+  if (done) return "Sherpa Vietnamese ASR hoàn thành";
+  return processingNotificationKind === "benchmark"
+    ? "Sherpa Vietnamese ASR đang benchmark"
+    : "Sherpa Vietnamese ASR đang xử lý";
+}
+
+function processingNotificationBody(stage, pct, message = "") {
+  const percentText = Number.isFinite(pct) ? `${Math.round(Math.max(0, Math.min(100, pct)))}%` : "";
+  const fileText = processingNotificationFileName ? ` - ${processingNotificationFileName}` : "";
+  const stageText = stage || message || "Đang chạy pipeline offline";
+  return `${percentText}${percentText ? " - " : ""}${stageText}${fileText}`;
+}
+
+async function closeProcessingNotifications() {
+  if (!notificationApiAvailable() || Notification.permission !== "granted") return;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    if (!registration.getNotifications) return;
+    const notifications = await registration.getNotifications({ tag: PROCESSING_NOTIFICATION_TAG });
+    notifications.forEach((item) => item.close());
+  } catch (_) {}
+}
+
+async function showProcessingNotification(stage, pct, options = {}) {
+  if (!processingNotificationEnabled || !notificationApiAvailable() || Notification.permission !== "granted") return;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification(processingNotificationTitle(Boolean(options.done), Boolean(options.error)), {
+      body: processingNotificationBody(stage, pct, options.message || ""),
+      tag: PROCESSING_NOTIFICATION_TAG,
+      renotify: false,
+      silent: !options.error,
+      requireInteraction: !options.done && !options.error,
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      data: {
+        url: location.href,
+        kind: processingNotificationKind,
+        fileName: processingNotificationFileName,
+        stage: stage || "",
+        percent: Math.round(Math.max(0, Math.min(100, Number(pct) || 0))),
+      },
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    if (!processingNotificationUnsupportedLogged) {
+      processingNotificationUnsupportedLogged = true;
+      log(`[Notification] Cannot show processing notification: ${error.message || String(error)}`);
+    }
+  }
+}
+
+async function beginProcessingNotification(kind, fileName) {
+  processingNotificationKind = kind || "processing";
+  processingNotificationFileName = fileName || "";
+  processingNotificationLastAt = 0;
+  processingNotificationLastPct = -1;
+  processingNotificationActive = true;
+  processingNotificationEnabled = await requestProcessingNotificationPermission();
+  if (processingNotificationEnabled) {
+    await showProcessingNotification("Reading input", 1, { message: "Bắt đầu xử lý offline" });
+  }
+}
+
+function updateProcessingNotification(stage, pct, force = false) {
+  if (!processingNotificationActive || !processingNotificationEnabled) return;
+  const bounded = Math.max(0, Math.min(100, Number(pct) || 0));
+  const now = Date.now();
+  const delta = Math.abs(bounded - processingNotificationLastPct);
+  if (!force &&
+      processingNotificationLastPct >= 0 &&
+      delta < PROCESSING_NOTIFICATION_MIN_DELTA_PCT &&
+      now - processingNotificationLastAt < PROCESSING_NOTIFICATION_MIN_INTERVAL_MS) {
+    return;
+  }
+  processingNotificationLastAt = now;
+  processingNotificationLastPct = bounded;
+  showProcessingNotification(stage, bounded).catch(() => null);
+}
+
+async function finishProcessingNotification(ok, message) {
+  if (!processingNotificationActive) return;
+  const enabled = processingNotificationEnabled;
+  processingNotificationActive = false;
+  processingNotificationLastAt = 0;
+  processingNotificationLastPct = -1;
+  if (!enabled) return;
+  await closeProcessingNotifications();
+  await showProcessingNotification(ok ? "Done" : "Pipeline failed", 100, {
+    done: ok,
+    error: !ok,
+    message: message || (ok ? "Hoàn thành xử lý offline" : "Xử lý thất bại"),
+  });
+  processingNotificationEnabled = false;
 }
 
 function debugRound(value, digits = 3) {
@@ -1623,6 +1926,7 @@ function setPipelineProgress(stage, pct) {
   if (bar) bar.style.width = `${bounded.toFixed(1)}%`;
   if (label) label.textContent = `${Math.round(bounded)}%`;
   if (stageNode && stage) stageNode.textContent = stage;
+  updateProcessingNotification(stage, bounded);
 }
 
 function hidePipelineProgress() {
@@ -1724,6 +2028,13 @@ function setupScreenWakeLockResume() {
   };
   const handleVisibility = () => {
     if (document.visibilityState === "hidden") {
+      if (processingNotificationActive) {
+        updateProcessingNotification(
+          "App đang ẩn nền",
+          processingNotificationLastPct >= 0 ? processingNotificationLastPct : 1,
+          true
+        );
+      }
       armResumeAfterKill("app_hidden").catch((error) => {
         log(`[resume_after_kill] Visibility arm failed: ${error.message || String(error)}`);
       });
@@ -1759,15 +2070,7 @@ function clearCalibrationSetupClasses() {
 
 function syncCalibrationSetupUi(stage = "", pct = 0) {
   const standalone = isStandaloneApp();
-  const pending = Boolean(
-    standalone &&
-    offlineBootstrapReady &&
-    !calibrationBusy &&
-    !calibrationProfile &&
-    !autoCalibrationAttempted &&
-    !selectedAudioFile &&
-    !selectedLibraryImportPromise
-  );
+  const pending = false;
   document.body.classList.toggle("calibration-pending", pending);
   document.body.classList.toggle("calibration-busy", Boolean(standalone && calibrationBusy));
   if (standalone && calibrationBusy) {
@@ -1784,7 +2087,7 @@ function syncCalibrationSetupUi(stage = "", pct = 0) {
       message.textContent = `Đã tải đủ dữ liệu offline. Ứng dụng sẽ Calibrate cấu hình tối ưu trước khi mở giao diện xử lý. ${screenWakeLockMessage()}`;
     }
     setProgress($("offline-bootstrap-progress-bar"), 0, 100);
-  } else if (!pending && !calibrationBusy) {
+  } else if (!calibrationBusy) {
     clearCalibrationSetupClasses();
   }
 }
@@ -5200,7 +5503,7 @@ function normalizeAsrText(text) {
 function splitRoverWords(text) {
   return normalizeAsrText(text)
     .split(/\s+/)
-    .map((word) => ({ text: word, norm: normalizeOverlapToken(word) }))
+    .map((word) => ({ text: word, norm: normalizeWordForAsrOverlap(word) }))
     .filter((word) => word.norm);
 }
 
@@ -5210,7 +5513,7 @@ function splitRoverWordObjects(wordsOrText) {
     .map((word) => ({
       ...word,
       text: normalizeAsrText(word?.text || ""),
-      norm: normalizeOverlapToken(word?.text || ""),
+      norm: normalizeWordForAsrOverlap(word?.text || ""),
     }))
     .filter((word) => word.norm);
 }
@@ -5313,10 +5616,210 @@ function roverMergeTexts(textA, textB) {
   return roverMergeWords(textA, textB);
 }
 
-function roverOutputWord(word, disagree = false) {
+function roverOutputWord(word, disagree = false, source = null) {
   const output = { ...(word || {}), text: word?.text || "" };
+  delete output.norm;
   if (disagree) output._disagree = true;
+  if (source) output._source = source;
   return output;
+}
+
+const ROVER_INSERT_CONFIDENCE_THRESHOLD = 0.20;
+const ROVER_HOTWORD_BONUS = 0.5;
+const ROVER_CONTEXT_WORDS = 3;
+
+function roverWordConfidence(word) {
+  const margin = Number(word?.margin_min);
+  const tsallis = Number(word?.tsallis_max);
+  if (Number.isFinite(margin) && Number.isFinite(tsallis)) {
+    return margin * (1.0 - tsallis);
+  }
+  const direct = Number(word?._conf);
+  if (Number.isFinite(direct)) return direct;
+  const prob = Number(word?.prob);
+  if (Number.isFinite(prob)) return prob;
+  return 0.5;
+}
+
+function roverBlockConfidence(words) {
+  if (!words?.length) return 0.0;
+  return words.reduce((sum, word) => sum + roverWordConfidence(word), 0) / words.length;
+}
+
+function roverBuildBIndex(wordsB) {
+  const index = new Map();
+  wordsB.forEach((word, j) => {
+    const list = index.get(word.norm) || [];
+    list.push(j);
+    index.set(word.norm, list);
+  });
+  return index;
+}
+
+function roverFindLongestMatch(wordsA, wordsB, alo, ahi, blo, bhi, bIndex) {
+  let bestI = alo;
+  let bestJ = blo;
+  let bestSize = 0;
+  let previousLengths = new Map();
+  for (let i = alo; i < ahi; i += 1) {
+    const lengths = new Map();
+    const candidates = bIndex.get(wordsA[i].norm) || [];
+    for (const j of candidates) {
+      if (j < blo) continue;
+      if (j >= bhi) break;
+      const k = (previousLengths.get(j - 1) || 0) + 1;
+      lengths.set(j, k);
+      if (k > bestSize) {
+        bestI = i - k + 1;
+        bestJ = j - k + 1;
+        bestSize = k;
+      }
+    }
+    previousLengths = lengths;
+  }
+  return { i: bestI, j: bestJ, size: bestSize };
+}
+
+function roverMatchingBlocks(wordsA, wordsB) {
+  const bIndex = roverBuildBIndex(wordsB);
+  const queue = [{ alo: 0, ahi: wordsA.length, blo: 0, bhi: wordsB.length }];
+  const matches = [];
+  while (queue.length) {
+    const range = queue.pop();
+    const match = roverFindLongestMatch(
+      wordsA,
+      wordsB,
+      range.alo,
+      range.ahi,
+      range.blo,
+      range.bhi,
+      bIndex
+    );
+    if (!match.size) continue;
+    matches.push(match);
+    if (range.alo < match.i && range.blo < match.j) {
+      queue.push({ alo: range.alo, ahi: match.i, blo: range.blo, bhi: match.j });
+    }
+    const aEnd = match.i + match.size;
+    const bEnd = match.j + match.size;
+    if (aEnd < range.ahi && bEnd < range.bhi) {
+      queue.push({ alo: aEnd, ahi: range.ahi, blo: bEnd, bhi: range.bhi });
+    }
+  }
+  matches.sort((left, right) => (left.i - right.i) || (left.j - right.j));
+  const nonAdjacent = [];
+  for (const match of matches) {
+    const previous = nonAdjacent[nonAdjacent.length - 1];
+    if (previous && previous.i + previous.size === match.i && previous.j + previous.size === match.j) {
+      previous.size += match.size;
+    } else {
+      nonAdjacent.push({ ...match });
+    }
+  }
+  nonAdjacent.push({ i: wordsA.length, j: wordsB.length, size: 0 });
+  return nonAdjacent;
+}
+
+function roverAlignmentBlocks(wordsA, wordsB) {
+  const blocks = [];
+  let i = 0;
+  let j = 0;
+  for (const match of roverMatchingBlocks(wordsA, wordsB)) {
+    const tag = i < match.i && j < match.j ? "replace" : (i < match.i ? "delete" : (j < match.j ? "insert" : null));
+    if (tag) {
+      blocks.push({
+        tag,
+        a: wordsA.slice(i, match.i),
+        b: wordsB.slice(j, match.j),
+      });
+    }
+    if (match.size) {
+      blocks.push({
+        tag: "equal",
+        a: wordsA.slice(match.i, match.i + match.size),
+        b: wordsB.slice(match.j, match.j + match.size),
+      });
+    }
+    i = match.i + match.size;
+    j = match.j + match.size;
+  }
+  return blocks;
+}
+
+function roverContextForBlock(blocks, index, side, before) {
+  const block = blocks[before ? index - 1 : index + 1];
+  if (block?.tag !== "equal") return null;
+  const words = block[side] || [];
+  return before ? words.slice(Math.max(0, words.length - ROVER_CONTEXT_WORDS)) : words.slice(0, ROVER_CONTEXT_WORDS);
+}
+
+function roverNormalizeHotwordPhrase(text) {
+  return String(text || "")
+    .toLocaleLowerCase("vi-VN")
+    .normalize("NFC")
+    .replace(/[^\p{L}\p{N}_]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function roverHotwordPhrases() {
+  if ($("hotwords-enabled") && !$("hotwords-enabled").checked) return [];
+  return normalizeHotwordItems(readHotwordItemsFromUi(), currentHotwordsDefaultScore())
+    .map((item) => roverNormalizeHotwordPhrase(item.text))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+}
+
+function roverCountHotwordMatches(words, contextBefore = null, contextAfter = null) {
+  if (!words?.length) return 0.0;
+  const phrases = roverHotwordPhrases();
+  if (!phrases.length) return 0.0;
+
+  const before = Array.isArray(contextBefore) ? contextBefore : [];
+  const after = Array.isArray(contextAfter) ? contextAfter : [];
+  const allWords = before.concat(words, after);
+  const blockStart = before.length;
+  const blockEnd = blockStart + words.length;
+  const intervals = [];
+  let text = "";
+  let cursor = 0;
+  for (let i = 0; i < allWords.length; i += 1) {
+    const norm = normalizeWordForAsrOverlap(allWords[i]?.text || allWords[i]?.norm || "");
+    if (i > 0) {
+      text += " ";
+      cursor += 1;
+    }
+    const start = cursor;
+    text += norm;
+    cursor += norm.length;
+    intervals.push({ start, end: cursor });
+  }
+  if (!text.trim()) return 0.0;
+
+  const matched = new Set();
+  for (const phrase of phrases) {
+    let start = 0;
+    while (start < text.length) {
+      const index = text.indexOf(phrase, start);
+      if (index < 0) break;
+      for (let pos = index; pos < index + phrase.length; pos += 1) matched.add(pos);
+      start = index + 1;
+    }
+  }
+  if (!matched.size) return 0.0;
+
+  let matchedWords = 0;
+  for (let i = blockStart; i < blockEnd; i += 1) {
+    const interval = intervals[i];
+    if (!interval || interval.end <= interval.start) continue;
+    for (let pos = interval.start; pos < interval.end; pos += 1) {
+      if (matched.has(pos)) {
+        matchedWords += 1;
+        break;
+      }
+    }
+  }
+  return matchedWords / words.length;
 }
 
 function roverMergeWords(inputA, inputB) {
@@ -5326,7 +5829,7 @@ function roverMergeWords(inputA, inputB) {
     return { text: "", words: [], stats: { replacements: 0, replacementB: 0, inserts: 0, deletes: 0 } };
   }
   if (!wordsA.length) {
-    const words = wordsB.map((word) => roverOutputWord(word, true));
+    const words = wordsB.map((word) => roverOutputWord(word, false));
     return { text: words.map((word) => word.text).join(" "), words, stats: { replacements: 0, replacementB: 0, inserts: wordsB.length, deletes: 0 } };
   }
   if (!wordsB.length) {
@@ -5334,50 +5837,82 @@ function roverMergeWords(inputA, inputB) {
     return { text: words.map((word) => word.text).join(" "), words, stats: { replacements: 0, replacementB: 0, inserts: 0, deletes: 0 } };
   }
 
-  const ops = roverAlignmentOps(wordsA, wordsB);
+  const blocks = roverAlignmentBlocks(wordsA, wordsB);
   const merged = [];
   const stats = { replacements: 0, replacementB: 0, inserts: 0, deletes: 0 };
-  let blockA = [];
-  let blockB = [];
+  let order = 0;
 
-  function flushBlock() {
-    if (!blockA.length && !blockB.length) return;
-    if (blockA.length && blockB.length) {
+  const pushMerged = (word, disagree = false, source = null) => {
+    const output = roverOutputWord(word, disagree, source);
+    output._roverOrder = order;
+    order += 1;
+    merged.push(output);
+  };
+
+  for (let bi = 0; bi < blocks.length; bi += 1) {
+    const block = blocks[bi];
+    if (block.tag === "equal") {
+      for (const word of block.a) pushMerged(word, false);
+    } else if (block.tag === "replace") {
       stats.replacements += 1;
-      const scoreA = roverBlockScore(blockA);
-      const scoreB = roverBlockScore(blockB);
-      if (scoreB >= scoreA - 0.25) {
-        merged.push(...blockB.map((word) => roverOutputWord(word, true)));
-        stats.replacementB += 1;
-      } else {
-        merged.push(...blockA.map((word) => roverOutputWord(word, true)));
-      }
-    } else if (blockA.length) {
-      merged.push(...blockA.map((word) => roverOutputWord(word, true)));
-      stats.deletes += blockA.length;
-    } else {
-      const insertScore = roverBlockScore(blockB);
-      if (insertScore > 1.5) {
-        merged.push(...blockB.map((word) => roverOutputWord(word, true)));
-        stats.inserts += blockB.length;
+      let confA = roverBlockConfidence(block.a);
+      let confB = roverBlockConfidence(block.b);
+      const hotA = roverCountHotwordMatches(
+        block.a,
+        roverContextForBlock(blocks, bi, "a", true),
+        roverContextForBlock(blocks, bi, "a", false)
+      );
+      const hotB = roverCountHotwordMatches(
+        block.b,
+        roverContextForBlock(blocks, bi, "b", true),
+        roverContextForBlock(blocks, bi, "b", false)
+      );
+      if (hotA > 0 && hotB === 0) confA += hotA * ROVER_HOTWORD_BONUS;
+      else if (hotB > 0 && hotA === 0) confB += hotB * ROVER_HOTWORD_BONUS;
+
+      const chosen = confB > confA ? block.b : block.a;
+      if (chosen === block.b) stats.replacementB += 1;
+      for (const word of chosen) pushMerged(word, true);
+    } else if (block.tag === "delete") {
+      stats.deletes += block.a.length;
+      for (const word of block.a) pushMerged(word, false);
+    } else if (block.tag === "insert") {
+      for (const word of block.b) {
+        if (roverWordConfidence(word) > ROVER_INSERT_CONFIDENCE_THRESHOLD) {
+          pushMerged(word, true, "B_supplement");
+          stats.inserts += 1;
+        }
       }
     }
-    blockA = [];
-    blockB = [];
   }
 
-  for (const op of ops) {
-    if (op.type === "equal") {
-      flushBlock();
-      merged.push(roverOutputWord(op.a, false));
-    } else {
-      if (op.a) blockA.push(op.a);
-      if (op.b) blockB.push(op.b);
+  merged.sort((a, b) => {
+    const startA = Number(a.start);
+    const startB = Number(b.start);
+    if (Number.isFinite(startA) && Number.isFinite(startB) && startA !== startB) return startA - startB;
+    return (a._roverOrder || 0) - (b._roverOrder || 0);
+  });
+
+  const deduped = [];
+  for (const word of merged) {
+    if (word._source === "B_supplement") {
+      const start = Number(word.start);
+      const norm = normalizeWordForAsrOverlap(word.text);
+      const duplicate = Number.isFinite(start) && deduped.some((existing) => (
+        existing._source !== "B_supplement" &&
+        Math.abs(Number(existing.start) - start) < 0.15 &&
+        normalizeWordForAsrOverlap(existing.text) === norm
+      ));
+      if (duplicate) {
+        stats.inserts = Math.max(0, stats.inserts - 1);
+        continue;
+      }
     }
+    delete word._source;
+    delete word._roverOrder;
+    deduped.push(word);
   }
-  flushBlock();
 
-  const deduped = roverDedupAdjacent(merged);
   return {
     text: deduped.map((word) => word.text).join(" "),
     words: deduped,
@@ -5412,6 +5947,7 @@ async function decodeAsrChunkWithCall(call, samples, timeline, chunk, modelConfi
 
 async function runAsrChunkSequence(sequence, call, results, samples, timeline, modelConfig, options, state, concatSamples = null) {
   for (const chunk of sequence) {
+    throwIfProcessingCancelled(options);
     if (results[chunk.index - 1]) {
       if (options.progress) options.progress(state.done, state.total);
       continue;
@@ -5433,12 +5969,16 @@ async function runAsrChunkSequence(sequence, call, results, samples, timeline, m
     );
     log(`ASR chunk ${chunk.index}/${state.total}: ${decoded.text || "[empty]"}`);
     if (options.progress) options.progress(state.done, state.total);
+    throwIfProcessingCancelled(options);
   }
 }
 
 async function decodeAsrChunksParallel(samples, timeline, chunks, modelConfig, options, speechSeconds, concatSamples = null, initialResults = null) {
   const secondary = createAsrWorkerHandle("ASR worker 2", modelConfig);
+  const abortSecondary = () => secondary.terminate();
+  options.signal?.addEventListener?.("abort", abortSecondary, { once: true });
   try {
+    throwIfProcessingCancelled(options);
     await loadAsrModelIntoWorkerHandle(secondary, modelConfig, options);
     const results = initialResults || new Array(chunks.length);
     const state = { done: results.filter(Boolean).length, total: chunks.length, speechSeconds };
@@ -5450,14 +5990,17 @@ async function decodeAsrChunksParallel(samples, timeline, chunks, modelConfig, o
       runAsrChunkSequence(even, callAsrWorker, results, samples, timeline, modelConfig, options, state, concatSamples),
       runAsrChunkSequence(odd, secondary.call, results, samples, timeline, modelConfig, options, state, concatSamples),
     ]);
+    throwIfProcessingCancelled(options);
     return results;
   } finally {
+    options.signal?.removeEventListener?.("abort", abortSecondary);
     secondary.terminate();
     setAsrStatus("ready");
   }
 }
 
 async function runFullAsr(samples, vadSegments, options = {}) {
+  throwIfProcessingCancelled(options);
   const modelConfig = options.asrModel || getSelectedAsrModel();
   if (modelConfig.type === "rover") {
     return runFullRoverAsr(samples, vadSegments, { ...options, asrModel: modelConfig });
@@ -5481,6 +6024,7 @@ async function runFullAsr(samples, vadSegments, options = {}) {
     hotwordsScore: options.hotwordsScore,
     providerMode: "wasm",
   });
+  throwIfProcessingCancelled(options);
   const started = performance.now();
   const hadAsrChunkCheckpoint = Boolean(options.resumeAsrChunks?.results?.length);
   let results = decodeAsrChunksCheckpoint(options.resumeAsrChunks, chunks, modelConfig) || new Array(chunks.length);
@@ -5514,6 +6058,7 @@ async function runFullAsr(samples, vadSegments, options = {}) {
     results = await decodeAsrChunksParallel(samples, timeline, chunks, modelConfig, options, speechSeconds, concatSamples, results);
   } else {
     for (const chunk of chunks) {
+      throwIfProcessingCancelled(options);
       if (results[chunk.index - 1]) {
         if (options.progress) options.progress(chunk.index, chunks.length);
         continue;
@@ -5531,9 +6076,11 @@ async function runFullAsr(samples, vadSegments, options = {}) {
       );
       log(`ASR chunk ${chunk.index}/${chunks.length}: ${decoded.text || "[empty]"}`);
       if (options.progress) options.progress(chunk.index, chunks.length);
+      throwIfProcessingCancelled(options);
     }
   }
   await checkpointQueue.catch(() => null);
+  throwIfProcessingCancelled(options);
 
   const elapsed = (performance.now() - started) / 1000;
   setAsrStatus("ready");
@@ -5817,6 +6364,7 @@ async function addAsrBenchmarkWebGpuBranch(options, asr, asrAudio, vadSegments, 
 }
 
 async function runFullRoverAsr(samples, vadSegments, options = {}) {
+  throwIfProcessingCancelled(options);
   const modelConfig = options.asrModel || ASR_MODELS[ROVER_MODEL_ID];
   const childIds = modelConfig.modelIds || [];
   if (childIds.length !== 2) {
@@ -5846,6 +6394,7 @@ async function runFullRoverAsr(samples, vadSegments, options = {}) {
     hotwordsText: options.hotwordsText,
     hotwordsScore: options.hotwordsScore,
   });
+  throwIfProcessingCancelled(options);
   const started = performance.now();
   const hadAsrChunkCheckpoint = Boolean(options.resumeAsrChunks?.results?.length);
   const results = decodeAsrChunksCheckpoint(options.resumeAsrChunks, chunks, modelConfig) || new Array(chunks.length);
@@ -5880,6 +6429,7 @@ async function runFullRoverAsr(samples, vadSegments, options = {}) {
   };
 
   for (const chunk of chunks) {
+    throwIfProcessingCancelled(options);
     if (results[chunk.index - 1]) {
       if (options.progress) options.progress(chunk.index, chunks.length);
       continue;
@@ -5887,10 +6437,20 @@ async function runFullRoverAsr(samples, vadSegments, options = {}) {
     setAsrStatus(`ROVER decoding ${chunk.index}/${chunks.length}`);
     if (options.progress) options.progress(chunk.index - 1, chunks.length);
     const chunkSamples = new Float32Array(concatSamples.subarray(chunk.start, chunk.end));
-    const samplesA = new Float32Array(chunkSamples);
     const timeOffset = chunk.start / VAD_SAMPLE_RATE;
-    const responseA = await callAsrWorker("decode", { modelId: modelA.id, samples: samplesA, timeOffset }, [samplesA.buffer]);
-    const responseB = await callAsrWorker("decode", { modelId: modelB.id, samples: chunkSamples, timeOffset }, [chunkSamples.buffer]);
+    const pairResponse = await callAsrWorker(
+      "decode_pair",
+      {
+        primaryModelId: modelA.id,
+        secondaryModelId: modelB.id,
+        samples: chunkSamples,
+        timeOffset,
+      },
+      [chunkSamples.buffer]
+    );
+    throwIfProcessingCancelled(options);
+    const responseA = { result: pairResponse.result?.primary || {} };
+    const responseB = { result: pairResponse.result?.secondary || {} };
     const textA = normalizeAsrText(responseA.result?.text || "");
     const textB = normalizeAsrText(responseB.result?.text || "");
     const merged = Array.isArray(responseA.result?.words) || Array.isArray(responseB.result?.words)
@@ -5926,6 +6486,7 @@ async function runFullRoverAsr(samples, vadSegments, options = {}) {
     if (options.progress) options.progress(chunk.index, chunks.length);
   }
   await checkpointQueue.catch(() => null);
+  throwIfProcessingCancelled(options);
 
   const elapsed = (performance.now() - started) / 1000;
   setAsrStatus("ready");
@@ -6440,7 +7001,9 @@ async function restorePunctuation(text, options = {}) {
   const raw = (text || "").trim();
   if (!raw) return { text: "", elapsed: 0, chunks: 0 };
 
+  throwIfProcessingCancelled(options);
   await ensurePunctuationReady();
+  throwIfProcessingCancelled(options);
   const started = performance.now();
   const words = raw.split(/\s+/).filter(Boolean);
   const pauseHints = Array.isArray(options.pauseHints) && options.pauseHints.length === words.length
@@ -6455,11 +7018,13 @@ async function restorePunctuation(text, options = {}) {
     .map((item) => item.index);
 
   for (let iter = 0; iter < PUNCT_ITERATIONS && predIds.length; iter += 1) {
+    throwIfProcessingCancelled(options);
     const origBatch = predIds.map((index) => finalBatch[index]);
     const predicted = await predictPunctuation(
       origBatch,
       (done, total) => {
         if (options.progress) options.progress(iter, done, total);
+        throwIfProcessingCancelled(options);
       },
       {
         ...options,
@@ -6468,6 +7033,7 @@ async function restorePunctuation(text, options = {}) {
           : null,
       }
     );
+    throwIfProcessingCancelled(options);
     const predBatch = postprocessPunctuationBatch(
       origBatch,
       predicted.allProbabilities,
@@ -6492,6 +7058,7 @@ async function restorePunctuation(text, options = {}) {
     predIds = nextPredIds;
   }
 
+  throwIfProcessingCancelled(options);
   const merged = indices.map(([start, end]) => mergePunctuationChunks(finalBatch.slice(start, end)));
   let restored = merged[0] || raw;
   restored = restored.replace(/\s+([:.,?])/g, "$1");
@@ -6655,16 +7222,19 @@ async function computeDnsmosSingle(audio) {
 
 async function computeDesktopDnsmosFromSpeech(speechSamples, options = {}) {
   if (!speechSamples?.length || speechSamples.length < DNSMOS_MIN_SAMPLES) return null;
+  throwIfProcessingCancelled(options);
   const positions = [0.15, 0.50, 0.85];
   const scores = [];
 
   for (let i = 0; i < positions.length; i += 1) {
+    throwIfProcessingCancelled(options);
     const center = Math.floor(speechSamples.length * positions[i]);
     const start = Math.max(0, center - Math.floor(DNSMOS_SAMPLE_LENGTH / 2));
     const end = Math.min(speechSamples.length, start + DNSMOS_SAMPLE_LENGTH);
     if (end - start < DNSMOS_MIN_SAMPLES) continue;
     if (options.progress) options.progress(i, positions.length);
     const score = await computeDnsmosSingle(speechSamples.subarray(start, end));
+    throwIfProcessingCancelled(options);
     if (score) scores.push(score);
   }
 
@@ -6696,6 +7266,7 @@ function withQualityLabels(quality) {
   return result;
 }
 async function computeQualityInfoFromSpeech(speechSamples, asrConfidence, options = {}) {
+  throwIfProcessingCancelled(options);
   const started = performance.now();
   const quality = {};
   try {
@@ -9945,19 +10516,33 @@ async function decodeAudioFileWithWebAudio(file, arrayBuffer) {
 
 function decodeAudioFileWithFfmpegWorker(file, arrayBuffer, options = {}) {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new PipelineCancelledError(abortReasonMessage(options.signal)));
+      return;
+    }
     const worker = new Worker(AUDIO_DECODER_WORKER, { type: "module" });
     const id = 1;
-    const timeoutMs = options.ffmpegTimeoutMs || options.timeoutMs || 180000;
+    const sizeMb = Number(file?.size || arrayBuffer?.byteLength || 0) / (1024 * 1024);
+    const defaultTimeoutMs = Math.min(
+      2 * 60 * 60 * 1000,
+      Math.max(180000, Math.ceil(sizeMb * 10000))
+    );
+    const timeoutMs = options.ffmpegTimeoutMs || options.timeoutMs || defaultTimeoutMs;
     let settled = false;
     let timeoutId = null;
+    const onAbort = () => {
+      finish(reject, new PipelineCancelledError(abortReasonMessage(options.signal)));
+    };
 
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
       if (timeoutId) clearTimeout(timeoutId);
+      options.signal?.removeEventListener?.("abort", onAbort);
       worker.terminate();
       callback(value);
     };
+    options.signal?.addEventListener?.("abort", onAbort, { once: true });
 
     worker.addEventListener("message", (event) => {
       const message = event.data || {};
@@ -10008,6 +10593,715 @@ function decodeAudioFileWithFfmpegWorker(file, arrayBuffer, options = {}) {
     }, [arrayBuffer]);
   });
 }
+
+function pcmChunkFileName(index) {
+  return `diar_pcm_${String(index).padStart(5, "0")}.f32`;
+}
+
+async function createTempPcmStore(file) {
+  const id = `tmp_diar_pcm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  const dir = await opfsLibraryItemDir(id, true);
+  return {
+    kind: "chunked-pcm",
+    id,
+    dir,
+    sourceName: file?.name || "audio",
+    sampleRate: VAD_SAMPLE_RATE,
+    sampleCount: 0,
+    duration: 0,
+    decoder: "unknown",
+    originalSampleRate: null,
+    channels: null,
+    chunks: [],
+  };
+}
+
+async function cleanupPcmStore(store) {
+  if (!store?.dir) return;
+  for (const chunk of store.chunks || []) {
+    await removeOpfsFile(store.dir, chunk.name).catch(() => null);
+  }
+  if (store.dir.kind === "idb") {
+    return;
+  }
+  try {
+    const root = await opfsLibraryDir();
+    await root.removeEntry(store.id, { recursive: true });
+  } catch (_) {
+    // Best effort cleanup only.
+  }
+}
+
+function probeBrowserAudioDuration(file, timeoutMs = 10000) {
+  if (!(file instanceof File || file instanceof Blob)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    let url = "";
+    const audio = document.createElement("audio");
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      audio.removeAttribute("src");
+      try { audio.load(); } catch (_) {}
+      if (url) URL.revokeObjectURL(url);
+      resolve(Number.isFinite(value) && value > 0 ? value : null);
+    };
+    const timer = window.setTimeout(() => finish(null), timeoutMs);
+    audio.preload = "metadata";
+    audio.addEventListener("loadedmetadata", () => finish(Number(audio.duration) || null), { once: true });
+    audio.addEventListener("durationchange", () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) finish(audio.duration);
+    }, { once: true });
+    audio.addEventListener("error", () => finish(null), { once: true });
+    try {
+      url = URL.createObjectURL(file);
+      audio.src = url;
+    } catch (_) {
+      finish(null);
+    }
+  });
+}
+
+async function decodeAudioFileToPcmStore(file, options = {}) {
+  const store = await createTempPcmStore(file);
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(AUDIO_DECODER_WORKER, { type: "module" });
+    const id = 1;
+    const sizeMb = Number(file?.size || 0) / (1024 * 1024);
+    const defaultTimeoutMs = Math.min(
+      2 * 60 * 60 * 1000,
+      Math.max(180000, Math.ceil(sizeMb * 10000))
+    );
+    const timeoutMs = options.ffmpegTimeoutMs || options.timeoutMs || defaultTimeoutMs;
+    let settled = false;
+    let timeoutId = null;
+    let writeChain = Promise.resolve();
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      worker.terminate();
+      callback(value);
+    };
+
+    worker.addEventListener("message", (event) => {
+      const message = event.data || {};
+      if (message.type === "log") {
+        log(`Audio decoder: ${message.message}`);
+        return;
+      }
+      if (message.type === "progress") {
+        if (options.signal?.aborted) {
+          finish(reject, new PipelineCancelledError(abortReasonMessage(options.signal)));
+          return;
+        }
+        if (typeof options.progress === "function") {
+          options.progress(Number(message.progress) || 0);
+        }
+        return;
+      }
+      if (message.id !== id) return;
+
+      if (message.type === "decoded-chunks-start") {
+        store.sampleRate = message.sampleRate || VAD_SAMPLE_RATE;
+        store.originalSampleRate = message.originalSampleRate || null;
+        store.channels = message.channels || null;
+        store.duration = message.duration || 0;
+        store.decoder = message.decoder || "ffmpeg-wasm-chunked-stream";
+        log(`Audio decoder: streamed PCM decode started (${message.chunkCount || "?"} chunk(s)).`);
+        return;
+      }
+
+      if (message.type === "decoded-chunk") {
+        const buffer = message.pcmBuffer;
+        const chunkIndex = Number(message.chunkIndex) || 0;
+        const name = pcmChunkFileName(chunkIndex);
+        const sampleOffset = Number(message.sampleOffset) || 0;
+        const samples = Number(message.samples) || (buffer ? buffer.byteLength / 4 : 0);
+        writeChain = writeChain
+          .then(async () => {
+            await writeOpfsFile(store.dir, name, buffer);
+            store.chunks.push({ name, sampleOffset, samples });
+            store.sampleCount = Math.max(store.sampleCount, sampleOffset + samples);
+          })
+          .catch((error) => {
+            finish(reject, error);
+          });
+        return;
+      }
+
+      if (message.type === "decoded-chunks-complete") {
+        writeChain
+          .then(() => {
+            store.sampleRate = message.sampleRate || store.sampleRate || VAD_SAMPLE_RATE;
+            store.originalSampleRate = message.originalSampleRate || store.originalSampleRate || null;
+            store.channels = message.channels || store.channels || null;
+            store.sampleCount = message.sampleCount || store.sampleCount;
+            store.duration = message.duration || (store.sampleCount / VAD_SAMPLE_RATE);
+            store.decoder = message.decoder || store.decoder || "ffmpeg-wasm-chunked-stream";
+            store.chunks.sort((a, b) => a.sampleOffset - b.sampleOffset);
+            finish(resolve, store);
+          })
+          .catch((error) => finish(reject, error));
+        return;
+      }
+
+      if (message.type === "error") {
+        finish(reject, new Error(message.message || "FFmpeg streamed audio decode failed."));
+      }
+    });
+
+    worker.addEventListener("error", (event) => {
+      finish(reject, new Error(event.message || "FFmpeg streamed audio decoder crashed."));
+    });
+
+    timeoutId = setTimeout(() => {
+      finish(reject, new Error(`FFmpeg streamed audio decode timed out after ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs + 1000);
+
+    (async () => {
+      const durationHint = await probeBrowserAudioDuration(file).catch(() => null);
+      if (durationHint) log(`Audio decoder: browser duration hint ${durationHint.toFixed(3)}s.`);
+      const sourceBuffer = await file.arrayBuffer();
+      log(`Audio decoder: source bytes ${sourceBuffer.byteLength || 0}.`);
+      if (!sourceBuffer.byteLength) {
+        throw new Error(`Selected audio file is empty or unreadable: ${file?.name || "input"}.`);
+      }
+      worker.postMessage({
+        id,
+        type: "decode-chunks",
+        fileName: file?.name || "input",
+        bytes: sourceBuffer,
+        durationHint,
+        timeoutMs,
+      }, [sourceBuffer]);
+    })().catch((error) => finish(reject, error));
+  }).catch(async (error) => {
+    await cleanupPcmStore(store).catch(() => null);
+    throw error;
+  });
+}
+
+async function readPcmStoreRange(store, startSample, sampleCount) {
+  const start = Math.max(0, Math.floor(startSample || 0));
+  const count = Math.max(0, Math.floor(sampleCount || 0));
+  const out = new Float32Array(count);
+  if (!count) return out;
+
+  const end = start + count;
+  let written = 0;
+  for (const chunk of store.chunks || []) {
+    const chunkStart = chunk.sampleOffset;
+    const chunkEnd = chunk.sampleOffset + chunk.samples;
+    if (chunkEnd <= start) continue;
+    if (chunkStart >= end) break;
+
+    const file = await readOpfsFile(store.dir, chunk.name);
+    const data = new Float32Array(await file.arrayBuffer());
+    const localStart = Math.max(0, start - chunkStart);
+    const localEnd = Math.min(data.length, end - chunkStart);
+    if (localEnd <= localStart) continue;
+    out.set(data.subarray(localStart, localEnd), written);
+    written += localEnd - localStart;
+  }
+  return out;
+}
+
+function createPcmStoreRangeReader(store, maxCachedChunks = 3) {
+  const cache = new Map();
+  const touch = (name, data) => {
+    if (cache.has(name)) cache.delete(name);
+    cache.set(name, data);
+    while (cache.size > maxCachedChunks) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+    }
+  };
+  const loadChunk = async (chunk) => {
+    if (cache.has(chunk.name)) {
+      const cached = cache.get(chunk.name);
+      touch(chunk.name, cached);
+      return cached;
+    }
+    const file = await readOpfsFile(store.dir, chunk.name);
+    const data = new Float32Array(await file.arrayBuffer());
+    touch(chunk.name, data);
+    return data;
+  };
+  return async (startSample, sampleCount) => {
+    const start = Math.max(0, Math.floor(startSample || 0));
+    const count = Math.max(0, Math.floor(sampleCount || 0));
+    const out = new Float32Array(count);
+    if (!count) return out;
+    const end = start + count;
+    let written = 0;
+    for (const chunk of store.chunks || []) {
+      const chunkStart = chunk.sampleOffset;
+      const chunkEnd = chunk.sampleOffset + chunk.samples;
+      if (chunkEnd <= start) continue;
+      if (chunkStart >= end) break;
+      const data = await loadChunk(chunk);
+      const localStart = Math.max(0, start - chunkStart);
+      const localEnd = Math.min(data.length, end - chunkStart);
+      if (localEnd <= localStart) continue;
+      out.set(data.subarray(localStart, localEnd), written);
+      written += localEnd - localStart;
+    }
+    return out;
+  };
+}
+
+function intersectionSeconds(aStart, aEnd, bStart, bEnd) {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+function remapChunkSpeakerLabels(absSegments, previousSegments, overlapStart, overlapEnd, nextSpeakerRef) {
+  const localSpeakers = [...new Set(absSegments.map((segment) => segment.speaker))].sort((a, b) => a - b);
+  const map = new Map();
+  if (!previousSegments.length || overlapEnd <= overlapStart) {
+    for (const local of localSpeakers) {
+      map.set(local, nextSpeakerRef.value++);
+    }
+  } else {
+    const candidates = [];
+    for (const current of absSegments) {
+      if (current.end <= overlapStart || current.start >= overlapEnd) continue;
+      for (const previous of previousSegments) {
+        if (previous.end <= overlapStart || previous.start >= overlapEnd) continue;
+        const score = intersectionSeconds(current.start, current.end, previous.start, previous.end);
+        if (score > 0) {
+          candidates.push({ local: current.speaker, global: previous.speaker, score });
+        }
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    const usedGlobal = new Set();
+    for (const item of candidates) {
+      if (map.has(item.local) || usedGlobal.has(item.global)) continue;
+      map.set(item.local, item.global);
+      usedGlobal.add(item.global);
+    }
+    for (const local of localSpeakers) {
+      if (!map.has(local)) map.set(local, nextSpeakerRef.value++);
+    }
+  }
+  return absSegments.map((segment) => ({
+    ...segment,
+    speaker: map.get(segment.speaker) ?? segment.speaker,
+  }));
+}
+
+function trimAbsRegionsToLocal(regions, offsetSeconds, keepStartSeconds, keepEndSeconds, minDuration = 0.05) {
+  const output = [];
+  for (const region of regions || []) {
+    const absStart = Number(region.start || 0) + offsetSeconds;
+    const absEnd = Number(region.end || 0) + offsetSeconds;
+    const start = Math.max(absStart, keepStartSeconds);
+    const end = Math.min(absEnd, keepEndSeconds);
+    if (end - start >= minDuration) {
+      output.push({ start: start - offsetSeconds, end: end - offsetSeconds });
+    }
+  }
+  return output;
+}
+
+function offsetAndTrimRegions(regions, offsetSeconds, keepStartSeconds, keepEndSeconds, minDuration = 0.05) {
+  const output = [];
+  for (const region of regions || []) {
+    const absStart = Number(region.start || 0) + offsetSeconds;
+    const absEnd = Number(region.end || 0) + offsetSeconds;
+    const start = Math.max(absStart, keepStartSeconds);
+    const end = Math.min(absEnd, keepEndSeconds);
+    if (end - start >= minDuration) output.push({ start, end });
+  }
+  return output;
+}
+
+async function runChunkedCamppDiarizationFromPcmStore(store, options = {}) {
+  const sampleRate = store.sampleRate || VAD_SAMPLE_RATE;
+  if (sampleRate !== VAD_SAMPLE_RATE) {
+    throw new Error(`Chunked CAM++ diarization expects 16 kHz PCM, got ${sampleRate} Hz.`);
+  }
+  const duration = store.sampleCount / VAD_SAMPLE_RATE;
+  const chunkSamples = Math.max(VAD_SAMPLE_RATE * 60, Math.floor((options.chunkSeconds || 10 * 60) * VAD_SAMPLE_RATE));
+  const overlapSamples = Math.max(0, Math.floor((options.overlapSeconds ?? 60) * VAD_SAMPLE_RATE));
+  const totalChunks = Math.max(1, Math.ceil(store.sampleCount / chunkSamples));
+  const started = performance.now();
+  const globalEmbeddings = [];
+  const globalWindowTimes = [];
+  const overlapRegions = [];
+  let totalSegmentationChunks = 0;
+  let segmentationProvider = null;
+  let embeddingProvider = null;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const logicalStart = chunkIndex * chunkSamples;
+    const logicalEnd = Math.min(store.sampleCount, logicalStart + chunkSamples);
+    const actualStart = Math.max(0, logicalStart - overlapSamples);
+    const actualEnd = Math.min(store.sampleCount, logicalEnd + overlapSamples);
+    const offsetSeconds = actualStart / VAD_SAMPLE_RATE;
+    const keepStartSeconds = logicalStart / VAD_SAMPLE_RATE;
+    const keepEndSeconds = logicalEnd / VAD_SAMPLE_RATE;
+    const chunkAudio = await readPcmStoreRange(store, actualStart, actualEnd - actualStart);
+    log(
+      `CAM++ global chunk ${chunkIndex + 1}/${totalChunks}: ` +
+      `${offsetSeconds.toFixed(1)}-${(actualEnd / VAD_SAMPLE_RATE).toFixed(1)}s`
+    );
+
+    const vadRuntime = calibratedProviderForStage("CAM++ speech regions (pyannote segmentation)", "wasm") === "webgpu"
+      ? "calibrated-webgpu"
+      : "wasm";
+    const vad = await getPyannoteSpeechRegionsWithOptionalWebGpuAutotune(chunkAudio, {
+      progress: (done, total) => {
+        if (typeof options.progress === "function") {
+          options.progress((chunkIndex + 0.20 * (done / Math.max(1, total))) / totalChunks);
+        }
+      },
+    }, vadRuntime);
+    totalSegmentationChunks += Number(vad.chunks || 0);
+    segmentationProvider = vad.benchmarkSelectedProvider || vad.provider || diarizationExecutionProvider || segmentationProvider;
+    overlapRegions.push(...offsetAndTrimRegions(vad.overlapRegions, offsetSeconds, keepStartSeconds, keepEndSeconds, 0.05));
+
+    const localSpeechRegions = trimAbsRegionsToLocal(vad.regions, offsetSeconds, keepStartSeconds, keepEndSeconds, 0.05);
+    if (localSpeechRegions.length) {
+      const embeddingRuntime = calibratedProviderForStage("CAM++ speaker embedding", "wasm");
+      const batchSize = embeddingRuntime === "webgpu"
+        ? calibratedBatchSizeForStage("CAM++ speaker embedding", CAMPP_BATCH_SIZE)
+        : CAMPP_BATCH_SIZE;
+      const embedding = await extractCamppEmbeddings(chunkAudio, localSpeechRegions, {
+        batchSize,
+        progress: (done, total) => {
+          if (typeof options.progress === "function") {
+            options.progress((chunkIndex + 0.20 + 0.60 * (done / Math.max(1, total))) / totalChunks);
+          }
+        },
+      });
+      embeddingProvider = embedding.provider || camppExecutionProvider || embeddingProvider;
+      for (let i = 0; i < embedding.embeddings.length; i += 1) {
+        const time = embedding.windowTimes[i];
+        const absStart = time.start + offsetSeconds;
+        const absEnd = time.end + offsetSeconds;
+        const mid = (absStart + absEnd) / 2;
+        if (mid < keepStartSeconds || mid >= keepEndSeconds) continue;
+        globalEmbeddings.push(embedding.embeddings[i]);
+        globalWindowTimes.push({ start: absStart, end: absEnd });
+      }
+    }
+
+    await unloadModelsAfterStep("diarization", getPipelineOptions()).catch(() => null);
+    await waitForUiPaint();
+  }
+
+  if (!globalEmbeddings.length) {
+    throw new Error("CAM++ produced no speaker embeddings for chunked PCM.");
+  }
+  if (typeof options.progress === "function") options.progress(0.90);
+  log(`CAM++ global clustering: ${globalEmbeddings.length} embedding window(s) from ${totalChunks} PCM chunk(s).`);
+  const clusterResult = computeCamppClusterResult({
+    embeddings: globalEmbeddings,
+    windowTimes: globalWindowTimes,
+  }, duration, options);
+  const { segments, rawSpeakers, stableSpeakers, speakers } = clusterResult;
+  renderDiarization(segments);
+  const elapsed = (performance.now() - started) / 1000;
+  log(
+    `Chunked CAM++ global diarization finished in ${elapsed.toFixed(2)}s: ` +
+    `${segments.length} turn(s), ${speakers} speaker(s), ${globalEmbeddings.length} embedding(s), ` +
+    `${rawSpeakers} raw cluster(s), ${stableSpeakers} stabilized cluster(s).`
+  );
+  if (typeof options.progress === "function") options.progress(1);
+  return {
+    segments,
+    rawSegments: segments,
+    speakers,
+    elapsed,
+    chunks: totalSegmentationChunks,
+    embeddings: globalEmbeddings.length,
+    overlapRegions,
+    backend: "campp:chunked-pcm-global",
+    executionProvider: {
+      segmentation: segmentationProvider || "wasm",
+      embedding: embeddingProvider || "wasm",
+    },
+    pcmStore: {
+      decoder: store.decoder,
+      sampleCount: store.sampleCount,
+      duration: store.duration,
+      chunks: store.chunks.length,
+    },
+  };
+}
+
+async function runChunkedPyannoteDiarizationFromPcmStore(store, options = {}) {
+  const sampleRate = store.sampleRate || VAD_SAMPLE_RATE;
+  if (sampleRate !== VAD_SAMPLE_RATE) {
+    throw new Error(`Chunked Pyannote diarization expects 16 kHz PCM, got ${sampleRate} Hz.`);
+  }
+  const duration = store.sampleCount / VAD_SAMPLE_RATE;
+  const chunkSamples = Math.max(VAD_SAMPLE_RATE * 60, Math.floor((options.chunkSeconds || 10 * 60) * VAD_SAMPLE_RATE));
+  const overlapSamples = Math.max(DIAR_CHUNK_SAMPLES, Math.floor((options.overlapSeconds ?? 60) * VAD_SAMPLE_RATE));
+  const totalChunks = Math.max(1, Math.ceil(store.sampleCount / chunkSamples));
+  const started = performance.now();
+  const logitsParts = [];
+  const starts = [];
+  let numFrames = 0;
+  let numClasses = 0;
+  let segmentationProvider = null;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const logicalStart = chunkIndex * chunkSamples;
+    const logicalEnd = Math.min(store.sampleCount, logicalStart + chunkSamples);
+    const actualStart = Math.max(0, logicalStart - overlapSamples);
+    const actualEnd = Math.min(store.sampleCount, logicalEnd + overlapSamples);
+    const chunkAudio = await readPcmStoreRange(store, actualStart, actualEnd - actualStart);
+    const offsetSeconds = actualStart / VAD_SAMPLE_RATE;
+    const keepStartSeconds = logicalStart / VAD_SAMPLE_RATE;
+    const keepEndSeconds = logicalEnd / VAD_SAMPLE_RATE;
+    log(
+      `Pyannote global chunk ${chunkIndex + 1}/${totalChunks}: ` +
+      `${offsetSeconds.toFixed(1)}-${(actualEnd / VAD_SAMPLE_RATE).toFixed(1)}s`
+    );
+    const runtime = calibratedProviderForStage("Pyannote Community-1 segmentation", "wasm") === "webgpu"
+      ? "calibrated-webgpu"
+      : "wasm";
+    const segmentation = await runPyannoteSegmentationWithOptionalWebGpuAutotune(chunkAudio, {
+      progress: (done, total) => {
+        if (typeof options.progress === "function") {
+          options.progress((chunkIndex + 0.25 * (done / Math.max(1, total))) / totalChunks);
+        }
+      },
+    }, runtime);
+    segmentationProvider = segmentation.benchmarkSelectedProvider || segmentation.provider || diarizationExecutionProvider || segmentationProvider;
+    if (!numFrames) {
+      numFrames = segmentation.numFrames;
+      numClasses = segmentation.numClasses;
+    } else if (numFrames !== segmentation.numFrames || numClasses !== segmentation.numClasses) {
+      throw new Error("Pyannote chunked segmentation returned inconsistent tensor shapes.");
+    }
+    const rowSize = numFrames * numClasses;
+    for (let c = 0; c < segmentation.chunks; c += 1) {
+      const absStartSample = actualStart + segmentation.starts[c];
+      const center = (absStartSample / VAD_SAMPLE_RATE) + DIAR_CHUNK_SECONDS / 2;
+      if (center < keepStartSeconds || center >= keepEndSeconds) continue;
+      starts.push(absStartSample);
+      logitsParts.push(segmentation.logitsData.slice(c * rowSize, (c + 1) * rowSize));
+    }
+    await unloadDiarizationSegmentationSessionOnly().catch(() => null);
+    await waitForUiPaint();
+  }
+
+  const chunks = starts.length;
+  if (!chunks) throw new Error("Pyannote produced no global segmentation chunks.");
+  const logitsData = new Float32Array(chunks * numFrames * numClasses);
+  let offset = 0;
+  for (const part of logitsParts) {
+    logitsData.set(part, offset);
+    offset += part.length;
+  }
+  const startsArray = starts;
+  const binarized = powerSetBinarize(logitsData, chunks, numFrames, numClasses);
+  const overlapRegions = extractPyannoteOverlapRegions(binarized, startsArray, numFrames, duration);
+  const countData = aggregatePyannoteCount(binarized, chunks, numFrames);
+  const cleanBinarized = buildCleanBinarized(binarized, chunks, numFrames);
+  const readRange = createPcmStoreRangeReader(store, 3);
+  const embeddingRuntime = calibratedProviderForStage("Pyannote Community-1 embedding encoder", "wasm");
+  const batchSize = embeddingRuntime === "webgpu"
+    ? calibratedBatchSizeForStage("Pyannote Community-1 embedding encoder", WESPEAKER_BATCH_SIZE)
+    : WESPEAKER_BATCH_SIZE;
+  const embeddings = await extractPyannoteEmbeddings(null, binarized, cleanBinarized, numFrames, startsArray, {
+    batchSize,
+    durationSeconds: duration,
+    makeChunk: (startSample) => readRange(startSample, DIAR_CHUNK_SAMPLES),
+    progress: (done, total) => {
+      if (typeof options.progress === "function") {
+        options.progress(0.30 + (done / Math.max(1, total)) * 0.45);
+      }
+    },
+  });
+  if (typeof options.progress === "function") options.progress(0.78);
+  const clusteringResult = computePyannoteClusteringResult(
+    embeddings,
+    binarized,
+    countData,
+    chunks,
+    numFrames,
+    duration,
+    options
+  );
+  const rawSegments = clusteringResult.segments;
+  const segments = desktopPostProcessDiarizationSegments(rawSegments, options.asrWords || null);
+  const speakers = new Set(segments.map((segment) => segment.speaker)).size;
+  const elapsed = (performance.now() - started) / 1000;
+  renderDiarization(segments);
+  log(
+    `Chunked Pyannote global diarization finished in ${elapsed.toFixed(2)}s: ` +
+    `${segments.length} turn(s), ${speakers} speaker(s), ${chunks} chunk(s).`
+  );
+  if (typeof options.progress === "function") options.progress(1);
+  const embeddingProvider = embeddings.benchmarkSelectedProvider ||
+    options.benchmarkSelectedProviders?.["Pyannote Community-1 embedding encoder"] ||
+    pyannoteEmbeddingExecutionProvider;
+  return {
+    segments,
+    rawSegments,
+    speakers,
+    elapsed,
+    chunks,
+    embeddings: chunks * PYANNOTE_MAX_SPEAKERS_PER_CHUNK,
+    overlapRegions,
+    backend: "pyannote_community1_vbx:chunked-pcm-global",
+    executionProvider: {
+      segmentation: segmentationProvider || "wasm",
+      embedding: embeddingProvider || "wasm",
+    },
+    pcmStore: {
+      decoder: store.decoder,
+      sampleCount: store.sampleCount,
+      duration: store.duration,
+      chunks: store.chunks.length,
+    },
+  };
+}
+
+async function runChunkedDiarizationFromPcmStore(store, options = {}) {
+  const sampleRate = store.sampleRate || VAD_SAMPLE_RATE;
+  if (sampleRate !== VAD_SAMPLE_RATE) {
+    throw new Error(`Chunked diarization expects 16 kHz PCM, got ${sampleRate} Hz.`);
+  }
+  const chunkSamples = Math.max(VAD_SAMPLE_RATE * 60, Math.floor((options.chunkSeconds || 10 * 60) * VAD_SAMPLE_RATE));
+  const overlapSamples = Math.max(0, Math.floor((options.overlapSeconds ?? 60) * VAD_SAMPLE_RATE));
+  const totalChunks = Math.max(1, Math.ceil(store.sampleCount / chunkSamples));
+  const nextSpeakerRef = { value: 0 };
+  const allSegments = [];
+  const started = performance.now();
+  let totalEmbeddings = 0;
+  let totalDiarChunks = 0;
+  let backend = options.speakerModel === "pyannote_community1_vbx" ? "pyannote_community1_vbx:chunked-pcm" : "campp:chunked-pcm";
+  let executionProvider = null;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const logicalStart = chunkIndex * chunkSamples;
+    const logicalEnd = Math.min(store.sampleCount, logicalStart + chunkSamples);
+    const actualStart = chunkIndex === 0 ? logicalStart : Math.max(0, logicalStart - overlapSamples);
+    const actualEnd = logicalEnd;
+    const chunkAudio = await readPcmStoreRange(store, actualStart, actualEnd - actualStart);
+    const offsetSeconds = actualStart / VAD_SAMPLE_RATE;
+    log(
+      `Diarization chunk ${chunkIndex + 1}/${totalChunks}: ` +
+      `${(actualStart / VAD_SAMPLE_RATE).toFixed(1)}-${(actualEnd / VAD_SAMPLE_RATE).toFixed(1)}s`
+    );
+    const part = await runDiarization(chunkAudio, {
+      ...options,
+      asrWords: null,
+      resumeContext: null,
+      resumeCheckpoints: null,
+      progress: (value) => {
+        if (typeof options.progress === "function") {
+          options.progress((chunkIndex + Math.max(0, Math.min(1, Number(value) || 0))) / totalChunks);
+        }
+      },
+    });
+    backend = `${part.backend}:chunked-pcm`;
+    executionProvider = part.executionProvider || executionProvider;
+    totalEmbeddings += Number(part.embeddings || 0);
+    totalDiarChunks += Number(part.chunks || 0);
+    const absoluteSegments = (part.segments || []).map((segment) => ({
+      ...segment,
+      start: segment.start + offsetSeconds,
+      end: segment.end + offsetSeconds,
+    }));
+    const overlapStart = actualStart / VAD_SAMPLE_RATE;
+    const overlapEnd = logicalStart / VAD_SAMPLE_RATE;
+    const remapped = remapChunkSpeakerLabels(absoluteSegments, allSegments, overlapStart, overlapEnd, nextSpeakerRef);
+    const keepStart = chunkIndex === 0 ? 0 : logicalStart / VAD_SAMPLE_RATE;
+    const keepEnd = logicalEnd / VAD_SAMPLE_RATE;
+    for (const segment of remapped) {
+      const start = Math.max(segment.start, keepStart);
+      const end = Math.min(segment.end, keepEnd);
+      if (end - start >= 0.05) {
+        allSegments.push({ ...segment, start, end });
+      }
+    }
+    await unloadModelsAfterStep("diarization", getPipelineOptions()).catch(() => null);
+    await waitForUiPaint();
+  }
+
+  const segments = mergeDiarSegmentsWithGap(allSegments, 0.3);
+  const speakers = new Set(segments.map((segment) => segment.speaker)).size;
+  const elapsed = (performance.now() - started) / 1000;
+  renderDiarization(segments);
+  log(`Chunked diarization finished in ${elapsed.toFixed(2)}s: ${segments.length} turn(s), ${speakers} speaker(s).`);
+  return {
+    segments,
+    rawSegments: allSegments,
+    speakers,
+    elapsed,
+    chunks: totalDiarChunks,
+    embeddings: totalEmbeddings,
+    overlapRegions: [],
+    backend,
+    executionProvider,
+    pcmStore: {
+      decoder: store.decoder,
+      sampleCount: store.sampleCount,
+      duration: store.duration,
+      chunks: store.chunks.length,
+    },
+  };
+}
+
+async function runSpeakerDiarizationOnlyForFile(file, options = {}) {
+  if (!file) throw new Error("No audio file selected for speaker diarization.");
+  const reportProgress = (stage, ratio) => {
+    if (typeof options.progress !== "function") return;
+    options.progress(Math.max(0, Math.min(1, Number(ratio) || 0)), stage);
+  };
+  resetPipelineLog();
+  setPipelineProgress("Streaming PCM decode", 1);
+  reportProgress("decode", 0.01);
+  log(`Diarization-only input: ${file.name} (${formatBytes(file.size || 0)}).`);
+  const store = await decodeAudioFileToPcmStore(file, {
+    progress: (ratio) => {
+      const overall = 1 + Math.max(0, Math.min(1, ratio)) * 19;
+      setPipelineProgress("Streaming PCM decode", overall);
+      reportProgress("decode", overall / 100);
+    },
+  });
+  log(
+    `Streamed canonical PCM: ${store.decoder}, ${store.chunks.length} chunk(s), ` +
+    `${(store.sampleCount / VAD_SAMPLE_RATE).toFixed(1)}s, ${formatBytes(store.sampleCount * 4)}.`
+  );
+  setPipelineProgress("Speaker diarization", 20);
+  reportProgress("diarization", 0.2);
+  try {
+    const speakerModel = options.speakerModel || getPipelineOptions().speakerModel;
+    const runner = speakerModel === "pyannote_community1_vbx"
+      ? runChunkedPyannoteDiarizationFromPcmStore
+      : runChunkedCamppDiarizationFromPcmStore;
+    const result = await runner(store, {
+      speakerModel,
+      numSpeakers: Number(options.numSpeakers || getPipelineOptions().numSpeakers || 0),
+      chunkSeconds: options.chunkSeconds || 10 * 60,
+      overlapSeconds: options.overlapSeconds ?? 60,
+      progress: (ratio) => {
+        const overall = 20 + Math.max(0, Math.min(1, ratio)) * 78;
+        setPipelineProgress("Speaker diarization", overall);
+        reportProgress("diarization", overall / 100);
+      },
+    });
+    setPipelineProgress("Diarization done", 100);
+    reportProgress("done", 1);
+    return result;
+  } finally {
+    if (options.keepPcmStore !== true) {
+      await cleanupPcmStore(store).catch((error) => log(`PCM store cleanup failed: ${error.message || String(error)}`));
+    }
+  }
+}
+
+window.runSpeakerDiarizationOnlyForFile = runSpeakerDiarizationOnlyForFile;
 
 async function attachEditorAudioFile(file, options = {}) {
   if (!editorState || !file) return;
@@ -10494,10 +11788,17 @@ function renderResultTiming() {
   }
   el.style.display = el.children.length ? "flex" : "none";
 }
-function appendResultHighlightedText(parent, text, segmentIndex) {
+function appendResultHighlightedTextRange(parent, text, segmentIndex, baseOffset = 0) {
   const source = text || "";
+  const baseEnd = baseOffset + source.length;
   const pieces = (editorState?.searchPieces || [])
     .filter((piece) => piece.segmentIndex === segmentIndex)
+    .map((piece) => ({
+      ...piece,
+      charStart: Math.max(0, piece.charStart - baseOffset),
+      charEnd: Math.min(source.length, piece.charEnd - baseOffset),
+    }))
+    .filter((piece) => piece.charEnd > 0 && piece.charStart < source.length && piece.charEnd > piece.charStart && baseOffset < baseEnd)
     .sort((a, b) => a.charStart - b.charStart);
   if (!pieces.length) {
     parent.appendChild(document.createTextNode(source));
@@ -10521,13 +11822,58 @@ function appendResultHighlightedText(parent, text, segmentIndex) {
   }
 }
 
+function appendResultHighlightedText(parent, text, segmentIndex) {
+  appendResultHighlightedTextRange(parent, text, segmentIndex, 0);
+}
+
+function segmentWordTokens(text) {
+  const tokens = [];
+  const source = String(text || "");
+  const regex = /\s+|\S+/g;
+  let match;
+  let wordIndex = 0;
+  while ((match = regex.exec(source)) !== null) {
+    const value = match[0];
+    const start = match.index;
+    const end = start + value.length;
+    const isWord = /\S/.test(value);
+    tokens.push({
+      text: value,
+      start,
+      end,
+      isWord,
+      wordIndex: isWord ? wordIndex++ : null,
+    });
+  }
+  return tokens;
+}
+
 function createResultSegmentSpan(segment, index) {
   const span = document.createElement("span");
   span.className = "seg-span";
   span.dataset.seg = String(index);
   span.dataset.editorSegmentIndex = String(index);
   if (index === editorState.activeSegmentIndex) span.classList.add("seg-highlight");
-  appendResultHighlightedText(span, segment.text || "", index);
+  const text = segment.text || "";
+  const tokens = segmentWordTokens(text);
+  if (!tokens.some((token) => token.isWord)) {
+    appendResultHighlightedText(span, text, index);
+    return span;
+  }
+  for (const token of tokens) {
+    if (!token.isWord) {
+      span.appendChild(document.createTextNode(token.text));
+      continue;
+    }
+    const word = document.createElement("span");
+    word.className = "seg-word";
+    word.dataset.editorSegmentIndex = String(index);
+    word.dataset.editorWordIndex = String(token.wordIndex);
+    word.dataset.wordStart = String(token.start);
+    word.dataset.wordEnd = String(token.end);
+    appendResultHighlightedTextRange(word, token.text, index, token.start);
+    span.appendChild(word);
+  }
   return span;
 }
 
@@ -10537,19 +11883,22 @@ function renderResultSpeakerView(root) {
     renderEmptyState(root, "Không có nội dung nhận dạng.");
     return;
   }
+  let blockIndex = 0;
   for (const block of blocks) {
     const speaker = normalizeSpeakerId(block.speaker);
     const meta = speakerMetaFor(speaker);
     const node = document.createElement("div");
     node.className = "speaker-block";
-    node.dataset.block = String(block.startIndex);
+    node.dataset.block = String(blockIndex);
+    node.dataset.blockStart = String(block.startIndex);
     node.dataset.speakerId = String(speaker);
     node.style.borderLeftColor = meta.color;
 
     const label = document.createElement("div");
     label.className = "speaker-label";
     label.dataset.spk = String(speaker);
-    label.dataset.blockIdx = String(block.startIndex);
+    label.dataset.blockIdx = String(blockIndex);
+    label.dataset.blockStart = String(block.startIndex);
     label.style.color = meta.color;
     label.textContent = `${meta.name}:`;
     node.appendChild(label);
@@ -10562,6 +11911,7 @@ function renderResultSpeakerView(root) {
     }
     node.appendChild(text);
     root.appendChild(node);
+    blockIndex += 1;
   }
 }
 
@@ -10696,8 +12046,12 @@ function editorSegmentPlaybackStart(index) {
   return Math.max(0, Math.min(Number.isFinite(duration) ? duration : start, start));
 }
 
-function seekEditorSegment(index, autoplay = true) {
+function seekEditorSegment(index, autoplay = null) {
   if (!editorState?.segments[index]) return;
+  const audio = $("editor-audio");
+  const shouldAutoplay = autoplay === null || autoplay === undefined
+    ? Boolean(audio && !audio.paused && !audio.ended)
+    : Boolean(autoplay);
   const before = debugAudioSnapshot();
   const segmentBefore = debugSegmentSnapshot(index);
   editorState.activeSegmentIndex = index;
@@ -10705,13 +12059,13 @@ function seekEditorSegment(index, autoplay = true) {
   const playbackStart = editorSegmentPlaybackStart(index);
   appendDebugLog("editor.segment_click", {
     index,
-    autoplay,
+    autoplay: shouldAutoplay,
     playbackStart: debugRound(playbackStart),
     segment: segmentBefore,
     activeBeforeSeek: editorState.activeSegmentIndex,
     audioBefore: before,
   });
-  seekEditorTo(playbackStart, autoplay, index);
+  seekEditorTo(playbackStart, shouldAutoplay, index);
   appendDebugLog("editor.segment_click_after_seek", {
     index,
     activeSegmentIndex: editorState.activeSegmentIndex,
@@ -10952,9 +12306,10 @@ function frameMaskToRegions(mask, frameSeconds, duration, minOn, minOff) {
 async function extractCamppEmbeddings(samples, speechRegions, options = {}) {
   await ensureCamppReady();
   const started = performance.now();
+  const durationSeconds = samples.length / VAD_SAMPLE_RATE;
   const windowFrames = Math.round((CAMPP_WINDOW_SECONDS * 1000) / 10);
   const stepFrames = Math.round((CAMPP_STEP_SECONDS * 1000) / 10);
-  const batchSizeConfig = options.batchSize || CAMPP_BATCH_SIZE;
+  let batchSizeConfig = options.batchSize || CAMPP_BATCH_SIZE;
   const windows = [];
 
   for (const region of speechRegions) {
@@ -11008,9 +12363,22 @@ async function extractCamppEmbeddings(samples, speechRegions, options = {}) {
     ? windows.slice(0, Math.max(1, Math.min(windows.length, options.tuneLimitWindows)))
     : windows;
 
+  if (camppExecutionProvider === "webgpu") {
+    const adjusted = longWebGpuBatchSize("CAM++ speaker embedding", batchSizeConfig, runWindows.length, durationSeconds);
+    if (adjusted !== batchSizeConfig) {
+      log(`CAM++ WebGPU long-audio mode: batch ${batchSizeConfig} -> ${adjusted}.`);
+      batchSizeConfig = adjusted;
+    }
+  }
+
   const embeddings = [];
   const windowTimes = [];
-  for (let batchStart = 0; batchStart < runWindows.length; batchStart += batchSizeConfig) {
+  const recycleEvery = longWebGpuRecycleEvery("CAM++ speaker embedding", runWindows.length, durationSeconds);
+  let webGpuRecoveries = 0;
+  let webGpuBatchesSinceRecycle = 0;
+  let batchStart = 0;
+  while (batchStart < runWindows.length) {
+    await ensureCamppReady();
     const batch = runWindows.slice(batchStart, batchStart + batchSizeConfig);
     const maxFrames = Math.max(...batch.map((item) => item.frameCount));
     const data = new Float32Array(batch.length * maxFrames * CAMPP_NUM_MEL_BINS);
@@ -11023,9 +12391,26 @@ async function extractCamppEmbeddings(samples, speechRegions, options = {}) {
       }
     }
 
-    const outputs = await camppSession.run({
-      feats: new window.ort.Tensor("float32", data, [batch.length, maxFrames, CAMPP_NUM_MEL_BINS]),
-    });
+    let outputs = null;
+    const providerAtRun = camppExecutionProvider;
+    try {
+      outputs = await camppSession.run({
+        feats: new window.ort.Tensor("float32", data, [batch.length, maxFrames, CAMPP_NUM_MEL_BINS]),
+      });
+    } catch (error) {
+      if (providerAtRun === "webgpu" && isOrtWebGpuContextLostError(error) && webGpuRecoveries < WEBGPU_CONTEXT_RECOVERY_LIMIT) {
+        webGpuRecoveries += 1;
+        const nextBatchSize = smallerWebGpuBatchSize("CAM++ speaker embedding", batchSizeConfig);
+        log(
+          `CAM++ WebGPU context lost near batch ${batchStart}/${runWindows.length}; ` +
+          `recreating session and retrying with batch ${nextBatchSize}.`
+        );
+        batchSizeConfig = nextBatchSize;
+        await recreateCamppWebGpuSession(`recovery ${webGpuRecoveries}`);
+        continue;
+      }
+      throw error;
+    }
     const tensor = outputs.embs || outputs[camppSession.outputNames[0]];
     const dim = tensor.dims[1];
     for (let b = 0; b < batch.length; b += 1) {
@@ -11038,6 +12423,16 @@ async function extractCamppEmbeddings(samples, speechRegions, options = {}) {
       options.progress(Math.min(runWindows.length, batchStart + batch.length), runWindows.length);
     }
     throwIfWebGpuRuntimeSlower(options, started, Math.min(runWindows.length, batchStart + batch.length), runWindows.length);
+    batchStart += batch.length;
+    if (providerAtRun === "webgpu") {
+      webGpuBatchesSinceRecycle += 1;
+      if (recycleEvery > 0 && webGpuBatchesSinceRecycle >= recycleEvery && batchStart < runWindows.length) {
+        webGpuBatchesSinceRecycle = 0;
+        log(`CAM++ WebGPU long-audio mode: recycling session at ${batchStart}/${runWindows.length} embedding window(s).`);
+        await recreateCamppWebGpuSession("long-audio recycle");
+        await waitForUiPaint();
+      }
+    }
   }
 
   return { embeddings, windowTimes, batchSize: batchSizeConfig, batchTuning: options.batchTuning || null };
@@ -11644,20 +13039,38 @@ function makePaddedChunk(samples, start) {
 async function extractPyannoteEmbeddings(samples, binarized, cleanBinarized, numFrames, starts, options = {}) {
   await ensurePyannoteCommunityReady();
   const started = performance.now();
+  const durationSeconds = samples?.length
+    ? samples.length / VAD_SAMPLE_RATE
+    : Number(options.durationSeconds || ((starts[starts.length - 1] || 0) / VAD_SAMPLE_RATE + DIAR_CHUNK_SECONDS));
   const chunks = starts.length;
   const embeddings = new Float32Array(chunks * PYANNOTE_MAX_SPEAKERS_PER_CHUNK * 256);
   embeddings.fill(NaN);
   const minSegFrames = Math.ceil(numFrames * PYANNOTE_EMB_MIN_NUM_SAMPLES / DIAR_CHUNK_SAMPLES);
   let featureIndex = null;
-  const batchSizeConfig = options.batchSize || WESPEAKER_BATCH_SIZE;
+  let batchSizeConfig = options.batchSize || WESPEAKER_BATCH_SIZE;
+  if (pyannoteEmbeddingExecutionProvider === "webgpu") {
+    const adjusted = longWebGpuBatchSize("Pyannote Community-1 embedding encoder", batchSizeConfig, chunks, durationSeconds);
+    if (adjusted !== batchSizeConfig) {
+      log(`Pyannote embedding WebGPU long-audio mode: batch ${batchSizeConfig} -> ${adjusted}.`);
+      batchSizeConfig = adjusted;
+    }
+  }
 
-  for (let batchStart = 0; batchStart < chunks; batchStart += batchSizeConfig) {
+  const recycleEvery = longWebGpuRecycleEvery("Pyannote Community-1 embedding encoder", chunks, durationSeconds);
+  let webGpuRecoveries = 0;
+  let webGpuBatchesSinceRecycle = 0;
+  let batchStart = 0;
+  while (batchStart < chunks) {
+    await ensurePyannoteCommunityReady();
     const batchEnd = Math.min(chunks, batchStart + batchSizeConfig);
     const batchSize = batchEnd - batchStart;
     const fbankRows = [];
     let maxFrames = 0;
     for (let c = batchStart; c < batchEnd; c += 1) {
-      const fbank = computeWespeakerFbank(makePaddedChunk(samples, starts[c]));
+      const chunkAudio = typeof options.makeChunk === "function"
+        ? await options.makeChunk(starts[c])
+        : makePaddedChunk(samples, starts[c]);
+      const fbank = computeWespeakerFbank(chunkAudio);
       fbankRows.push(fbank);
       maxFrames = Math.max(maxFrames, fbank.length);
     }
@@ -11674,9 +13087,26 @@ async function extractPyannoteEmbeddings(samples, binarized, cleanBinarized, num
       }
     }
 
-    const outputs = await pyannoteEmbeddingSession.run({
-      fbank_features: new window.ort.Tensor("float32", input, [batchSize, maxFrames, WESPEAKER_NUM_MEL_BINS]),
-    });
+    let outputs = null;
+    const providerAtRun = pyannoteEmbeddingExecutionProvider;
+    try {
+      outputs = await pyannoteEmbeddingSession.run({
+        fbank_features: new window.ort.Tensor("float32", input, [batchSize, maxFrames, WESPEAKER_NUM_MEL_BINS]),
+      });
+    } catch (error) {
+      if (providerAtRun === "webgpu" && isOrtWebGpuContextLostError(error) && webGpuRecoveries < WEBGPU_CONTEXT_RECOVERY_LIMIT) {
+        webGpuRecoveries += 1;
+        const nextBatchSize = smallerWebGpuBatchSize("Pyannote Community-1 embedding encoder", batchSizeConfig);
+        log(
+          `Pyannote embedding WebGPU context lost near chunk ${batchStart}/${chunks}; ` +
+          `recreating session and retrying with batch ${nextBatchSize}.`
+        );
+        batchSizeConfig = nextBatchSize;
+        await recreatePyannoteEmbeddingWebGpuSession(`recovery ${webGpuRecoveries}`);
+        continue;
+      }
+      throw error;
+    }
     const tensor = outputs[pyannoteEmbeddingSession.outputNames[0]];
     const featureDim = tensor.dims[1];
     const featureFrames = tensor.dims[2];
@@ -11709,6 +13139,16 @@ async function extractPyannoteEmbeddings(samples, binarized, cleanBinarized, num
     }
     if (options.progress) options.progress(batchEnd, chunks);
     throwIfWebGpuRuntimeSlower(options, started, batchEnd, chunks);
+    batchStart = batchEnd;
+    if (providerAtRun === "webgpu") {
+      webGpuBatchesSinceRecycle += 1;
+      if (recycleEvery > 0 && webGpuBatchesSinceRecycle >= recycleEvery && batchStart < chunks) {
+        webGpuBatchesSinceRecycle = 0;
+        log(`Pyannote embedding WebGPU long-audio mode: recycling session at ${batchStart}/${chunks} chunk(s).`);
+        await recreatePyannoteEmbeddingWebGpuSession("long-audio recycle");
+        await waitForUiPaint();
+      }
+    }
   }
   embeddings.batchSize = batchSizeConfig;
   embeddings.batchTuning = options.batchTuning || null;
@@ -12864,7 +14304,7 @@ function clusterCamppEmbeddings(embeddings, duration, options = {}) {
   }
 
   if (duration >= 1200) {
-    const longLabels = senkoUmapHdbscanCluster(embeddings);
+    const longLabels = senkoUmapHdbscanClusterScalable(embeddings);
     filterMinorClusters(longLabels, embeddings, 10);
     mergeCloseClusters(longLabels, embeddings, CAMPP_MERGE_COS);
     return relabelClusters(longLabels);
@@ -12910,6 +14350,65 @@ async function clusterCamppEmbeddingsWebGpuCandidate(embeddings, duration, optio
 
 function senkoUmapHdbscanCluster(embeddings) {
   return senkoUmapHdbscanClusterWithDistance(embeddings);
+}
+
+function representativeEmbeddingIndices(count, limit = CAMPP_SPECTRAL_MAX_WINDOWS) {
+  if (count <= limit) return Array.from({ length: count }, (_, index) => index);
+  const indices = [];
+  const step = count / limit;
+  for (let i = 0; i < limit; i += 1) {
+    indices.push(Math.min(count - 1, Math.floor((i + 0.5) * step)));
+  }
+  return [...new Set(indices)].sort((a, b) => a - b);
+}
+
+function assignEmbeddingsToCentroids(embeddings, centroids) {
+  const labels = new Int32Array(embeddings.length);
+  if (!centroids.length) return labels;
+  for (let i = 0; i < embeddings.length; i += 1) {
+    let bestLabel = 0;
+    let bestScore = -Infinity;
+    for (let label = 0; label < centroids.length; label += 1) {
+      const score = cosine(embeddings[i], centroids[label]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestLabel = label;
+      }
+    }
+    labels[i] = bestLabel;
+  }
+  return labels;
+}
+
+function senkoUmapHdbscanClusterScalable(embeddings) {
+  const count = embeddings.length;
+  if (count <= CAMPP_SPECTRAL_MAX_WINDOWS) return senkoUmapHdbscanCluster(embeddings);
+  const indices = representativeEmbeddingIndices(count, CAMPP_SPECTRAL_MAX_WINDOWS);
+  const sampleEmbeddings = indices.map((index) => embeddings[index]);
+  log(`CAM++ scalable long-form clustering: ${sampleEmbeddings.length}/${count} representative embedding(s).`);
+  const sampleLabels = senkoUmapHdbscanCluster(sampleEmbeddings);
+  filterMinorClusters(sampleLabels, sampleEmbeddings, 10);
+  mergeCloseClusters(sampleLabels, sampleEmbeddings, CAMPP_MERGE_COS);
+  const relabeledSample = relabelClusters(sampleLabels);
+  const labelSet = [...new Set(relabeledSample)].filter((label) => label >= 0).sort((a, b) => a - b);
+  if (!labelSet.length) return new Int32Array(count);
+
+  const centroids = labelSet.map(() => new Float32Array(embeddings[0].length));
+  const counts = new Int32Array(labelSet.length);
+  const labelToIndex = new Map(labelSet.map((label, index) => [label, index]));
+  for (let i = 0; i < sampleEmbeddings.length; i += 1) {
+    const labelIndex = labelToIndex.get(relabeledSample[i]);
+    if (labelIndex === undefined) continue;
+    const vector = sampleEmbeddings[i];
+    for (let d = 0; d < vector.length; d += 1) centroids[labelIndex][d] += vector[d];
+    counts[labelIndex] += 1;
+  }
+  for (let label = 0; label < centroids.length; label += 1) {
+    const inv = 1 / Math.max(1, counts[label]);
+    for (let d = 0; d < centroids[label].length; d += 1) centroids[label][d] *= inv;
+    centroids[label] = l2Normalize(centroids[label]);
+  }
+  return assignEmbeddingsToCentroids(embeddings, centroids);
 }
 
 function senkoUmapHdbscanClusterWithDistance(embeddings, options = {}) {
@@ -14604,6 +16103,7 @@ async function runCamppDiarization(samples, options = {}) {
 }
 
 async function runDiarization(samples, options = {}) {
+  throwIfProcessingCancelled(options);
   if (options.speakerModel && !SUPPORTED_SPEAKER_MODELS.has(options.speakerModel)) {
     throw new Error(`Speaker model is not supported in offline PWA: ${options.speakerModel}`);
   }
@@ -15130,7 +16630,10 @@ function setupEditorEvents() {
     const target = event.target instanceof Element ? event.target : event.target?.parentElement;
     const label = target?.closest(".speaker-label[data-spk]");
     if (label) {
-      openSpeakerDialog({ mode: "rename", speaker: Number(label.dataset.spk) });
+      ctxRenameSpeakerDirect(
+        Number(label.dataset.spk),
+        Number(label.dataset.blockStart ?? label.dataset.blockIdx)
+      );
       return;
     }
     const segment = target?.closest("[data-editor-segment-index]");
@@ -15156,9 +16659,12 @@ function setupEditorEvents() {
         event.stopPropagation();
         const segmentIndex = Number(action.dataset.index);
         if (action.dataset.editorAction === "rename-speaker") {
-          openSpeakerDialog({ mode: "rename", speaker: Number(action.dataset.speakerId) });
+          if (setSpeakerContextFromSegment(segmentIndex, false)) {
+            ctxSpeakerId = normalizeSpeakerId(action.dataset.speakerId);
+            openRenameSpeakerModal();
+          }
         } else if (action.dataset.editorAction === "split-block") {
-          openSpeakerDialog({ mode: "split", segmentIndex });
+          if (setSpeakerContextFromSegment(segmentIndex, true)) openSplitSpeakerModal();
         } else if (action.dataset.editorAction === "merge-prev") {
           mergeEditorSpeakerBlock(segmentIndex, "prev");
         } else if (action.dataset.editorAction === "merge-next") {
@@ -15177,7 +16683,19 @@ function setupEditorEvents() {
     const speakerAction = target?.closest("[data-editor-action='rename-speaker']");
     if (speakerAction) {
       event.stopPropagation();
-      openSpeakerDialog({ mode: "rename", speaker: Number(speakerAction.dataset.speakerId) });
+      const row = target?.closest("[data-raw-index]");
+      const index = row ? Number(row.dataset.rawIndex) : -1;
+      const segment = editorState.rawSpeakerSegments[index];
+      if (segment) {
+        const nearestIndex = editorState.segments.findIndex((item) => (
+          Math.abs(Number(item.start) - Number(segment.start)) < 0.5 ||
+          (Number(item.start) <= Number(segment.end) && Number(item.end) >= Number(segment.start))
+        ));
+        if (setSpeakerContextFromSegment(Math.max(0, nearestIndex), false)) {
+          ctxSpeakerId = normalizeSpeakerId(speakerAction.dataset.speakerId);
+          openRenameSpeakerModal();
+        }
+      }
       return;
     }
     const row = target?.closest("[data-raw-index]");
@@ -15196,6 +16714,11 @@ function setupEditorEvents() {
 async function doProcessSelectedAudioFile() {
   const processStartedAt = performance.now();
   if (!selectedAudioFile) return;
+  if (activeProcessingController && !activeProcessingController.signal.aborted) {
+    showToast("Đang xử lý file hiện tại. Bấm Kết thúc nếu muốn hủy.", "error");
+    return;
+  }
+  await beginProcessingNotification("processing", selectedAudioFile.name);
   if (selectedLibraryImportPromise) {
     await selectedLibraryImportPromise;
   }
@@ -15204,6 +16727,7 @@ async function doProcessSelectedAudioFile() {
     log("Required PWA offline model pack is required before processing.");
     setPipelineProgress(message, 100);
     showToast(message, "error");
+    await finishProcessingNotification(false, message);
     await refreshOfflineBootstrapState();
     return;
   }
@@ -15211,21 +16735,42 @@ async function doProcessSelectedAudioFile() {
   const benchmarkButton = $("btn-benchmark");
   if (benchmarkButton) benchmarkButton.disabled = true;
   setPipelineControlsDisabled(true);
+  const controller = new AbortController();
+  activeProcessingController = controller;
+  activeProcessingFileName = selectedAudioFile.name || "";
+  setProcessingCancelButton(true, false);
   if (selectedLibraryItemId) {
     await updateLibraryItem(selectedLibraryItemId, { status: "processing" }).catch(() => null);
   }
   try {
     await requestScreenWakeLockFor("processing");
-    await runAudioImport(selectedAudioFile, { processStartedAt });
+    throwIfProcessingCancelled({ signal: controller.signal });
+    await runAudioImport(selectedAudioFile, { processStartedAt, signal: controller.signal });
     hidePipelineProgress();
+    await finishProcessingNotification(true, "Hoàn thành xử lý offline");
   } catch (error) {
-    log(`Audio import failed: ${error.message}`);
-    setPipelineProgress(`Lỗi: ${error.message}`, 100);
-    showToast(error.message, "error");
-    if (selectedLibraryItemId) {
-      await updateLibraryItem(selectedLibraryItemId, { status: "source_ready" }).catch(() => null);
+    if (isPipelineCancelledError(error, { signal: controller.signal })) {
+      const itemId = selectedLibraryItemId || activeResumeAfterKillContext?.itemId;
+      log("Audio import cancelled by user.");
+      setPipelineProgress("Đã hủy xử lý", 100);
+      showToast("Đã hủy xử lý", "success");
+      await finishProcessingNotification(false, "Đã hủy xử lý");
+      await markProcessingCancelledInLibrary(itemId, "");
+    } else {
+      log(`Audio import failed: ${error.message}`);
+      setPipelineProgress(`Lỗi: ${error.message}`, 100);
+      showToast(error.message, "error");
+      await finishProcessingNotification(false, error.message || "Xử lý thất bại");
+      if (selectedLibraryItemId) {
+        await updateLibraryItem(selectedLibraryItemId, { status: "source_ready" }).catch(() => null);
+      }
     }
   } finally {
+    if (activeProcessingController === controller) {
+      activeProcessingController = null;
+      activeProcessingFileName = "";
+    }
+    setProcessingCancelButton(false, false);
     await releaseScreenWakeLockFor("processing");
     setPipelineControlsDisabled(false);
     syncPipelineControls();
@@ -15300,10 +16845,36 @@ function benchmarkReportTemplate(kind, mode, file, baseOptions) {
 }
 
 async function runDeviceCalibrationIfNeeded(reason = "startup") {
+  if (window.location.search.includes("skipCalibration=1")) {
+    autoCalibrationAttempted = true;
+    calibrationSkipRequested = true;
+    return;
+  }
   if (calibrationBusy || autoCalibrationAttempted || !offlineBootstrapReady || offlineBootstrapBusy) return;
   if (!isStandaloneApp()) return;
   if (selectedAudioFile || selectedLibraryImportPromise) return;
   autoCalibrationAttempted = true;
+  const manualCalibration = reason === "manual re-calibration";
+
+  if (!manualCalibration) {
+    const stored = readStoredCalibrationProfile();
+    if (stored) {
+      calibrationProfile = stored;
+      log("[Calibration] Stored profile loaded; app update does not trigger automatic calibration.");
+      syncCalibrationSetupUi();
+      updateProcessButtonState();
+      return;
+    }
+    try {
+      await saveDefaultCalibrationProfile("startup-default-no-auto-calibration");
+      log("[Calibration] Default profile saved. Device measurement will run only from Re-Calibration.");
+    } catch (error) {
+      log(`[Calibration] Default profile save skipped: ${error.message || String(error)}`);
+    }
+    syncCalibrationSetupUi();
+    updateProcessButtonState();
+    return;
+  }
 
   const environment = await collectBenchmarkEnvironment().catch(() => null);
   const signature = await currentCalibrationSignature(environment).catch(() => null);
@@ -15489,9 +17060,12 @@ async function runBenchmarkSelectedAudioFile() {
     log("Required PWA offline model pack is required before benchmark.");
     setPipelineProgress(message, 100);
     showToast(message, "error");
+    await finishProcessingNotification(false, message);
     await refreshOfflineBootstrapState();
     return;
   }
+
+  await beginProcessingNotification("benchmark", file.name);
 
   const benchmarkButton = $("btn-benchmark");
   const processButton = $("btn-process");
@@ -15611,6 +17185,7 @@ async function runBenchmarkSelectedAudioFile() {
     setPipelineProgress("Benchmark failed", 100);
     log(`[Benchmark] Failed: ${error.message || String(error)}`);
   } finally {
+    await finishProcessingNotification(!failure, failure ? (failure.message || "Benchmark thất bại") : "Benchmark hoàn thành");
     await releaseScreenWakeLockFor("benchmark");
     report.finishedAt = new Date().toISOString();
     report.totalSeconds = Number(((performance.now() - started) / 1000).toFixed(3));
@@ -15653,6 +17228,9 @@ function updateSelectedFileUi(file) {
 }
 
 function clearSelectedFile() {
+  if (activeProcessingController && !activeProcessingController.signal.aborted) {
+    requestCancelProcessing("Người dùng bỏ file khỏi ô chọn file.");
+  }
   selectedAudioFile = null;
   selectedLibraryItemId = null;
   selectedLibraryImportPromise = null;
@@ -15859,6 +17437,7 @@ function setupEvents() {
   });
 
   $("btn-process").addEventListener("click", processSelectedAudioFile);
+  $("btn-cancel")?.addEventListener("click", () => requestCancelProcessing("Người dùng hủy xử lý."));
   $("btn-benchmark")?.addEventListener("click", runBenchmarkSelectedAudioFile);
 }
 
@@ -16062,7 +17641,9 @@ async function getVadSession() {
 }
 
 async function runVadInference(audio, options) {
+  throwIfProcessingCancelled(options);
   const session = await getVadSession();
+  throwIfProcessingCancelled(options);
   const sampleRate = options.sampleRate || VAD_SAMPLE_RATE;
   const threshold = options.threshold ?? 0.2;
   const minSilenceMs = options.minSilenceMs ?? 100;
@@ -16089,6 +17670,7 @@ async function runVadInference(audio, options) {
   let lastReportedPct = -1;
 
   for (let i = 0; i < numWindows; i += 1) {
+    if ((i & 15) === 0) throwIfProcessingCancelled(options);
     const start = i * VAD_WINDOW_SIZE;
     const chunk = audio.subarray(start, start + VAD_WINDOW_SIZE);
     vadInputBuf.set(context, 0);
@@ -16111,9 +17693,11 @@ async function runVadInference(audio, options) {
       if (pct >= lastReportedPct + 2) {
         lastReportedPct = pct;
         progress(pct);
+        throwIfProcessingCancelled(options);
       }
     }
   }
+  throwIfProcessingCancelled(options);
 
   const minSilenceWindows = Math.floor((minSilenceMs * sampleRate) / 1000 / VAD_WINDOW_SIZE);
   const minSpeechWindows = Math.floor((minSpeechMs * sampleRate) / 1000 / VAD_WINDOW_SIZE);
@@ -16154,6 +17738,7 @@ async function runVadInference(audio, options) {
 }
 
 async function getVadSegments(samples, options = {}) {
+  throwIfProcessingCancelled(options);
   const sampleRate = options.sampleRate || VAD_SAMPLE_RATE;
   const paddingMs = options.paddingMs ?? 1000;
   const mergeGapMs = options.mergeGapMs ?? 250;
@@ -16181,7 +17766,9 @@ async function getVadSegments(samples, options = {}) {
     minSilenceMs: options.minSilenceMs ?? 100,
     minSpeechMs: options.minSpeechMs ?? 250,
     progress,
+    signal: options.signal,
   });
+  throwIfProcessingCancelled(options);
 
   if (!pass.segments.length) {
     throw new Error("VAD found no speech segments.");
@@ -16256,16 +17843,19 @@ async function runAudioImport(file, options = {}) {
 
 async function runAudioImportInternal(file, options = {}) {
   const totalStarted = Number.isFinite(options.processStartedAt) ? options.processStartedAt : performance.now();
+  throwIfProcessingCancelled(options);
   const bootstrap = await refreshOfflineBootstrapState();
   if (!bootstrap.complete) {
     throw new Error("Required PWA offline model pack is not ready in this browser.");
   }
+  throwIfProcessingCancelled(options);
   if (options.resetLog !== false) resetPipelineLog();
   if (options.clearEditor !== false) clearEditorResult();
   const pipelineOptions = getPipelineOptions();
   const resumeContext = await createResumeAfterKillContext(file, pipelineOptions, options);
   activeResumeAfterKillContext = resumeContext;
   const resumeCheckpoints = await loadResumeAfterKillCheckpoints(resumeContext);
+  throwIfProcessingCancelled(options);
   setPipelineProgress("Reading input", 2);
   if (options.benchmarkLabel) log(`[Benchmark] ${options.benchmarkLabel}`);
   if (benchmarkProviderMode) {
@@ -16290,11 +17880,14 @@ async function runAudioImportInternal(file, options = {}) {
     let vad = null;
     let vadElapsed = 0;
     const arrayBuffer = await file.arrayBuffer();
+    throwIfProcessingCancelled(options);
     setPipelineProgress("Decoding input", 5);
     const decodeStarted = performance.now();
     decoded = await decodeAudioFileWithFfmpeg(file, arrayBuffer, {
+      signal: options.signal,
       progress: (ratio) => setPipelineProgress("FFmpeg decode", 5 + ratio * 5),
     });
+    throwIfProcessingCancelled(options);
     addBenchmarkStage(options, {
       name: "Audio decode",
       capability: "wasm-only",
@@ -16339,7 +17932,9 @@ async function runAudioImportInternal(file, options = {}) {
         lastVadLog = 0;
         return getVadSegments(canonicalAudio, {
             sampleRate: 16000,
+            signal: options.signal,
             progress: (pct) => {
+              throwIfProcessingCancelled(options);
               setPipelineProgress("Silero VAD", 10 + pct * 0.2);
               if (pct >= lastVadLog + 10 || pct === 100) {
                 lastVadLog = pct;
@@ -16399,10 +17994,12 @@ async function runAudioImportInternal(file, options = {}) {
     }
     await unloadModelsAfterStep("vad", pipelineOptions);
     if (pipelineOptions.rmsNormalize) {
+      throwIfProcessingCancelled(options);
       setPipelineProgress("RMS normalize", 30);
       const normalized = perSegmentRmsNormalize(canonicalAudio, vad.segments, 16000);
       asrAudio = normalized.audio;
     }
+    throwIfProcessingCancelled(options);
     lastAudioPcm = canonicalAudio;
     const vadSpeechSeconds = vad.segments.reduce((sum, segment) => sum + segment.end - segment.start, 0) / 16000;
     const vadProb = probabilityStats(vad.probabilities);
@@ -16438,6 +18035,7 @@ async function runAudioImportInternal(file, options = {}) {
     try {
       let asr = resumeCheckpoints.asr || null;
       if (asr) {
+        throwIfProcessingCancelled(options);
         setPipelineProgress("ASR resumed", 65);
         renderTranscript(asr.text || "", "ASR resumed from resume_after_kill checkpoint");
         log(`[resume_after_kill] Resumed ASR: ${asr.chunks?.length || 0} chunk(s), ${asr.words?.length || 0} word(s).`);
@@ -16450,10 +18048,13 @@ async function runAudioImportInternal(file, options = {}) {
           vadProbabilities: vad.probabilities || [],
           resumeContext,
           resumeAsrChunks: resumeCheckpoints.asr_chunks,
+          signal: options.signal,
           progress: (done, total) => {
+            throwIfProcessingCancelled(options);
             setPipelineProgress("ASR", 30 + (done / Math.max(1, total)) * 35);
           },
         });
+        throwIfProcessingCancelled(options);
         await writeResumeJsonCheckpoint(resumeContext, "asr", asr, {
           chunks: asr.chunks?.length || 0,
           words: asr.words?.length || 0,
@@ -16461,6 +18062,7 @@ async function runAudioImportInternal(file, options = {}) {
       }
       await addAsrBenchmarkWebGpuBranch(options, asr, asrAudio, vad.segments, pipelineOptions, vad.probabilities || []);
       await unloadModelsAfterStep("asr", pipelineOptions);
+      throwIfProcessingCancelled(options);
 
       setPipelineProgress("Quality analysis", 66);
       const qualitySpeechSamples = copyTimelineRange(asrAudio, asr.timeline, 0, asr.timeline.totalSamples);
@@ -16469,6 +18071,7 @@ async function runAudioImportInternal(file, options = {}) {
           setPipelineProgress("Quality analysis", 66 + ((done + 1) / Math.max(1, total)) * 6);
         },
           strictDnsmos: Array.isArray(options.benchmarkStages),
+          signal: options.signal,
         });
       let qualityInfo = resumeCheckpoints.quality || null;
       if (qualityInfo) {
@@ -16485,6 +18088,7 @@ async function runAudioImportInternal(file, options = {}) {
           : await qualityRunner();
         await writeResumeJsonCheckpoint(resumeContext, "quality", qualityInfo || {});
       }
+      throwIfProcessingCancelled(options);
       if (qualityInfo) {
         log(
           `Quality analysis: DNSMOS=${qualityInfo.dnsmos_ovrl ?? "n/a"}, ` +
@@ -16496,6 +18100,7 @@ async function runAudioImportInternal(file, options = {}) {
       let diarization = { segments: [], speakers: 0, elapsed: 0, backend: "off", embeddings: 0, overlapRegions: [] };
       const resumedDiarization = decodeDiarizationCheckpoint(resumeCheckpoints.diarization);
       if (resumedDiarization) {
+        throwIfProcessingCancelled(options);
         diarization = resumedDiarization;
         if (Array.isArray(asr.words) && asr.words.length && Array.isArray(diarization.rawSegments) && diarization.rawSegments.length) {
           const segments = desktopPostProcessDiarizationSegments(diarization.rawSegments, asr.words);
@@ -16517,11 +18122,14 @@ async function runAudioImportInternal(file, options = {}) {
           benchmarkStages: options.benchmarkStages,
           resumeContext,
           resumeCheckpoints,
+          signal: options.signal,
           progress: (done, total) => {
+            throwIfProcessingCancelled(options);
             const ratio = Number.isFinite(total) ? done / Math.max(1, total) : done;
             setPipelineProgress("Diarization", 72 + ratio * 16);
           },
         });
+        throwIfProcessingCancelled(options);
         if (!diarization.segments?.length) {
           throw new Error("Speaker diarization was enabled but produced no speaker turns.");
         }
@@ -16544,6 +18152,7 @@ async function runAudioImportInternal(file, options = {}) {
         });
       }
       await unloadModelsAfterStep("diarization", pipelineOptions);
+      throwIfProcessingCancelled(options);
 
       let finalText = asr.text;
       let punctuation = null;
@@ -16576,7 +18185,9 @@ async function runAudioImportInternal(file, options = {}) {
           punctuationConfidence: pipelineOptions.punctuationConfidence,
           caseConfidence: pipelineOptions.caseConfidence,
           pauseHints,
+          signal: options.signal,
           progress: (iter, done, total) => {
+            throwIfProcessingCancelled(options);
             const iterBase = iter / PUNCT_ITERATIONS;
             const miniBatchPct = (done / Math.max(1, total)) / PUNCT_ITERATIONS;
             setPipelineProgress("Punctuation", 88 + (iterBase + miniBatchPct) * 7);
@@ -16612,6 +18223,7 @@ async function runAudioImportInternal(file, options = {}) {
           punctuation = await punctuationRunner();
         }
         finalText = punctuation.text;
+        throwIfProcessingCancelled(options);
         renderTranscript(finalText, `ASR + diarization-first punctuation ${punctuation.elapsed.toFixed(2)}s`);
         log(`Punctuation finished in ${punctuation.elapsed.toFixed(2)}s.`);
         await writeResumeJsonCheckpoint(resumeContext, "punctuation", {
@@ -16630,6 +18242,7 @@ async function runAudioImportInternal(file, options = {}) {
         });
       }
       await unloadModelsAfterStep("punctuation", pipelineOptions);
+      throwIfProcessingCancelled(options);
 
       let overlap = {
         segments: [],
@@ -16651,10 +18264,13 @@ async function runAudioImportInternal(file, options = {}) {
           cpuThreads: pipelineOptions.cpuThreads,
           hotwordsText: pipelineOptions.hotwordsText,
           hotwordsScore: pipelineOptions.hotwordsScore,
+          signal: options.signal,
           progress: (ratio) => {
+            throwIfProcessingCancelled(options);
             setPipelineProgress("Overlap separation", 96 + ratio * 3);
           },
         });
+        throwIfProcessingCancelled(options);
         addBenchmarkStage(options, {
           name: "Overlap separation",
           capability: "wasm-only",
@@ -16686,6 +18302,7 @@ async function runAudioImportInternal(file, options = {}) {
         });
       }
       await unloadModelsAfterStep("overlap", pipelineOptions);
+      throwIfProcessingCancelled(options);
 
       renderAudioSummary([
         ...summaryItems,
@@ -16759,6 +18376,12 @@ async function runAudioImportInternal(file, options = {}) {
       log("Pipeline completed.");
       return pipelineResult;
     } catch (error) {
+      if (isPipelineCancelledError(error, options)) {
+        setPipelineProgress("Đã hủy xử lý", 100);
+        log("Pipeline cancelled.");
+        await unloadModelsAfterStep("all", pipelineOptions);
+        throw error;
+      }
       setPipelineProgress("Pipeline failed", 100);
       log(`Pipeline failed: ${error.message}`);
       await unloadModelsAfterStep("all", pipelineOptions);
@@ -16766,6 +18389,12 @@ async function runAudioImportInternal(file, options = {}) {
     }
     log("Pipeline completed.");
   } catch (error) {
+    if (isPipelineCancelledError(error, options)) {
+      setPipelineProgress("Đã hủy xử lý", 100);
+      log("Pipeline cancelled.");
+      await unloadModelsAfterStep("all", getPipelineOptions()).catch(() => null);
+      throw error;
+    }
     setPipelineProgress("Pipeline failed", 100);
     log(`Pipeline failed: ${error.message}`);
     await unloadModelsAfterStep("all", pipelineOptions);
@@ -16902,7 +18531,7 @@ function setupPlayerUI() {
       seek.value = audio.currentTime;
     }
     if (time) {
-      time.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration || 0)}`;
+      time.textContent = `${formatTime(audio.currentTime)}/${formatTime(audio.duration || 0)}`;
     }
   });
 
@@ -16910,7 +18539,7 @@ function setupPlayerUI() {
       const seek = $("player-seek");
       const time = $("player-time");
       if (seek) seek.max = audio.duration || 0;
-      if (time) time.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration || 0)}`;
+      if (time) time.textContent = `${formatTime(audio.currentTime)}/${formatTime(audio.duration || 0)}`;
   });
 
   $("player-seek")?.addEventListener("input", (e) => {
@@ -16935,170 +18564,445 @@ function setupPlayerUI() {
   }, { passive: true });
 }
 
-// Context Menu
+// Context Menu: mirror server web app speaker editing UI on top of editorState.
 let ctxTargetSegmentIndex = -1;
+let ctxHasSegmentTarget = false;
+let ctxBlockStartIndex = -1;
+let ctxSpeakerId = null;
+let ctxTargetWordIndex = null;
+let renameSelectedColor = null;
+
+function hideContextMenuUI() {
+  const menu = $("context-menu");
+  if (menu) menu.style.display = "none";
+}
+
+function hideSplitSpeakerModal() {
+  const modal = $("split-speaker-modal");
+  if (modal) modal.style.display = "none";
+}
+
+function hideRenameModal() {
+  const modal = $("rename-modal");
+  if (modal) modal.style.display = "none";
+}
+
+function uniqueEditorSpeakerNames(exclude = "") {
+  const names = new Set();
+  for (const meta of Object.values(editorState?.speakers || {})) {
+    const name = (meta?.name || "").trim();
+    if (name && name !== exclude) names.add(name);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, "vi"));
+}
+
+function findEditorSpeakerIdByName(name) {
+  const target = String(name || "").trim();
+  if (!target) return null;
+  for (const [id, meta] of Object.entries(editorState?.speakers || {})) {
+    if ((meta?.name || "").trim() === target) return normalizeSpeakerId(id);
+  }
+  return null;
+}
+
+function wordCountForSegment(segment) {
+  return segmentWordTokens(segment?.text || "").filter((token) => token.isWord).length;
+}
+
+function boundedWordBoundary(segment, wordBoundary) {
+  const count = wordCountForSegment(segment);
+  if (!count) return 0;
+  return Math.max(0, Math.min(count, Number(wordBoundary) || 0));
+}
+
+function splitRawWordsAt(segment, wordBoundary) {
+  const rawWords = Array.isArray(segment.raw_words) ? segment.raw_words : [];
+  if (!rawWords.length) return { prefix: [], suffix: [] };
+  const boundary = Math.max(0, Math.min(rawWords.length, Number(wordBoundary) || 0));
+  return {
+    prefix: rawWords.slice(0, boundary),
+    suffix: rawWords.slice(boundary),
+  };
+}
+
+function segmentSplitTime(segment, wordBoundary, charBoundary) {
+  const rawWords = Array.isArray(segment.raw_words) ? segment.raw_words : [];
+  const boundary = Math.max(0, Math.min(rawWords.length, Number(wordBoundary) || 0));
+  const candidateWord = rawWords[boundary];
+  if (candidateWord) {
+    const interval = effectiveWordInterval(candidateWord);
+    if (Number.isFinite(interval.start) && interval.start > segment.start && interval.start < segment.end) {
+      return interval.start;
+    }
+  }
+  const textLength = Math.max(1, String(segment.text || "").length);
+  const ratio = Math.max(0, Math.min(1, Number(charBoundary || 0) / textLength));
+  const start = Number(segment.start || 0);
+  const end = Number(segment.end || start + 0.01);
+  return Math.max(start + 0.001, Math.min(end - 0.001, start + (end - start) * ratio));
+}
+
+function splitEditorSegmentAtWordBoundary(segmentIndex, wordBoundary) {
+  if (!editorState?.segments?.[segmentIndex]) return { beforeIndex: segmentIndex, afterIndex: segmentIndex, split: false };
+  const segment = editorState.segments[segmentIndex];
+  const tokens = segmentWordTokens(segment.text || "");
+  const wordTokens = tokens.filter((token) => token.isWord);
+  const boundary = boundedWordBoundary(segment, wordBoundary);
+  if (boundary <= 0) return { beforeIndex: segmentIndex - 1, afterIndex: segmentIndex, split: false };
+  if (boundary >= wordTokens.length) return { beforeIndex: segmentIndex, afterIndex: segmentIndex + 1, split: false };
+
+  const charBoundary = wordTokens[boundary].start;
+  const prefixText = String(segment.text || "").slice(0, charBoundary).trimEnd();
+  const suffixText = String(segment.text || "").slice(charBoundary).trimStart();
+  if (!prefixText || !suffixText) return { beforeIndex: segmentIndex, afterIndex: segmentIndex, split: false };
+
+  const splitTime = segmentSplitTime(segment, boundary, charBoundary);
+  const raw = splitRawWordsAt(segment, boundary);
+  const prefix = {
+    ...segment,
+    text: prefixText,
+    end: splitTime,
+    raw_words: raw.prefix,
+  };
+  const suffix = {
+    ...segment,
+    id: `${segment.id || `segment-${segmentIndex}`}-w${boundary}`,
+    text: suffixText,
+    start: splitTime,
+    raw_words: raw.suffix,
+  };
+  editorState.segments.splice(segmentIndex, 1, prefix, suffix);
+  return { beforeIndex: segmentIndex, afterIndex: segmentIndex + 1, split: true };
+}
+
+function selectedWordBoundaryBefore() {
+  if (ctxTargetWordIndex === null || ctxTargetWordIndex === undefined) return 0;
+  return Math.max(0, Number(ctxTargetWordIndex) || 0);
+}
+
+function selectedWordBoundaryAfter() {
+  if (ctxTargetWordIndex === null || ctxTargetWordIndex === undefined) return 1;
+  return Math.max(1, (Number(ctxTargetWordIndex) || 0) + 1);
+}
+
+function setSpeakerContextFromSegment(segmentIndex, hasSegmentTarget = true, wordIndex = null) {
+  if (!editorState?.segments?.[segmentIndex]) return false;
+  const block = findEditorSpeakerBlock(segmentIndex);
+  ctxTargetSegmentIndex = segmentIndex;
+  ctxHasSegmentTarget = hasSegmentTarget;
+  ctxBlockStartIndex = block?.start ?? segmentIndex;
+  ctxSpeakerId = normalizeSpeakerId(editorState.segments[segmentIndex].speaker);
+  ctxTargetWordIndex = Number.isFinite(Number(wordIndex)) ? Number(wordIndex) : null;
+  editorState.activeSegmentIndex = segmentIndex;
+  applyEditorActiveClasses(false);
+  return true;
+}
+
+function setSpeakerContextFromBlock(blockEl) {
+  const start = Number(blockEl?.dataset.blockStart ?? blockEl?.dataset.block);
+  if (!Number.isFinite(start)) return false;
+  return setSpeakerContextFromSegment(start, false);
+}
+
+function openSplitSpeakerModal() {
+  if (!editorState || ctxTargetSegmentIndex < 0) return;
+  const currentName = speakerMetaFor(ctxSpeakerId).name;
+  $("split-current-speaker").textContent = currentName;
+  $("split-speaker-input").value = "";
+
+  const select = $("split-speaker-select");
+  select.innerHTML = '<option value="">-- Chọn từ danh sách --</option>';
+  for (const name of uniqueEditorSpeakerNames(currentName)) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+  const defaultScope = document.querySelector('input[name="split-scope"][value="to_end"]');
+  if (defaultScope) defaultScope.checked = true;
+
+  $("split-speaker-modal").style.display = "flex";
+  $("split-speaker-input").focus();
+}
+
+function doSplitSpeaker() {
+  if (!editorState || ctxTargetSegmentIndex < 0) return;
+  let name = $("split-speaker-input").value.trim();
+  if (!name) name = $("split-speaker-select").value;
+  if (!name) {
+    showToast("Vui lòng chọn hoặc nhập tên người nói", "error");
+    return;
+  }
+
+  let targetId = findEditorSpeakerIdByName(name);
+  if (targetId === null) {
+    targetId = nextEditorSpeakerId();
+    editorState.speakers[targetId] = {
+      name,
+      color: SPEAKER_COLORS[targetId % SPEAKER_COLORS.length],
+    };
+  }
+
+  const scope = document.querySelector('input[name="split-scope"]:checked')?.value || "to_end";
+  const split = ctxTargetWordIndex === null
+    ? { afterIndex: ctxTargetSegmentIndex }
+    : splitEditorSegmentAtWordBoundary(ctxTargetSegmentIndex, selectedWordBoundaryBefore());
+  const startIndex = split.afterIndex;
+  if (!editorState.segments[startIndex]) return;
+  if (scope === "to_end") {
+    const block = findEditorSpeakerBlock(startIndex);
+    for (let i = startIndex; i <= (block?.end ?? startIndex); i += 1) {
+      editorState.segments[i].speaker = targetId;
+    }
+  } else {
+    editorState.segments[startIndex].speaker = targetId;
+  }
+
+  hideSplitSpeakerModal();
+  syncEditorSpeakers(editorState.speakers);
+  renderEditor();
+  scheduleLibraryResultAutosave();
+  showToast("Đã tách người nói", "success");
+}
+
+function openRenameSpeakerModal() {
+  if (!editorState || ctxTargetSegmentIndex < 0) return;
+  const meta = speakerMetaFor(ctxSpeakerId);
+  $("rename-current").textContent = meta.name;
+  $("rename-input").value = "";
+
+  const select = $("rename-select");
+  select.innerHTML = '<option value="">-- Chọn --</option>';
+  for (const name of uniqueEditorSpeakerNames()) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    select.appendChild(option);
+  }
+
+  renameSelectedColor = meta.color || null;
+  const colors = $("rename-colors");
+  colors.textContent = "";
+  for (const color of SPEAKER_COLORS) {
+    const dot = document.createElement("div");
+    dot.className = `color-dot${renameSelectedColor === color ? " selected" : ""}`;
+    dot.style.backgroundColor = color;
+    dot.addEventListener("click", () => {
+      renameSelectedColor = color;
+      colors.querySelectorAll(".color-dot").forEach((node) => node.classList.remove("selected"));
+      dot.classList.add("selected");
+    });
+    colors.appendChild(dot);
+  }
+
+  $("rename-modal").style.display = "flex";
+  $("rename-input").focus();
+}
+
+function applyRenameSpeaker(applyAll) {
+  if (!editorState || ctxTargetSegmentIndex < 0 || ctxSpeakerId === null) return;
+  let newName = $("rename-input").value.trim();
+  if (!newName) newName = $("rename-select").value;
+  if (!newName && !renameSelectedColor) {
+    showToast("Vui lòng nhập tên hoặc chọn màu", "error");
+    return;
+  }
+
+  if (applyAll) {
+    const meta = speakerMetaFor(ctxSpeakerId);
+    if (newName) meta.name = newName;
+    if (renameSelectedColor) meta.color = renameSelectedColor;
+  } else if (newName) {
+    const newId = nextEditorSpeakerId();
+    editorState.speakers[newId] = {
+      name: newName,
+      color: renameSelectedColor || SPEAKER_COLORS[newId % SPEAKER_COLORS.length],
+    };
+    const block = findEditorSpeakerBlock(ctxTargetSegmentIndex);
+    for (let i = block?.start ?? ctxTargetSegmentIndex; i <= (block?.end ?? ctxTargetSegmentIndex); i += 1) {
+      editorState.segments[i].speaker = newId;
+    }
+  } else if (renameSelectedColor) {
+    speakerMetaFor(ctxSpeakerId).color = renameSelectedColor;
+  }
+
+  hideRenameModal();
+  syncEditorSpeakers(editorState.speakers);
+  renderEditor();
+  scheduleLibraryResultAutosave();
+  showToast(newName ? "Đã đổi tên người nói" : "Đã đổi màu người nói", "success");
+}
+
+function mergeEditorSpeakerFromContext(direction) {
+  if (!editorState || ctxTargetSegmentIndex < 0) return;
+  const originalBlock = findEditorSpeakerBlock(ctxTargetSegmentIndex);
+  if (!originalBlock) return;
+  const fullBlock = !ctxHasSegmentTarget;
+  if (direction === "prev") {
+    const target = editorState.segments[originalBlock.start - 1];
+    if (!target) return;
+    let end = fullBlock ? originalBlock.end : ctxTargetSegmentIndex;
+    if (!fullBlock && ctxTargetWordIndex !== null) {
+      const split = splitEditorSegmentAtWordBoundary(ctxTargetSegmentIndex, selectedWordBoundaryAfter());
+      end = split.beforeIndex;
+    }
+    for (let i = originalBlock.start; i <= end; i += 1) {
+      editorState.segments[i].speaker = target.speaker;
+    }
+  } else {
+    const targetBeforeSplit = editorState.segments[originalBlock.end + 1];
+    if (!targetBeforeSplit) return;
+    let start = fullBlock ? originalBlock.start : ctxTargetSegmentIndex;
+    if (!fullBlock && ctxTargetWordIndex !== null) {
+      const split = splitEditorSegmentAtWordBoundary(ctxTargetSegmentIndex, selectedWordBoundaryBefore());
+      start = split.afterIndex;
+    }
+    const block = findEditorSpeakerBlock(start);
+    const target = editorState.segments[(block?.end ?? originalBlock.end) + 1] || targetBeforeSplit;
+    for (let i = start; i <= (block?.end ?? start); i += 1) {
+      editorState.segments[i].speaker = target.speaker;
+    }
+  }
+  syncEditorSpeakers(editorState.speakers);
+  renderEditor();
+  scheduleLibraryResultAutosave();
+  showToast("Đã gộp người nói", "success");
+}
+
+function ctxRenameSpeakerDirect(speakerId, blockStartIndex) {
+  if (!setSpeakerContextFromSegment(Number(blockStartIndex), false)) return;
+  ctxSpeakerId = normalizeSpeakerId(speakerId);
+  openRenameSpeakerModal();
+}
+
+function setSpeakerContextFromResultTarget(target, hasSegmentTarget = true) {
+  const wordEl = target?.closest?.("[data-editor-word-index]");
+  const segEl = wordEl || target?.closest?.("[data-editor-segment-index], [data-seg]");
+  const blockEl = target?.closest?.("[data-block]");
+  if (segEl) {
+    return setSpeakerContextFromSegment(
+      Number(segEl.dataset.editorSegmentIndex ?? segEl.dataset.seg),
+      hasSegmentTarget,
+      wordEl ? Number(wordEl.dataset.editorWordIndex) : null
+    );
+  }
+  if (blockEl) return setSpeakerContextFromBlock(blockEl);
+  return false;
+}
+
+function showSpeakerContextMenuAt(x, y) {
+  const menu = $("context-menu");
+  if (!menu) return;
+  menu.style.display = "block";
+  menu.style.left = `${Math.min(x, window.innerWidth - 240)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - 200)}px`;
+}
 
 function setupContextMenuUI() {
   const menu = $("context-menu");
   if (!menu) return;
+  let longPressTimer = null;
+  let longPressStart = null;
+  let suppressNextDocumentClick = false;
 
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest("#context-menu")) {
-      menu.style.display = "none";
+  const clearLongPress = () => {
+    if (longPressTimer) window.clearTimeout(longPressTimer);
+    longPressTimer = null;
+    longPressStart = null;
+  };
+
+  document.addEventListener("click", (event) => {
+    if (suppressNextDocumentClick) {
+      suppressNextDocumentClick = false;
+      return;
     }
+    if (!event.target.closest("#context-menu")) hideContextMenuUI();
   });
 
-  $("result-content")?.addEventListener("contextmenu", (e) => {
-    const seg = e.target.closest(".editor-segment");
-    if (seg && editorState) {
-      e.preventDefault();
-      ctxTargetSegmentIndex = parseInt(seg.dataset.index, 10);
-      menu.style.display = "block";
-      menu.style.left = `${e.pageX}px`;
-      menu.style.top = `${e.pageY}px`;
+  $("result-content")?.addEventListener("contextmenu", (event) => {
+    if (!editorState) return;
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!setSpeakerContextFromResultTarget(target, true)) return;
+    event.preventDefault();
+    showSpeakerContextMenuAt(event.clientX, event.clientY);
+  });
+
+  $("result-content")?.addEventListener("pointerdown", (event) => {
+    if (!editorState || event.pointerType === "mouse") return;
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!target?.closest?.("[data-editor-word-index], [data-editor-segment-index], [data-seg], [data-block]")) return;
+    clearLongPress();
+    longPressStart = { x: event.clientX, y: event.clientY, target };
+    longPressTimer = window.setTimeout(() => {
+      if (!longPressStart) return;
+      if (setSpeakerContextFromResultTarget(longPressStart.target, true)) {
+        suppressNextDocumentClick = true;
+        showSpeakerContextMenuAt(longPressStart.x, longPressStart.y);
+      }
+      clearLongPress();
+    }, 550);
+  }, { passive: true });
+
+  $("result-content")?.addEventListener("pointermove", (event) => {
+    if (!longPressStart) return;
+    if (Math.abs(event.clientX - longPressStart.x) > 10 || Math.abs(event.clientY - longPressStart.y) > 10) {
+      clearLongPress();
     }
+  });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((type) => {
+    $("result-content")?.addEventListener(type, clearLongPress);
   });
 
   $("ctx-split-speaker")?.addEventListener("click", () => {
-    if (ctxTargetSegmentIndex >= 0) {
-      const select = $("split-speaker-select");
-      select.innerHTML = '<option value="">-- Chọn từ danh sách --</option>';
-      for (const [id, meta] of Object.entries(editorState.speakers)) {
-        const opt = document.createElement("option");
-        opt.value = id;
-        opt.textContent = meta.name;
-        select.appendChild(opt);
-      }
-      $("split-speaker-input").value = "";
-      const seg = editorState.segments[ctxTargetSegmentIndex];
-      $("split-current-speaker").textContent = editorState.speakers[seg.speaker]?.name || seg.speaker;
-
-      $("split-speaker-modal").style.display = "flex";
-      menu.style.display = "none";
-    }
+    hideContextMenuUI();
+    openSplitSpeakerModal();
   });
-
-  $("btn-close-split-modal")?.addEventListener("click", () => $("split-speaker-modal").style.display = "none");
-  $("btn-cancel-split")?.addEventListener("click", () => $("split-speaker-modal").style.display = "none");
-
-  $("btn-confirm-split")?.addEventListener("click", () => {
-     const newIdStr = $("split-speaker-select").value;
-     const newName = $("split-speaker-input").value.trim();
-     let targetId;
-     if (newIdStr) {
-       targetId = parseInt(newIdStr, 10);
-     } else {
-       targetId = nextEditorSpeakerId();
-       editorState.speakers[targetId] = {
-         name: newName || defaultSpeakerName(targetId),
-         color: SPEAKER_COLORS[targetId % SPEAKER_COLORS.length]
-       };
-     }
-
-     const scope = document.querySelector('input[name="split-scope"]:checked').value;
-     if (scope === "to_end") {
-       const block = findEditorSpeakerBlock(ctxTargetSegmentIndex);
-       for (let i = ctxTargetSegmentIndex; i <= block.end; i++) {
-         editorState.segments[i].speaker = targetId;
-       }
-     } else {
-       editorState.segments[ctxTargetSegmentIndex].speaker = targetId;
-     }
-     $("split-speaker-modal").style.display = "none";
-     syncEditorSpeakers(editorState.speakers);
-     renderEditor();
-     scheduleLibraryResultAutosave();
-  });
-
   $("ctx-merge-up")?.addEventListener("click", () => {
-    menu.style.display = "none";
-    if (ctxTargetSegmentIndex > 0) {
-       mergeEditorSpeakerBlock(ctxTargetSegmentIndex, "prev");
-    }
+    hideContextMenuUI();
+    mergeEditorSpeakerFromContext("prev");
   });
-
   $("ctx-merge-down")?.addEventListener("click", () => {
-    menu.style.display = "none";
-    mergeEditorSpeakerBlock(ctxTargetSegmentIndex, "next");
+    hideContextMenuUI();
+    mergeEditorSpeakerFromContext("next");
   });
-
   $("ctx-rename-speaker")?.addEventListener("click", () => {
-    menu.style.display = "none";
-    if (ctxTargetSegmentIndex >= 0) {
-      const seg = editorState.segments[ctxTargetSegmentIndex];
-      const speakerId = seg.speaker;
-      const meta = editorState.speakers[speakerId];
-      $("rename-current").textContent = meta ? meta.name : speakerId;
-      $("rename-input").value = meta ? meta.name : "";
-
-      const select = $("rename-select");
-      select.innerHTML = '<option value="">-- Chọn --</option>';
-      for (const [id, s] of Object.entries(editorState.speakers)) {
-        const opt = document.createElement("option");
-        opt.value = s.name;
-        opt.textContent = s.name;
-        select.appendChild(opt);
-      }
-
-      const colorsContainer = $("rename-colors");
-      colorsContainer.innerHTML = "";
-      SPEAKER_COLORS.forEach(c => {
-         const div = document.createElement("div");
-         div.className = "color-swatch";
-         div.style.backgroundColor = c;
-         if (meta && meta.color === c) div.classList.add("selected");
-         div.addEventListener("click", () => {
-           colorsContainer.querySelectorAll(".color-swatch").forEach(el => el.classList.remove("selected"));
-           div.classList.add("selected");
-           colorsContainer.dataset.selectedColor = c;
-         });
-         colorsContainer.appendChild(div);
-      });
-      colorsContainer.dataset.selectedColor = meta ? meta.color : SPEAKER_COLORS[0];
-
-      $("rename-modal").style.display = "flex";
-    }
+    hideContextMenuUI();
+    openRenameSpeakerModal();
   });
-
-  $("btn-close-rename-modal")?.addEventListener("click", () => $("rename-modal").style.display = "none");
-  $("btn-cancel-rename")?.addEventListener("click", () => $("rename-modal").style.display = "none");
-
-  const applyRename = (all) => {
-      const newName = $("rename-input").value.trim();
-      const newColor = $("rename-colors").dataset.selectedColor;
-      const seg = editorState.segments[ctxTargetSegmentIndex];
-      const speakerId = seg.speaker;
-
-      if (all) {
-          if (newName) editorState.speakers[speakerId].name = newName;
-          if (newColor) editorState.speakers[speakerId].color = newColor;
-      } else {
-          const newId = nextEditorSpeakerId();
-          editorState.speakers[newId] = {
-             name: newName || defaultSpeakerName(newId),
-             color: newColor || SPEAKER_COLORS[newId % SPEAKER_COLORS.length]
-          };
-          const block = findEditorSpeakerBlock(ctxTargetSegmentIndex);
-          for (let i = block.start; i <= block.end; i++) {
-             editorState.segments[i].speaker = newId;
-          }
-      }
-      $("rename-modal").style.display = "none";
-      syncEditorSpeakers(editorState.speakers);
-      renderEditor();
-      scheduleLibraryResultAutosave();
-  };
-
-  $("btn-rename-all")?.addEventListener("click", () => applyRename(true));
-  $("btn-rename-single")?.addEventListener("click", () => applyRename(false));
-
   $("ctx-copy")?.addEventListener("click", () => {
-    menu.style.display = "none";
+    hideContextMenuUI();
     if (ctxTargetSegmentIndex >= 0) {
-      navigator.clipboard.writeText(editorState.segments[ctxTargetSegmentIndex].text);
-      showToast("Đã sao chép văn bản");
+      navigator.clipboard.writeText(editorState.segments[ctxTargetSegmentIndex].text || "");
+      showToast("Đã sao chép", "success");
     }
   });
+
+  $("split-speaker-select")?.addEventListener("change", (event) => {
+    $("split-speaker-input").value = event.currentTarget.value || "";
+  });
+  $("split-speaker-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      doSplitSpeaker();
+    }
+  });
+  $("btn-close-split-modal")?.addEventListener("click", hideSplitSpeakerModal);
+  $("btn-cancel-split")?.addEventListener("click", hideSplitSpeakerModal);
+  $("btn-confirm-split")?.addEventListener("click", doSplitSpeaker);
+
+  $("rename-select")?.addEventListener("change", (event) => {
+    $("rename-input").value = event.currentTarget.value || "";
+  });
+  $("rename-input")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyRenameSpeaker(true);
+    }
+  });
+  $("btn-close-rename-modal")?.addEventListener("click", hideRenameModal);
+  $("btn-cancel-rename")?.addEventListener("click", hideRenameModal);
+  $("btn-rename-all")?.addEventListener("click", () => applyRenameSpeaker(true));
+  $("btn-rename-single")?.addEventListener("click", () => applyRenameSpeaker(false));
 }
 
 // Call setups
