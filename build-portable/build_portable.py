@@ -30,7 +30,7 @@ DIST_DIR = PROJECT_ROOT / "dist" / f"sherpa-vietnamese-asr-{_VERSION}"
 BUILD_DIR = PROJECT_ROOT / "build"
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed-amd64.zip"
 # A08: SHA-256 pin cho Python embedded — supply chain defense-in-depth
-PYTHON_EMBED_SHA256 = "47d2e66e2bfc20a6a26446a88bcf2f0b0e4e4f2f5c6570f2a0c6d71c60e7e5e8"
+PYTHON_EMBED_SHA256 = "c87f000e3dae1a572e98e81daeb622f8bc6f22664093fc9c70989b5f0018d49b"
 
 # Source files to copy (relative to project root)
 SOURCE_FILES = [

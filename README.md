@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey)
-![Version](https://img.shields.io/badge/Version-2.5.3-orange)
+![Version](https://img.shields.io/badge/Version-2.5.4-orange)
 ![Runtime](https://img.shields.io/badge/Runtime-ONNX%20only-success)
 
 ## Ba chế độ sử dụng
