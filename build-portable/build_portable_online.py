@@ -55,30 +55,20 @@ ONLINE_SOURCE_FILES = [
     "requirements-online.txt",
 ]
 
-# Models KHONG copy
-EXCLUDE_MODELS_ONLINE = {
-    "moonshine-base-vi",
-    "zipformer-30m-rnnt-streaming-6000h",
-    # Unused ASR models
-    'gipformer-65M-rnnt', 'myfinetune', 'myfinetune2', 'myfinetune3',
-    'sherpa-onnx-zipformer-vi-30M',
-    'sherpa-onnx-zipformer-vi-2025-04-20_tmp',
-    # CEM (not integrated in runtime)
-    'cem-retrain',
-    # Legacy diarization (pure ORT replaces)
-    'speaker_embedding', 'speaker_diarization',
-    # Unused diarization variants
-    'diarizen',                    # 278MB wavlm-large — not used in runtime
-    'ecapa-wespeaker',             # not referenced in code
-    'campp-wespeaker',             # campp_pure_ort not in model registry
-    # Not used
-    'gtcrn',
-    # Summary/LLM models (chưa hoàn thiện)
-    '.cache',
+# Service runtime model allowlist. This prevents ad-hoc downloaded models in
+# models/ from being shipped in the service bundle.
+BUNDLED_MODEL_DIRS_ONLINE = {
+    "zipformer-30m-rnnt-6000h",
+    "sherpa-onnx-zipformer-vi-2025-04-20",
+    "vibert-capu",
+    "pyannote",
+    "pyannote-onnx",
+    "campp-3dspeaker",
+    "silero-vad",
+    "convtasnet-libri2mix-16k",
+    "dnsmos",
 }
-
-# GGUF model files (match by extension, skip tất cả)
-EXCLUDE_MODEL_EXTENSIONS = {'.gguf'}
+BUNDLED_MODEL_ROOT_FILES_ONLINE = set()
 
 # Packages khong can cho web service (giam dung luong)
 EXCLUDE_PACKAGES_SERVICES = {
@@ -372,28 +362,24 @@ def copy_models_online():
         print("  [WARN] models/ not found")
         return
 
-    # CEM root file patterns to skip
-    CEM_PATTERNS = ['cem_*.pt', 'cem_*.onnx', 'cem_*.json']
-
     models_dst.mkdir(parents=True, exist_ok=True)
 
     for item in models_src.iterdir():
-        if item.name in EXCLUDE_MODELS_ONLINE:
-            print(f"  [SKIP] {item.name}")
-            continue
-        if any(item.match(p) for p in CEM_PATTERNS):
-            print(f"  [SKIP] {item.name}")
-            continue
-        if item.suffix.lower() in EXCLUDE_MODEL_EXTENSIONS:
-            print(f"  [SKIP] {item.name}")
-            continue
-
-        dst_item = models_dst / item.name
         if item.is_dir():
+            if item.name not in BUNDLED_MODEL_DIRS_ONLINE:
+                print(f"  [SKIP] {item.name}")
+                continue
+            dst_item = models_dst / item.name
             shutil.copytree(item, dst_item, ignore=shutil.ignore_patterns(
                             '.git', '.cache', '.gitattributes', '__pycache__'))
+        elif item.is_file():
+            if item.name not in BUNDLED_MODEL_ROOT_FILES_ONLINE:
+                print(f"  [SKIP] {item.name}")
+                continue
+            shutil.copy2(item, models_dst / item.name)
         else:
-            shutil.copy2(item, dst_item)
+            print(f"  [SKIP] {item.name}")
+            continue
         print(f"  [OK] {item.name}")
 
     # Clean vibert-capu: keep only onnx + vocab + config

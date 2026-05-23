@@ -1,0 +1,83 @@
+name: Build portable bundles
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle:
+        description: "Portable bundle to build"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - desktop
+          - service
+      prepare_models:
+        description: "Run prepare_offline_build.py before building"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache build inputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .envtietkiem
+            models
+            python-embedded.zip
+          key: portable-${{ runner.os }}-${{ hashFiles('requirements*.txt', 'build-portable/*.py', 'offline_pwa/model_manifest.json') }}
+          restore-keys: |
+            portable-${{ runner.os }}-
+
+      - name: Set up build environment
+        shell: pwsh
+        run: python build-portable/setup_build_env.py
+
+      - name: Prepare offline models
+        if: ${{ inputs.prepare_models }}
+        shell: pwsh
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python build-portable/prepare_offline_build.py
+
+      - name: Build desktop portable
+        if: ${{ inputs.bundle == 'both' || inputs.bundle == 'desktop' }}
+        shell: pwsh
+        run: python build-portable/build_portable.py
+
+      - name: Build service portable
+        if: ${{ inputs.bundle == 'both' || inputs.bundle == 'service' }}
+        shell: pwsh
+        run: python build-portable/build_portable_online.py
+
+      - name: Zip portable bundles
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Get-ChildItem -Path dist -Directory | ForEach-Object {
+            $zip = Join-Path artifacts ($_.Name + ".zip")
+            Compress-Archive -Path (Join-Path $_.FullName "*") -DestinationPath $zip -Force
+          }
+
+      - name: Upload portable artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-bundles
+          path: artifacts/*.zip
+          if-no-files-found: error

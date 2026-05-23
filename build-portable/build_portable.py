@@ -50,6 +50,22 @@ MODULE_DIRS = ["core"]
 # Data directories to copy
 DATA_DIRS = ["models", "vocabulary"]
 
+# Desktop runtime model allowlist. This prevents ad-hoc downloaded models in
+# models/ from being shipped in the portable bundle.
+BUNDLED_MODEL_DIRS = {
+    "zipformer-30m-rnnt-6000h",
+    "zipformer-30m-rnnt-streaming-6000h",
+    "sherpa-onnx-zipformer-vi-2025-04-20",
+    "vibert-capu",
+    "pyannote",
+    "pyannote-onnx",
+    "campp-3dspeaker",
+    "silero-vad",
+    "convtasnet-libri2mix-16k",
+    "dnsmos",
+}
+BUNDLED_MODEL_ROOT_FILES = set()
+
 
 def get_venv_path():
     """Get site-packages path in venv"""
@@ -746,35 +762,6 @@ def copy_data():
     """Copy data directories (models, vocabulary)"""
     print("[DATA] Copying data directories...")
 
-    # Model dirs/files to EXCLUDE entirely (unused at runtime)
-    EXCLUDE_MODELS = {
-        'moonshine-base-vi',
-        # Unused ASR models
-        'gipformer-65M-rnnt',
-        'myfinetune', 'myfinetune2', 'myfinetune3',
-        'sherpa-onnx-zipformer-vi-30M',
-        'sherpa-onnx-zipformer-vi-2025-04-20_tmp',
-        # NOTE: zipformer-30m-rnnt-streaming-6000h is KEPT (used by tab_live.py)
-        # CEM models (not integrated in runtime)
-        'cem-retrain',
-        # Legacy diarization (replaced by pure ORT)
-        'speaker_embedding',           # nemo titanet — not needed for pure ORT
-        'speaker_diarization',         # sherpa-onnx segmentation — not needed for pure ORT
-        # Unused diarization variants
-        'diarizen',                    # 278MB wavlm-large — not used in runtime
-        'ecapa-wespeaker',             # not referenced in code
-        'campp-wespeaker',             # campp_pure_ort not in model registry
-        # Audio enhancement not used
-        'gtcrn',
-        # Summary/LLM models (chưa hoàn thiện)
-        '.cache',
-    }
-    # Skip LLM model files by extension
-    EXCLUDE_MODEL_EXTENSIONS = {'.gguf'}
-
-    # CEM root files to exclude (glob patterns checked separately)
-    CEM_PATTERNS = ['cem_*.pt', 'cem_*.onnx', 'cem_*.json']
-
     for dir_name in DATA_DIRS:
         src = PROJECT_ROOT / dir_name
         if src.exists():
@@ -785,24 +772,20 @@ def copy_data():
             if dir_name == 'models':
                 dst.mkdir(parents=True, exist_ok=True)
                 for item in src.iterdir():
-                    # Skip excluded dirs
-                    if item.name in EXCLUDE_MODELS:
-                        print(f"  [SKIP] {item.name}")
-                        continue
-                    # Skip CEM root files
-                    if any(item.match(p) for p in CEM_PATTERNS):
-                        print(f"  [SKIP] {item.name}")
-                        continue
-                    # Skip LLM model files
-                    if item.suffix.lower() in EXCLUDE_MODEL_EXTENSIONS:
-                        print(f"  [SKIP] {item.name}")
-                        continue
-                    dst_item = dst / item.name
                     if item.is_dir():
+                        if item.name not in BUNDLED_MODEL_DIRS:
+                            print(f"  [SKIP] {item.name}")
+                            continue
+                        dst_item = dst / item.name
                         shutil.copytree(item, dst_item, ignore=shutil.ignore_patterns(
                             '.git', '.cache', '.gitattributes', '__pycache__'))
+                    elif item.is_file():
+                        if item.name not in BUNDLED_MODEL_ROOT_FILES:
+                            print(f"  [SKIP] {item.name}")
+                            continue
+                        shutil.copy2(item, dst / item.name)
                     else:
-                        shutil.copy2(item, dst_item)
+                        print(f"  [SKIP] {item.name}")
             else:
                 shutil.copytree(src, dst)
             # Count files
