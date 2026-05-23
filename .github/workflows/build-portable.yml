@@ -67,12 +67,12 @@ jobs:
       - name: Build desktop portable
         if: ${{ inputs.bundle == 'both' || inputs.bundle == 'desktop' }}
         shell: pwsh
-        run: python build-portable/build_portable.py
+        run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable.py
 
       - name: Build service portable
         if: ${{ inputs.bundle == 'both' || inputs.bundle == 'service' }}
         shell: pwsh
-        run: python build-portable/build_portable_online.py
+        run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable_online.py
 
       - name: Zip portable bundles
         shell: pwsh
