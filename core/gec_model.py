@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 import logging
 import os
 import re
+import sys
 from time import time
 from typing import List, Union
 
@@ -16,6 +17,14 @@ from core.gec_utils import PAD, UNK, START_TOKEN, get_target_sent_by_edits
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logger = logging.getLogger(__file__)
+
+
+def _safe_print(message):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(str(message).encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 def _softmax(x, axis=-1):
@@ -55,8 +64,12 @@ class GecBERTModel:
         punc_dict={':', ".", ",", "?"},
         case_confidence=0.0,
         prefer_int8=False,
+        execution_provider="cpu",
+        mini_batch_size=None,
     ):
         self.prefer_int8 = prefer_int8
+        self.execution_provider = execution_provider or "cpu"
+        self.mini_batch_size = mini_batch_size
         if isinstance(model_paths, str):
             model_paths = [model_paths]
         self.model_weights = list(map(float, weights)) if weights else [1] * len(model_paths)
@@ -132,10 +145,25 @@ class GecBERTModel:
             sess_options.enable_cpu_mem_arena = False  # Tránh arena leak
             # Cache optimized graph: giảm disk I/O lần load sau
             sess_options.optimized_model_filepath = onnx_path + ".opt"
-            session = ort.InferenceSession(
-                onnx_path, sess_options,
-                providers=["CPUExecutionProvider"]
-            )
+            if self.execution_provider and self.execution_provider.lower() not in ("cpu", "none", "off"):
+                from core.hardware_accel import create_ort_session, auto_batch_size
+                session, provider_info = create_ort_session(
+                    ort, onnx_path, sess_options,
+                    policy=self.execution_provider,
+                    stage="ViBERT punctuation",
+                )
+                if self.mini_batch_size is None:
+                    self.mini_batch_size = auto_batch_size(
+                        "ViBERT punctuation", 32, provider_info.get("actual_provider")
+                    )
+                logger.info(f"[GecBERT] provider={provider_info}")
+            else:
+                session = ort.InferenceSession(
+                    onnx_path, sess_options,
+                    providers=["CPUExecutionProvider"]
+                )
+                if self.mini_batch_size is None:
+                    self.mini_batch_size = 32
             self.sessions.append(session)
             logger.info(f"[GecBERT] ONNX session loaded OK")
 
@@ -309,7 +337,7 @@ class GecBERTModel:
 
         for inputs, session in zip(batch_inputs, self.sessions):
             batch_size = inputs["input_ids"].shape[0]
-            mini_batch_size = 32
+            mini_batch_size = int(self.mini_batch_size or 32)
 
             if batch_size > mini_batch_size:
                 logits_parts = []
@@ -485,9 +513,9 @@ class GecBERTModel:
                     if orig_tokens_batch and b_idx < len(orig_tokens_batch) and w_idx < len(orig_tokens_batch[b_idx]):
                         word = orig_tokens_batch[b_idx][w_idx]
                     if old_label != new_label:
-                        print(f"  [Pause CHANGED] \"{word}\" gap={gap:.2f}s: {old_label} -> {new_label}")
+                        _safe_print(f"  [Pause CHANGED] \"{word}\" gap={gap:.2f}s: {old_label} -> {new_label}")
                     else:
-                        print(f"  [Pause kept]    \"{word}\" gap={gap:.2f}s: {new_label} (unchanged)")
+                        _safe_print(f"  [Pause kept]    \"{word}\" gap={gap:.2f}s: {new_label} (unchanged)")
 
         probs = all_class_probs.max(axis=-1).tolist()
         idx = all_class_probs.argmax(axis=-1).tolist()

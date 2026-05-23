@@ -559,13 +559,12 @@ def copy_dlls():
     # Copy onnxruntime.dll từ pip package (phiên bản mới nhất, đồng bộ với .pyd)
     ort_capi = venv_site / "onnxruntime" / "capi"
     if ort_capi.exists():
-        ort_dll = ort_capi / "onnxruntime.dll"
-        if ort_dll.exists():
-            shutil.copy2(ort_dll, dst_python)
-            print(f"  [OK] onnxruntime.dll from pip ({ort_dll.stat().st_size/1024/1024:.1f} MB)")
-        ort_shared = ort_capi / "onnxruntime_providers_shared.dll"
-        if ort_shared.exists():
-            shutil.copy2(ort_shared, dst_python)
+        copied_ort = 0
+        for dll in sorted(ort_capi.glob("onnxruntime*.dll")):
+            shutil.copy2(dll, dst_python)
+            copied_ort += 1
+        if copied_ort:
+            print(f"  [OK] Copied {copied_ort} ONNX Runtime DLL(s) from pip")
 
     # Đồng bộ: cập nhật sherpa_onnx/lib/onnxruntime.dll = pip version (tránh conflict)
     dst_sherpa_ort = dst_site / "sherpa_onnx" / "lib" / "onnxruntime.dll"
@@ -793,6 +792,19 @@ def copy_data():
             print(f"  [OK] {dir_name}: {count} files")
         else:
             print(f"  [WARN] Not found: {dir_name}")
+
+    # Ship the same 10 minute calibration sample used by the offline PWA.
+    calibration_src = PROJECT_ROOT / "offline_pwa" / "static" / "calibration"
+    calibration_dst = DIST_DIR / "offline_pwa" / "static" / "calibration"
+    if calibration_src.exists():
+        if calibration_dst.exists():
+            shutil.rmtree(calibration_dst)
+        calibration_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(calibration_src, calibration_dst)
+        count = sum(1 for _ in calibration_dst.rglob('*') if _.is_file())
+        print(f"  [OK] calibration sample: {count} files")
+    else:
+        print("  [WARN] calibration sample not found")
 
     # Clean vibert-capu: Desktop giữ int8, xóa fp32 (tiết kiệm 328MB)
     vibert_dst = DIST_DIR / "models" / "vibert-capu"

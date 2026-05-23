@@ -177,7 +177,7 @@ function ensureBuf(current, needed) {
 }
 
 const VAD_SAMPLE_RATE = 16000;
-const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js?app=offline-pwa-v141";
+const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js?app=offline-pwa-v140";
 // FFmpeg WASM must not force soxr/swr: some browser builds do not expose those engine names.
 const AUDIO_DECODER_RESAMPLER = "ffmpeg-default";
 const VAD_WINDOW_SIZE = 512;
@@ -222,7 +222,7 @@ const USER_CONFIG_SCHEMA = 8;
 const CALIBRATION_PROFILE_KEY = "asr-vn-offline-calibration-v1";
 const CALIBRATION_LAST_REPORT_KEY = "asr-vn-offline-calibration-report-v1";
 const MANIFEST_STORAGE_KEY = "asr-vn-offline-model-manifest-v1";
-const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v141";
+const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v140";
 window.__OFFLINE_PWA_CODE_VERSION = OFFLINE_PWA_CODE_VERSION;
 const OFFLINE_RUNTIME_CACHE_NAME = OFFLINE_PWA_CODE_VERSION;
 const CALIBRATION_CODE_VERSION = "calibration-v1-provider-stage-tolerance";

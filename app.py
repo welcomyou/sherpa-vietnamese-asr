@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
                 'num_speakers': '0',
                 'speaker_model': 'community1_pure_ort',
                 'save_ram': 'True',
+                'execution_provider': 'cpu',
                 'auto_analyze_quality': 'True',
                 'rms_normalize': 'False',
                 'bypass_vad': 'False',
@@ -188,6 +189,7 @@ class MainWindow(QMainWindow):
                 'num_speakers': old.get('num_speakers', '0'),
                 'speaker_model': old.get('speaker_model', 'community1_pure_ort'),
                 'save_ram': old.get('save_ram', 'True'),
+                'execution_provider': old.get('execution_provider', 'cpu'),
                 'auto_analyze_quality': 'True',
                 'rms_normalize': 'False',
                 'bypass_vad': 'False',
@@ -213,8 +215,11 @@ class MainWindow(QMainWindow):
                 'num_speakers': '0',
                 'speaker_model': 'community1_pure_ort',
                 'save_ram': 'True',
+                'execution_provider': 'cpu',
                 'bypass_vad': 'False',
             }
+        elif 'execution_provider' not in config['FileSettings']:
+            config['FileSettings']['execution_provider'] = 'cpu'
         if 'LiveSettings' not in config:
             config['LiveSettings'] = {
                 'model': 'zipformer-30m-rnnt-6000h',
@@ -313,6 +318,12 @@ class MainWindow(QMainWindow):
 
                 bypass_vad = file_settings.getboolean('bypass_vad', False)
                 file_tab.check_bypass_vad.setChecked(bypass_vad)
+
+                execution_provider = file_settings.get('execution_provider', 'cpu')
+                if hasattr(file_tab, 'label_device_accel'):
+                    file_tab.label_device_accel.setText(
+                        "GPU auto" if execution_provider == "auto" else "CPU-only"
+                    )
 
                 # Auto analyze quality setting
             finally:

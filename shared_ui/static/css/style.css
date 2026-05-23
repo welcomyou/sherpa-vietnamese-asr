@@ -687,6 +687,17 @@ main {
     white-space: nowrap;
 }
 
+.calibration-row {
+    display: flex !important;
+    align-items: center;
+    gap: 10px;
+}
+
+.calibration-row #calibration-status {
+    text-align: left;
+    white-space: normal;
+}
+
 /* Indentation for sub-options labels */
 #diarization-options {
     padding-left: 0;

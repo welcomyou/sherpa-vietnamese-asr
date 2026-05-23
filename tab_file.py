@@ -159,6 +159,43 @@ class BackgroundAudioConvertThread(QThread):
                 self.finished_converting.emit(self.audio_path)  # Fallback to original
 
 
+class DeviceCalibrationThread(QThread):
+    progress_updated = pyqtSignal(str, int)
+    finished_calibration = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, mode, model_name=None, speaker_model=None, cpu_threads=4, parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.model_name = model_name
+        self.speaker_model = speaker_model
+        self.cpu_threads = cpu_threads
+
+    def run(self):
+        try:
+            if self.mode == "detect":
+                from core.calibration import detect_calibration_status
+                self.finished_calibration.emit(detect_calibration_status())
+                return
+
+            from core.calibration import run_device_calibration
+
+            def _progress(message, percent):
+                self.progress_updated.emit(str(message), int(percent))
+
+            report = run_device_calibration(
+                model_name=self.model_name,
+                speaker_model=self.speaker_model,
+                cpu_threads=self.cpu_threads,
+                callback=_progress,
+            )
+            self.finished_calibration.emit(report)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error_occurred.emit(str(e))
+
+
 class FileProcessingTab(QWidget):
     """Tab xử lý tập tin âm thanh"""
     
@@ -389,6 +426,36 @@ class FileProcessingTab(QWidget):
         threads_layout.addWidget(self.label_threads)
         form_config.addRow("Số luồng CPU:", threads_layout)
         
+        self.btn_device_calibration = QPushButton("Calibration")
+        self.btn_device_calibration.setToolTip(
+            "Kiểm tra GPU và chạy file mẫu 10 phút để tối ưu cấu hình tăng tốc phần cứng."
+        )
+        self.btn_device_calibration.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['bg_input']};
+                color: {COLORS['text_primary']};
+                font-size: 11px;
+                padding: 4px 10px;
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['bg_card']};
+                border-color: {COLORS['accent']};
+            }}
+            QPushButton:disabled {{
+                color: {COLORS['text_secondary']};
+                border-color: {COLORS['border']};
+            }}
+        """)
+        self.btn_device_calibration.clicked.connect(self.start_device_calibration_detect)
+        self.label_device_accel = QLabel("CPU-only")
+        self.label_device_accel.setStyleSheet(f"color: {COLORS['text_secondary']}; padding-bottom: 4px;")
+        accel_layout = QHBoxLayout()
+        accel_layout.addWidget(self.btn_device_calibration)
+        accel_layout.addWidget(self.label_device_accel, stretch=1)
+        form_config.addRow("Tăng tốc:", accel_layout)
+
         # Punctuation Confidence Slider
         self.slider_punct_conf = QSlider(Qt.Orientation.Horizontal)
         self.slider_punct_conf.setRange(1, 10)
@@ -1392,9 +1459,19 @@ class FileProcessingTab(QWidget):
         # Chỉ bypass khi thanh dấu câu = 1 (không muốn thêm dấu)
         # Nếu case=1 nhưng punct>1 vẫn chạy model (case_confidence âm sẽ suppress viết hoa)
         bypass_restorer = (slider_val == 1)
+
+        execution_provider = os.environ.get("ASR_VN_ACCEL", "cpu")
+        try:
+            if self.main_window and hasattr(self.main_window, "config"):
+                execution_provider = self.main_window.config["FileSettings"].get(
+                    "execution_provider", execution_provider
+                )
+        except Exception:
+            pass
         
         return {
             "cpu_threads": self.slider_threads.value(),
+            "execution_provider": execution_provider,
             "restore_punctuation": True,
             "bypass_restorer": bypass_restorer,
             "punctuation_confidence": confidence,
@@ -1408,6 +1485,123 @@ class FileProcessingTab(QWidget):
             "bypass_vad": self.check_bypass_vad.isChecked(),
             "resample_quality": "soxr_hq",
         }
+
+    def _set_execution_provider(self, value):
+        value = value or "cpu"
+        if self.main_window and hasattr(self.main_window, "config"):
+            if "FileSettings" not in self.main_window.config:
+                self.main_window.config["FileSettings"] = {}
+            self.main_window.config["FileSettings"]["execution_provider"] = value
+            if hasattr(self.main_window, "save_config"):
+                self.main_window.save_config()
+        if hasattr(self, "label_device_accel"):
+            self.label_device_accel.setText("GPU auto" if value == "auto" else "CPU-only")
+
+    def start_device_calibration_detect(self):
+        if self.transcriber and self.transcriber.isRunning():
+            QMessageBox.information(self, "Calibration", "Đang xử lý file. Vui lòng đợi xong rồi chạy Calibration.")
+            return
+        self.btn_device_calibration.setEnabled(False)
+        self.label_device_accel.setText("Đang kiểm tra phần cứng...")
+        self._device_calibration_thread = DeviceCalibrationThread(
+            "detect",
+            model_name=self.combo_model.currentData(),
+            speaker_model=self.combo_speaker_model.currentData(),
+            cpu_threads=self.slider_threads.value(),
+            parent=self,
+        )
+        self._device_calibration_thread.finished_calibration.connect(self._on_device_calibration_detected)
+        self._device_calibration_thread.error_occurred.connect(self._on_device_calibration_error)
+        self._device_calibration_thread.start()
+
+    def _hardware_message(self, status):
+        ram = status.get("ram") or {}
+        ram_text = ""
+        if ram.get("total_mb"):
+            ram_text = f"\nRAM: {ram.get('available_mb', '?')} / {ram.get('total_mb')} MB khả dụng/tổng"
+        return f"{status.get('hardware_summary', 'Không đọc được thông tin phần cứng')}{ram_text}"
+
+    def _on_device_calibration_detected(self, status):
+        if not status.get("can_optimize"):
+            self._set_execution_provider("cpu")
+            self.btn_device_calibration.setEnabled(True)
+            QMessageBox.information(
+                self,
+                "Calibration",
+                "Không tìm thấy GPU/provider phù hợp. Cấu hình hiện tại đã tối ưu ở chế độ CPU-only.\n\n"
+                + self._hardware_message(status),
+            )
+            return
+
+        provider = status.get("preferred_provider", "GPU")
+        reply = QMessageBox.question(
+            self,
+            "Calibration",
+            "Phát hiện GPU có thể tăng tốc.\n\n"
+            + self._hardware_message(status)
+            + f"\nProvider đề xuất: {provider}\n\n"
+            "Chạy tối ưu bằng file mẫu 10 phút? Quá trình này có thể mất vài phút.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.btn_device_calibration.setEnabled(True)
+            self.label_device_accel.setText("CPU-only")
+            return
+        self.start_device_calibration_run()
+
+    def start_device_calibration_run(self):
+        self.btn_device_calibration.setEnabled(False)
+        self.label_device_accel.setText("Calibration 0%")
+        self._device_calibration_thread = DeviceCalibrationThread(
+            "run",
+            model_name=self.combo_model.currentData(),
+            speaker_model=self.combo_speaker_model.currentData(),
+            cpu_threads=self.slider_threads.value(),
+            parent=self,
+        )
+        self._device_calibration_thread.progress_updated.connect(self._on_device_calibration_progress)
+        self._device_calibration_thread.finished_calibration.connect(self._on_device_calibration_finished)
+        self._device_calibration_thread.error_occurred.connect(self._on_device_calibration_error)
+        self._device_calibration_thread.start()
+
+    def _on_device_calibration_progress(self, message, percent):
+        self.label_device_accel.setText(f"{message} ({percent}%)")
+
+    def _on_device_calibration_finished(self, report):
+        selected = report.get("selected_execution_provider", "cpu")
+        self._set_execution_provider(selected)
+        self.btn_device_calibration.setEnabled(True)
+
+        if report.get("status") == "no_gpu":
+            QMessageBox.information(
+                self,
+                "Calibration",
+                "Không tìm thấy GPU/provider phù hợp. Đã giữ CPU-only.\n\n"
+                + self._hardware_message(report.get("detect") or {}),
+            )
+            return
+
+        comparison = report.get("comparison") or {}
+        speedup = comparison.get("wall_speedup")
+        stage_speedups = comparison.get("stage_speedups") or {}
+        provider_text = "GPU auto" if selected == "auto" else "CPU-only"
+        self.label_device_accel.setText(provider_text)
+        QMessageBox.information(
+            self,
+            "Calibration",
+            f"Calibration hoàn tất. Cấu hình được chọn: {provider_text}\n"
+            f"Tổng tăng tốc: {speedup or 'N/A'}x\n"
+            f"ASR: {stage_speedups.get('transcription_detail', 'N/A')}x, "
+            f"Diarization: {stage_speedups.get('diarization', 'N/A')}x, "
+            f"Thêm dấu: {stage_speedups.get('punctuation', 'N/A')}x\n"
+            f"Parity: {'OK' if comparison.get('parity_ok') else 'không đạt, giữ CPU'}",
+        )
+
+    def _on_device_calibration_error(self, message):
+        self.btn_device_calibration.setEnabled(True)
+        self.label_device_accel.setText("CPU-only")
+        QMessageBox.warning(self, "Calibration", f"Calibration thất bại:\n{message}")
 
     def _on_save_ram_changed(self, state):
         """Cảnh báo khi tắt tiết kiệm RAM trên máy ≤ 8GB."""

@@ -317,7 +317,8 @@ class SenkoCamppDiarizerOptimized:
     def __init__(self, model_dir=None, num_threads=6, max_speakers=10,
                  min_speakers=1, num_speakers=-1,
                  mer_cos=0.875,
-                 window=1.5, step=0.6, min_duration_off=0.0):
+                 window=1.5, step=0.6, min_duration_off=0.0,
+                 execution_provider="cpu", batch_size=None):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.model_path = (
             os.path.join(model_dir, "campplus_cn_en_common_200k.onnx") if model_dir
@@ -332,9 +333,10 @@ class SenkoCamppDiarizerOptimized:
         self.window = window
         self.step = step
         self.min_duration_off = min_duration_off
+        self.execution_provider = execution_provider or "cpu"
         self.emb_sess = None
         self.seg_sess = None
-        self.batch_size = 32  # OPT-1: batch inference
+        self.batch_size = int(batch_size or 32)  # OPT-1: batch inference
         # Overlap regions (populated by _pyannote_vad) — additive API cho feature
         # "tách giọng khi overlap". Format: list of (start_sec, end_sec).
         self._last_overlap_regions = []
@@ -356,9 +358,22 @@ class SenkoCamppDiarizerOptimized:
 
         # Load CAM++ 192-dim
         opts.optimized_model_filepath = self.model_path + ".opt"
-        self.emb_sess = ort.InferenceSession(
-            self.model_path, opts, providers=['CPUExecutionProvider']
-        )
+        if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+            from core.hardware_accel import create_ort_session, auto_batch_size
+            self.emb_sess, emb_provider = create_ort_session(
+                ort, self.model_path, opts,
+                policy=self.execution_provider,
+                stage="CAM++ speaker embedding",
+            )
+            self.batch_size = auto_batch_size(
+                "CAM++ speaker embedding", self.batch_size,
+                emb_provider.get("actual_provider"),
+            )
+            logger.info(f"[Senko-CAM++] embedding provider={emb_provider}")
+        else:
+            self.emb_sess = ort.InferenceSession(
+                self.model_path, opts, providers=['CPUExecutionProvider']
+            )
         # Warmup
         dummy = np.zeros((1, 150, 80), dtype=np.float32)
         self.emb_sess.run(['embs'], {'feats': dummy})
@@ -371,8 +386,17 @@ class SenkoCamppDiarizerOptimized:
         seg_opts.log_severity_level = 3
         seg_opts.enable_cpu_mem_arena = False
         seg_opts.optimized_model_filepath = self.seg_path + ".opt"
-        self.seg_sess = ort.InferenceSession(
-            self.seg_path, seg_opts, providers=['CPUExecutionProvider'])
+        if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+            from core.hardware_accel import create_ort_session
+            self.seg_sess, seg_provider = create_ort_session(
+                ort, self.seg_path, seg_opts,
+                policy=self.execution_provider,
+                stage="CAM++ speech regions (pyannote segmentation)",
+            )
+            logger.info(f"[Senko-CAM++] segmentation provider={seg_provider}")
+        else:
+            self.seg_sess = ort.InferenceSession(
+                self.seg_path, seg_opts, providers=['CPUExecutionProvider'])
 
         print(f"[Senko-CAM++] Loaded CAM++ 192-dim + pyannote segmentation"
               f" | window={self.window}s, step={self.step}s, mer_cos={self.mer_cos}"

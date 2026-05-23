@@ -133,6 +133,12 @@
                         <label>Model ASR:</label>
                         <select id="cfg-model"></select>
                     </div>
+                    <div class="config-row full-width calibration-row">
+                        <button class="btn btn-sm btn-secondary" id="btn-calibration" type="button" onclick="runServerCalibration()">
+                            Calibration
+                        </button>
+                        <span id="calibration-status">Tăng tốc: CPU-only</span>
+                    </div>
                     <div class="config-row">
                         <label>Thêm dấu:</label>
                         <input type="range" id="cfg-punct" min="1" max="10" value="6">

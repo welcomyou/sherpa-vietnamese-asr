@@ -12,10 +12,11 @@ import re
 
 
 class ImprovedPunctuationRestorer:
-    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu", case_confidence=0.0, prefer_int8=False):
+    def __init__(self, device="cpu", confidence=0.3, model_name="dragonSwing/vibert-capu", case_confidence=0.0, prefer_int8=False, execution_provider="cpu"):
         self.device = device
         self.model_name = model_name
         self.confidence = confidence
+        self.execution_provider = execution_provider or "cpu"
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         vocab_path = os.path.join(base_dir, "vocabulary")
@@ -43,6 +44,7 @@ class ImprovedPunctuationRestorer:
             confidence=confidence,
             case_confidence=case_confidence,
             prefer_int8=prefer_int8,
+            execution_provider=self.execution_provider,
         )
 
     def restore(self, text, progress_callback=None, pause_hints=None):

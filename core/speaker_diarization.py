@@ -324,7 +324,8 @@ class SpeakerDiarizer:
                  threshold: float = 0.6,
                  min_duration_on: float = 0.3, # updated to realistic defaults
                  min_duration_off: float = 0.0,
-                 auth_token: str = None):
+                 auth_token: str = None,
+                 execution_provider: str = "cpu"):
         """
         Initialize speaker diarizer
         
@@ -355,6 +356,7 @@ class SpeakerDiarizer:
         self.model_info = None  # Store model info for reference
         self._pyannote_backend = None  # Community1Diarizer instance
         self.auth_token = auth_token or os.environ.get('HF_TOKEN', None)
+        self.execution_provider = execution_provider or "cpu"
         
     # Default thresholds for each model
     MODEL_DEFAULT_THRESHOLDS = {
@@ -399,6 +401,7 @@ class SpeakerDiarizer:
             min_duration_off=self.min_duration_off,
             num_speakers=num_spk,
             max_speakers=max_spk,
+            execution_provider=self.execution_provider,
         )
         self._pyannote_backend.initialize()
         self.model_info = get_model_info("senko_campp")
@@ -428,6 +431,7 @@ class SpeakerDiarizer:
             min_duration_off=self.min_duration_off,
             num_speakers=num_spk,
             max_speakers=max_spk,
+            execution_provider=self.execution_provider,
         )
         self._pyannote_backend.initialize()
         self.model_info = get_model_info("community1_pure_ort")

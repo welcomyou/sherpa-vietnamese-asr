@@ -160,10 +160,19 @@ class AudioQualityAnalyzer:
                     print("[AudioAnalyzer] Please download manually or run DNSMOSDownloader")
                     return None
                 
-                providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.use_gpu else ['CPUExecutionProvider']
                 sess_opts = ort.SessionOptions()
                 sess_opts.enable_cpu_mem_arena = False  # Tránh arena leak
-                self._dnsmos_session = ort.InferenceSession(model_path, sess_opts, providers=providers)
+                if self.use_gpu:
+                    from core.hardware_accel import create_ort_session
+                    self._dnsmos_session, provider_info = create_ort_session(
+                        ort, model_path, sess_opts,
+                        policy="auto",
+                        stage="DNSMOS quality",
+                    )
+                    print(f"[AudioAnalyzer] DNSMOS provider: {provider_info}")
+                else:
+                    self._dnsmos_session = ort.InferenceSession(
+                        model_path, sess_opts, providers=['CPUExecutionProvider'])
                 print("[AudioAnalyzer] Loaded DNSMOS model")
                 
             except ImportError:

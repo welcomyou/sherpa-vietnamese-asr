@@ -366,9 +366,11 @@ class QueueManager:
             # num_speakers: 0 hoac -1 deu la auto-detect
             raw_num_speakers = int(config.get("num_speakers", 0))
             num_speakers = -1 if raw_num_speakers <= 0 else raw_num_speakers
+            execution_provider = config.get("execution_provider") or server_config.get("execution_provider") or "cpu"
 
             pipeline_config = {
                 "cpu_threads": server_config.cpu_threads,
+                "execution_provider": execution_provider,
                 "restore_punctuation": True,  # Luon True giong desktop, bypass_restorer xu ly skip
                 "bypass_restorer": bypass_restorer,
                 "punctuation_confidence": punct_confidence,

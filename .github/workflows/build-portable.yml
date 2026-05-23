@@ -1,6 +1,9 @@
 name: Build portable bundles
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       bundle:
@@ -17,6 +20,11 @@ on:
         required: true
         default: true
         type: boolean
+      release_tag:
+        description: "Optional tag to publish/update as a GitHub release"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -58,19 +66,19 @@ jobs:
         run: python build-portable/setup_build_env.py
 
       - name: Prepare offline models
-        if: ${{ inputs.prepare_models }}
+        if: ${{ github.event_name == 'push' || inputs.prepare_models }}
         shell: pwsh
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: .\.envtietkiem\Scripts\python.exe build-portable/prepare_offline_build.py
 
       - name: Build desktop portable
-        if: ${{ inputs.bundle == 'both' || inputs.bundle == 'desktop' }}
+        if: ${{ github.event_name == 'push' || inputs.bundle == 'both' || inputs.bundle == 'desktop' }}
         shell: pwsh
         run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable.py
 
       - name: Build service portable
-        if: ${{ inputs.bundle == 'both' || inputs.bundle == 'service' }}
+        if: ${{ github.event_name == 'push' || inputs.bundle == 'both' || inputs.bundle == 'service' }}
         shell: pwsh
         run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable_online.py
 
@@ -83,17 +91,12 @@ jobs:
             Compress-Archive -Path (Join-Path $_.FullName "*") -DestinationPath $zip -Force
           }
 
-      - name: Resolve release tag
-        shell: pwsh
-        run: |
-          $tag = git describe --tags --abbrev=0 --match "v*"
-          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Publish GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: Sherpa Vietnamese ASR ${{ env.RELEASE_TAG }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
+          name: Sherpa Vietnamese ASR ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}
           files: artifacts/*.zip
           fail_on_unmatched_files: true
           make_latest: true

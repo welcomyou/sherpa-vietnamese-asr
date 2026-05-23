@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "offline-pwa-";
-const CACHE_VERSION = "offline-pwa-v141";
+const CACHE_VERSION = "offline-pwa-v140";
 const NETWORK_TIMEOUT_MS = 1500;
 const INSTALL_CORE_TIMEOUT_MS = 15000;
 const CORE_SHELL = [

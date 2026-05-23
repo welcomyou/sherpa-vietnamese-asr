@@ -386,7 +386,9 @@ class PureOrtDiarizer:
     def __init__(self, model_dir=None, onnx_dir=None, num_threads=6,
                  threshold=DEFAULT_THRESHOLD, Fa=DEFAULT_FA, Fb=DEFAULT_FB,
                  min_duration_off=0.0, num_speakers=-1,
-                 min_speakers=None, max_speakers=None):
+                 min_speakers=None, max_speakers=None,
+                 execution_provider="cpu", segmentation_batch_size=None,
+                 embedding_batch_size=None):
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.model_dir = model_dir or os.path.join(base, "models", "pyannote",
                                                      "speaker-diarization-community-1")
@@ -399,6 +401,9 @@ class PureOrtDiarizer:
         self.num_speakers = num_speakers
         self.min_speakers = min_speakers
         self.max_speakers = max_speakers
+        self.execution_provider = execution_provider or "cpu"
+        self.segmentation_batch_size = int(segmentation_batch_size or 32)
+        self.embedding_batch_size = int(embedding_batch_size or 64)
         self.seg_sess = None
         self.emb_sess = None
         self.emb_W = None  # Gemm weight for manual linear after masked pooling
@@ -412,8 +417,6 @@ class PureOrtDiarizer:
     def initialize(self):
         import onnxruntime as ort
         ort.set_default_logger_severity(3)
-        prov = ['CPUExecutionProvider']
-
         from core.config import compute_ort_threads
         Z_seg = compute_ort_threads(self.num_threads)           # conservative (50% HT)
         Z_emb = compute_ort_threads(self.num_threads, full_ht=True)  # full HT cho embedding
@@ -436,24 +439,72 @@ class PureOrtDiarizer:
         seg_model = os.path.join(self.onnx_dir, "segmentation-community-1.onnx")
         # Cache optimized graph: giảm disk I/O lần load sau
         opts_seg.optimized_model_filepath = seg_model + ".opt"
-        self.seg_sess = ort.InferenceSession(seg_model, opts_seg, providers=prov)
+        if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+            from core.hardware_accel import create_ort_session, auto_batch_size
+            self.seg_sess, seg_provider = create_ort_session(
+                ort, seg_model, opts_seg,
+                policy=self.execution_provider,
+                stage="Pyannote Community-1 segmentation",
+            )
+            self.segmentation_batch_size = auto_batch_size(
+                "Pyannote Community-1 segmentation", self.segmentation_batch_size,
+                seg_provider.get("actual_provider"),
+            )
+            logger.info(f"[PureORT] segmentation provider={seg_provider}")
+        else:
+            prov = ['CPUExecutionProvider']
+            self.seg_sess = ort.InferenceSession(seg_model, opts_seg, providers=prov)
 
         # Use encoder-only model (frame features) + external masked pooling + Gemm
         encoder_path = os.path.join(self.onnx_dir, "embedding_encoder.onnx")
         split_path = os.path.join(self.onnx_dir, "embedding_model_split.onnx")
         if os.path.exists(encoder_path):
             opts_emb.optimized_model_filepath = encoder_path + ".opt"
-            self.emb_sess = ort.InferenceSession(encoder_path, opts_emb, providers=prov)
+            if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+                from core.hardware_accel import create_ort_session, auto_batch_size
+                self.emb_sess, emb_provider = create_ort_session(
+                    ort, encoder_path, opts_emb,
+                    policy=self.execution_provider,
+                    stage="Pyannote Community-1 embedding encoder",
+                )
+                self.embedding_batch_size = auto_batch_size(
+                    "Pyannote Community-1 embedding encoder", self.embedding_batch_size,
+                    emb_provider.get("actual_provider"),
+                )
+                logger.info(f"[PureORT] embedding provider={emb_provider}")
+            else:
+                prov = ['CPUExecutionProvider']
+                self.emb_sess = ort.InferenceSession(encoder_path, opts_emb, providers=prov)
             self.emb_W = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_weight.npy"))
             self.emb_b = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_bias.npy"))
         elif os.path.exists(split_path):
-            self.emb_sess = ort.InferenceSession(split_path, opts_emb, providers=prov)
+            if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+                from core.hardware_accel import create_ort_session
+                self.emb_sess, emb_provider = create_ort_session(
+                    ort, split_path, opts_emb,
+                    policy=self.execution_provider,
+                    stage="Pyannote Community-1 embedding encoder",
+                )
+                logger.info(f"[PureORT] embedding provider={emb_provider}")
+            else:
+                prov = ['CPUExecutionProvider']
+                self.emb_sess = ort.InferenceSession(split_path, opts_emb, providers=prov)
             self.emb_W = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_weight.npy"))
             self.emb_b = np.load(os.path.join(self.onnx_dir, "resnet_seg_1_bias.npy"))
         else:
-            self.emb_sess = ort.InferenceSession(
-                os.path.join(self.onnx_dir, "embedding_model.onnx"),
-                opts_emb, providers=prov)
+            emb_model = os.path.join(self.onnx_dir, "embedding_model.onnx")
+            if str(self.execution_provider).lower() not in ("cpu", "none", "off"):
+                from core.hardware_accel import create_ort_session
+                self.emb_sess, emb_provider = create_ort_session(
+                    ort, emb_model, opts_emb,
+                    policy=self.execution_provider,
+                    stage="Pyannote Community-1 embedding encoder",
+                )
+                logger.info(f"[PureORT] embedding provider={emb_provider}")
+            else:
+                prov = ['CPUExecutionProvider']
+                self.emb_sess = ort.InferenceSession(
+                    emb_model, opts_emb, providers=prov)
 
         self.plda_data = load_plda(self.model_dir)
 
@@ -682,7 +733,7 @@ class PureOrtDiarizer:
         if not starts:
             starts = [0]
 
-        batch_size = 32
+        batch_size = int(self.segmentation_batch_size or 32)
         all_logits = []
         for b in range(0, len(starts), batch_size):
             be = min(b + batch_size, len(starts))
@@ -776,7 +827,7 @@ class PureOrtDiarizer:
 
         # --- 2. Batched: windowing + encoder + pooling (streamed per-batch) ---
         frame_shift_samples = int(SAMPLE_RATE * 0.01)  # 160
-        batch_size = 64  # tăng từ 32 → giảm số batch iterations
+        batch_size = int(self.embedding_batch_size or 64)  # tăng từ 32 → giảm số batch iterations
         io_binding = self.emb_sess.io_binding()
         out_name = self.emb_sess.get_outputs()[0].name
         feat_idx = None  # lazy compute ở batch đầu

@@ -410,9 +410,48 @@ async def get_defaults():
         "case_confidence": int(server_config.get("default_case_confidence")),
         "diarization_threshold": int(server_config.get("default_diarization_threshold")),
         # merge_short_speaker removed — NaturalTurn luôn bật
+        "execution_provider": server_config.get("execution_provider") or "cpu",
         "max_upload_mb": int(server_config.get("max_upload_mb")),
         "offline_download_url": server_config.get("offline_download_url"),
     }
+
+
+@app.get("/api/calibration/status")
+async def calibration_status():
+    """Detect hardware acceleration availability without changing config."""
+    from core.calibration import detect_calibration_status
+
+    status = await asyncio.to_thread(detect_calibration_status)
+    status["current_execution_provider"] = server_config.get("execution_provider") or "cpu"
+    return status
+
+
+@app.post("/api/calibration/run")
+async def calibration_run(request: Request):
+    """Run opt-in 10 minute device calibration and persist the selected provider."""
+    if queue_manager.is_processing:
+        raise HTTPException(409, "Đang xử lý file khác. Vui lòng đợi xong rồi chạy Calibration.")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    from core.calibration import run_device_calibration
+
+    report = await asyncio.to_thread(
+        run_device_calibration,
+        body.get("model") or server_config.get("default_asr_model"),
+        body.get("speaker_model") or server_config.get("default_speaker_model"),
+        server_config.cpu_threads,
+        None,
+        True,
+    )
+    selected = report.get("selected_execution_provider") or "cpu"
+    server_config.set("execution_provider", selected)
+    server_config.save()
+    report["current_execution_provider"] = selected
+    return report
 
 
 # === Session API ===
@@ -783,6 +822,7 @@ async def process_file(
         "diarization_threshold": body.get("diarization_threshold",
                                           int(server_config.get("default_diarization_threshold"))),
 
+        "execution_provider": body.get("execution_provider", server_config.get("execution_provider") or "cpu"),
         "rms_normalize": body.get("rms_normalize", False),
         "bypass_vad": body.get("bypass_vad", False),
     }
@@ -1856,6 +1896,7 @@ _CONFIG_VALIDATORS = {
     "summarizer_threads": lambda v: 1 <= int(v) <= 128,
     "summarizer_context_size": lambda v: 1024 <= int(v) <= 262144,
     "summarizer_enabled": lambda v: v in ("0", "1"),
+    "execution_provider": lambda v: str(v).lower() in ("cpu", "auto", "cuda", "openvino", "directml", "dml", "rocm"),
 }
 _CONFIG_READONLY = {"admin_password_hash", "host"}
 

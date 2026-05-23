@@ -413,6 +413,7 @@ function populateModels(models, defaults) {
     document.getElementById('cfg-punct').value = defaults.punctuation_confidence;
     document.getElementById('cfg-case').value = defaults.case_confidence;
     document.getElementById('cfg-threshold').value = defaults.diarization_threshold;
+    updateCalibrationStatus(defaults.execution_provider || 'cpu');
     updateSliderLabels();
 }
 
@@ -449,6 +450,79 @@ function getConfLabel(v) {
     if (v <= 6) return 'Vừa';
     if (v <= 8) return 'Nhiều';
     return 'Rất nhiều';
+}
+
+function updateCalibrationStatus(provider) {
+    const el = document.getElementById('calibration-status');
+    if (!el) return;
+    const value = (provider || 'cpu').toLowerCase();
+    el.textContent = value === 'auto' ? 'Tăng tốc: GPU auto' : 'Tăng tốc: CPU-only';
+}
+
+function calibrationHardwareText(status) {
+    const ram = status?.ram || {};
+    let text = status?.hardware_summary || 'Không đọc được thông tin phần cứng';
+    if (ram.total_mb) {
+        text += `\nRAM: ${ram.available_mb || '?'} / ${ram.total_mb} MB khả dụng/tổng`;
+    }
+    return text;
+}
+
+async function runServerCalibration() {
+    const btn = document.getElementById('btn-calibration');
+    const statusEl = document.getElementById('calibration-status');
+    if (btn) btn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Đang kiểm tra phần cứng...';
+
+    try {
+        const status = await apiFetch('/api/calibration/status');
+        if (!status.can_optimize) {
+            window.appConfig.execution_provider = 'cpu';
+            updateCalibrationStatus('cpu');
+            alert('Không tìm thấy GPU/provider phù hợp. Cấu hình hiện tại đã tối ưu ở chế độ CPU-only.\n\n' + calibrationHardwareText(status));
+            return;
+        }
+
+        const ok = confirm(
+            'Phát hiện GPU có thể tăng tốc.\n\n' +
+            calibrationHardwareText(status) +
+            `\nProvider đề xuất: ${status.preferred_provider || 'GPU'}\n\n` +
+            'Chạy tối ưu bằng file mẫu 10 phút? Quá trình này có thể mất vài phút.'
+        );
+        if (!ok) {
+            updateCalibrationStatus(window.appConfig?.execution_provider || 'cpu');
+            return;
+        }
+
+        if (statusEl) statusEl.textContent = 'Đang chạy Calibration bằng file mẫu 10 phút...';
+        const report = await apiFetch('/api/calibration/run', {
+            method: 'POST',
+            body: JSON.stringify({
+                model: document.getElementById('cfg-model')?.value,
+                speaker_model: document.getElementById('cfg-speaker-model')?.value,
+            }),
+        });
+
+        const selected = report.current_execution_provider || report.selected_execution_provider || 'cpu';
+        window.appConfig.execution_provider = selected;
+        updateCalibrationStatus(selected);
+
+        const cmp = report.comparison || {};
+        const stages = cmp.stage_speedups || {};
+        alert(
+            `Calibration hoàn tất. Cấu hình được chọn: ${selected === 'auto' ? 'GPU auto' : 'CPU-only'}\n` +
+            `Tổng tăng tốc: ${cmp.wall_speedup || 'N/A'}x\n` +
+            `ASR: ${stages.transcription_detail || 'N/A'}x, ` +
+            `Diarization: ${stages.diarization || 'N/A'}x, ` +
+            `Thêm dấu: ${stages.punctuation || 'N/A'}x\n` +
+            `Parity: ${cmp.parity_ok ? 'OK' : 'không đạt, giữ CPU'}`
+        );
+    } catch (e) {
+        updateCalibrationStatus(window.appConfig?.execution_provider || 'cpu');
+        showToast('Calibration thất bại: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 // === Panel toggle ===
@@ -546,6 +620,7 @@ function getASRConfig() {
         punctuation_confidence: parseInt(document.getElementById('cfg-punct').value),
         case_confidence: parseInt(document.getElementById('cfg-case').value),
         diarization_threshold: parseInt(document.getElementById('cfg-threshold').value),
+        execution_provider: window.appConfig?.execution_provider || 'cpu',
         gap_recover: false,
         rms_normalize: document.getElementById('cfg-rms-normalize').checked,
         bypass_vad: document.getElementById('cfg-bypass-vad').checked,

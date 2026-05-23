@@ -733,13 +733,14 @@ def _log_add(a, b):
 
 _recognizer_cache = {}  # {(model_path, threads, paths): recognizer}
 _punct_restorer = None  # Singleton - model giống nhau, chỉ đổi confidence per-call
+_punct_restorer_key = None
 _diarizer_cache = None
 _diarizer_cache_key = None
 
 
 def clear_model_cache(which="all"):
     """Giải phóng model cache. which: 'all', 'recognizer', 'restorer', 'diarizer'"""
-    global _recognizer_cache, _punct_restorer
+    global _recognizer_cache, _punct_restorer, _punct_restorer_key
     global _diarizer_cache, _diarizer_cache_key
 
     if which in ("all", "recognizer"):
@@ -753,6 +754,7 @@ def clear_model_cache(which="all"):
             except Exception:
                 pass
             _punct_restorer = None
+            _punct_restorer_key = None
             logger.info("[ModelCache] Cleared PunctuationRestorer cache")
 
     if which in ("all", "diarizer"):
@@ -769,14 +771,16 @@ def clear_model_cache(which="all"):
     gc.collect()
 
 
-def _get_cached_restorer(device, confidence, case_confidence, prefer_int8=False):
+def _get_cached_restorer(device, confidence, case_confidence, prefer_int8=False,
+                         execution_provider="cpu"):
     """Lấy PunctuationRestorer từ cache, cập nhật confidence per-request.
     Model BERT load 1 lần duy nhất. Confidence chỉ là threshold cộng vào
     logit sau softmax — đổi thoải mái mà không cần reload model.
     """
-    global _punct_restorer
+    global _punct_restorer, _punct_restorer_key
+    cache_key = (device, bool(prefer_int8), str(execution_provider or "cpu").lower())
 
-    if _punct_restorer is not None:
+    if _punct_restorer is not None and _punct_restorer_key == cache_key:
         # Reuse model, chỉ cập nhật confidence (không reload ~200-400MB model)
         _punct_restorer.gec_model.confidence = confidence
         _punct_restorer.gec_model.case_confidence = case_confidence
@@ -784,18 +788,26 @@ def _get_cached_restorer(device, confidence, case_confidence, prefer_int8=False)
                     f"(conf={confidence:.3f}, case={case_confidence:.3f})")
         return _punct_restorer
 
+    if _punct_restorer is not None:
+        try:
+            _punct_restorer.unload()
+        except Exception:
+            pass
+
     from core.punctuation_restorer_improved import ImprovedPunctuationRestorer
     _punct_restorer = ImprovedPunctuationRestorer(
         device=device, confidence=confidence, case_confidence=case_confidence,
         prefer_int8=prefer_int8,
+        execution_provider=execution_provider,
     )
+    _punct_restorer_key = cache_key
     logger.info(f"[ModelCache] Loaded new PunctuationRestorer "
-                f"(conf={confidence:.3f}, case={case_confidence:.3f})")
+                f"(conf={confidence:.3f}, case={case_confidence:.3f}, provider={execution_provider})")
     return _punct_restorer
 
 
 def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
-                          threshold, auth_token=None):
+                          threshold, auth_token=None, execution_provider="cpu"):
     """Lấy SpeakerDiarizer từ cache hoặc tạo mới + initialize.
 
     Chiến lược cache:
@@ -805,12 +817,15 @@ def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
       config baked vào OfflineSpeakerDiarization object, không đổi được
     """
     global _diarizer_cache, _diarizer_cache_key
+    provider_policy = str(execution_provider or "cpu").lower()
 
     if _diarizer_cache is not None:
         old_model, old_threads, old_threshold = _diarizer_cache_key[:3]
+        old_provider = _diarizer_cache_key[4] if len(_diarizer_cache_key) > 4 else "cpu"
         base_match = (old_model == embedding_model_id and
                       old_threads == num_threads and
-                      old_threshold == round(threshold, 4))
+                      old_threshold == round(threshold, 4) and
+                      old_provider == provider_policy)
 
         if base_match:
             is_sherpa = (_diarizer_cache._pyannote_backend is None and
@@ -846,10 +861,14 @@ def _get_cached_diarizer(embedding_model_id, num_clusters, num_threads,
         num_threads=num_threads,
         threshold=threshold,
         auth_token=auth_token,
+        execution_provider=execution_provider,
     )
     diarizer.initialize()
     _diarizer_cache = diarizer
-    _diarizer_cache_key = (embedding_model_id, num_threads, round(threshold, 4), num_clusters)
+    _diarizer_cache_key = (
+        embedding_model_id, num_threads, round(threshold, 4), num_clusters,
+        provider_policy,
+    )
     logger.info(f"[ModelCache] Loaded new SpeakerDiarizer ({embedding_model_id})")
     return diarizer
 
@@ -879,10 +898,12 @@ ROVER_MODEL_IDS = ["zipformer-30m-rnnt-6000h", "sherpa-onnx-zipformer-vi-2025-04
 ROVER_MODEL_ID = "rover-voting"  # ID dùng trong UI/config
 
 
-def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
+def create_recognizer(model_path, cpu_threads=4, max_active_paths=8,
+                      execution_provider="cpu"):
     """Tạo hoặc lấy từ cache ORT sessions (encoder, decoder, joiner + tokens).
     Returns dict with ORT sessions + id2token mapping."""
-    cache_key = (os.path.normpath(model_path), cpu_threads, max_active_paths)
+    provider_policy = str(execution_provider or "cpu").lower()
+    cache_key = (os.path.normpath(model_path), cpu_threads, max_active_paths, provider_policy)
     if cache_key in _recognizer_cache:
         logger.info(f"[ModelCache] Reusing ORT recognizer: {os.path.basename(model_path)}")
         return _recognizer_cache[cache_key]
@@ -905,8 +926,6 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
         raise FileNotFoundError(f"Thiếu file model trong: {model_path}")
 
     ort = get_ort()
-    prov = ['CPUExecutionProvider']
-
     # Tính Z = threads thực (có HT bonus nếu có)
     from core.config import compute_ort_threads
     Z = compute_ort_threads(cpu_threads)
@@ -933,9 +952,28 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
     opts_small.enable_cpu_mem_arena = False  # Tiết kiệm RAM cho decoder/joiner (model nhỏ)
     opts_small.log_severity_level = 3
 
-    enc_sess = ort.InferenceSession(encoder, opts_enc, providers=prov)
-    dec_sess = ort.InferenceSession(decoder, opts_small, providers=prov)
-    joi_sess = ort.InferenceSession(joiner, opts_small, providers=prov)
+    provider_info = {}
+    if provider_policy not in ("cpu", "none", "off"):
+        from core.hardware_accel import create_ort_session
+        enc_sess, provider_info["encoder"] = create_ort_session(
+            ort, encoder, opts_enc, policy=provider_policy, stage="ASR encoder"
+        )
+        dec_sess, provider_info["decoder"] = create_ort_session(
+            ort, decoder, opts_small, policy=provider_policy, stage="ASR decoder"
+        )
+        joi_sess, provider_info["joiner"] = create_ort_session(
+            ort, joiner, opts_small, policy=provider_policy, stage="ASR joiner"
+        )
+    else:
+        prov = ['CPUExecutionProvider']
+        enc_sess = ort.InferenceSession(encoder, opts_enc, providers=prov)
+        dec_sess = ort.InferenceSession(decoder, opts_small, providers=prov)
+        joi_sess = ort.InferenceSession(joiner, opts_small, providers=prov)
+        provider_info = {
+            "encoder": {"actual_provider": "CPUExecutionProvider"},
+            "decoder": {"actual_provider": "CPUExecutionProvider"},
+            "joiner": {"actual_provider": "CPUExecutionProvider"},
+        }
 
     # Load tokens
     id2token = {}
@@ -968,11 +1006,13 @@ def create_recognizer(model_path, cpu_threads=4, max_active_paths=8):
         'max_active_paths': max_active_paths,
         'model_path': model_path, 'dec_cache': {},
         'context_graph': context_graph,
+        'provider_info': provider_info,
     }
 
     logger.info(f"[ModelCache] Cached new ORT recognizer: {os.path.basename(model_path)} "
                 f"(enc={os.path.basename(encoder)}, V={V}, "
-                f"threads: enc={Z} dec/joi={dec_joi_threads} [cpu_threads={cpu_threads}, Z={Z}])")
+                f"threads: enc={Z} dec/joi={dec_joi_threads} [cpu_threads={cpu_threads}, Z={Z}], "
+                f"provider={provider_policy}, actual={provider_info})")
 
     _recognizer_cache[cache_key] = recognizer
     return recognizer
@@ -1921,9 +1961,15 @@ class TranscriberPipeline:
             "punctuation": 0.0,
             "alignment": 0.0,
             "diarization": 0.0,
+            "quality": 0.0,
         }
 
         cpu_threads = self.config.get("cpu_threads", 4)
+        execution_provider = (
+            self.config.get("execution_provider")
+            or os.environ.get("ASR_VN_ACCEL")
+            or "cpu"
+        )
         restore_punctuation = self.config.get("restore_punctuation", False)
 
         # Detect ROVER mode
@@ -1953,9 +1999,11 @@ class TranscriberPipeline:
             primary_path = os.path.join(models_dir, ROVER_MODEL_IDS[0])
             secondary_path = os.path.join(models_dir, ROVER_MODEL_IDS[1])
 
-            recognizer = create_recognizer(primary_path, cpu_threads, max_active_paths=8)
+            recognizer = create_recognizer(primary_path, cpu_threads, max_active_paths=8,
+                                           execution_provider=execution_provider)
             self._emit("PHASE:Init|Đang khởi tạo mô hình phụ (ROVER)|40")
-            rover_recognizer = create_recognizer(secondary_path, cpu_threads, max_active_paths=8)
+            rover_recognizer = create_recognizer(secondary_path, cpu_threads, max_active_paths=8,
+                                                 execution_provider=execution_provider)
             self._emit("PHASE:Init|Đã khởi tạo 2 mô hình (ROVER)|60")
             print(f"[ROVER] Loaded 2 models: {ROVER_MODEL_IDS[0]} + {ROVER_MODEL_IDS[1]}")
         else:
@@ -1967,7 +2015,8 @@ class TranscriberPipeline:
                 )
 
             self._emit("PHASE:Init|Đang khởi tạo mô hình|30")
-            recognizer = create_recognizer(self.model_path, cpu_threads)
+            recognizer = create_recognizer(self.model_path, cpu_threads,
+                                           execution_provider=execution_provider)
             # Clear decoder cache từ file trước (tránh tích lũy unbounded trong server mode)
             recognizer['dec_cache'].clear()
             self._emit("PHASE:Init|Đang khởi tạo mô hình|60")
@@ -2202,23 +2251,27 @@ class TranscriberPipeline:
             # Recreate recognizer(s) with worker_threads if different from original
             if worker_threads != cpu_threads:
                 recognizer = create_recognizer(_primary_path, worker_threads,
-                                               max_active_paths=8 if is_rover else 8)
+                                               max_active_paths=8 if is_rover else 8,
+                                               execution_provider=execution_provider)
                 recognizer['dec_cache'].clear()
                 if is_rover and rover_recognizer is not None:
                     rover_recognizer = create_recognizer(
-                        _secondary_path, worker_threads, max_active_paths=8)
+                        _secondary_path, worker_threads, max_active_paths=8,
+                        execution_provider=execution_provider)
                     rover_recognizer['dec_cache'].clear()
 
             # Create 2nd worker's recognizer(s) with separate decoder caches
             recognizer_2 = create_recognizer(_primary_path, worker_threads,
-                                              max_active_paths=8 if is_rover else 8)
+                                              max_active_paths=8 if is_rover else 8,
+                                              execution_provider=execution_provider)
             recognizer_2 = dict(recognizer_2)
             recognizer_2['dec_cache'] = {}
 
             rover_recognizer_2 = None
             if is_rover and rover_recognizer is not None:
                 rover_recognizer_2 = create_recognizer(
-                    _secondary_path, worker_threads, max_active_paths=8)
+                    _secondary_path, worker_threads, max_active_paths=8,
+                    execution_provider=execution_provider)
                 rover_recognizer_2 = dict(rover_recognizer_2)
                 rover_recognizer_2['dec_cache'] = {}
 
@@ -2405,9 +2458,10 @@ class TranscriberPipeline:
         # concat_audio chỉ chứa tiếng nói → lấy 3 mẫu 9s (đầu/giữa/cuối) → 3 DNSMOS calls
         self._emit("PHASE:QualityAnalysis|Đang phân tích chất lượng âm thanh|0")
         _dnsmos_result = None
+        quality_start = time.time()
         try:
             from core.audio_analyzer import AudioQualityAnalyzer
-            _dnsmos_analyzer = AudioQualityAnalyzer()
+            _dnsmos_analyzer = AudioQualityAnalyzer(use_gpu=str(execution_provider).lower() not in ("cpu", "none", "off"))
             DNSMOS_LEN = 144160  # 9.01s @ 16kHz — đúng input size DNSMOS model
             concat_len = len(concat_audio)
             all_dnsmos = []
@@ -2431,6 +2485,8 @@ class TranscriberPipeline:
             self._emit("PHASE:QualityAnalysis|Phân tích chất lượng hoàn tất|100")
         except Exception as e:
             print(f"[DNSMOS] Error (non-critical): {e}")
+        finally:
+            timing_details["quality"] = time.time() - quality_start
 
         # Giải phóng intermediate lists + concat_audio — đã merge vào all_words, ASR xong
         del chunk_results, rover_raw_a, rover_raw_b, concat_audio
@@ -2439,6 +2495,19 @@ class TranscriberPipeline:
 
         if full_text:
             full_text = full_text.capitalize()
+
+        asr_provider_info = {
+            "primary": recognizer.get("provider_info") if isinstance(recognizer, dict) else None,
+            "rover": rover_recognizer.get("provider_info") if isinstance(rover_recognizer, dict) else None,
+        }
+
+        if str(execution_provider).lower() not in ("cpu", "none", "off"):
+            try:
+                recognizer = None
+                rover_recognizer = None
+                clear_model_cache("recognizer")
+            except Exception:
+                pass
 
         print(f"[Transcriber] Merged chunks into {len(all_words)} words")
 
@@ -2519,7 +2588,8 @@ class TranscriberPipeline:
                             from core.speaker_diarization_senko_campp_optimized import SenkoCamppDiarizerOptimized
                             diarizer_3d = SenkoCamppDiarizerOptimized(
                                 num_speakers=num_speakers,
-                                num_threads=self.config.get("cpu_threads", 4))
+                                num_threads=self.config.get("cpu_threads", 4),
+                                execution_provider=execution_provider)
                         else:
                             from core.speaker_diarization_senko_campp import SenkoCamppDiarizer
                             diarizer_3d = SenkoCamppDiarizer(
@@ -2570,6 +2640,7 @@ class TranscriberPipeline:
                             num_threads=self.config.get("cpu_threads", 4),
                             threshold=self.config.get("diarization_threshold", 0.6),
                             auth_token=hf_token,
+                            execution_provider=execution_provider,
                         )
 
                         if self._is_cancelled():
@@ -2798,8 +2869,11 @@ class TranscriberPipeline:
 
                 # Chạy punctuation 1 lần trên full_text (full context, GecBERT tự chunk)
                 if not bypass and full_text.strip():
-                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence,
-                                                        prefer_int8=self.config.get("save_ram", False))
+                    restorer = _get_cached_restorer(
+                        "cpu", punct_confidence, case_confidence,
+                        prefer_int8=self.config.get("save_ram", False),
+                        execution_provider=execution_provider,
+                    )
 
                     # GecBERT runs 3 iterations, each calls progress 0-100
                     # Wrap to show overall progress across all iterations
@@ -2982,8 +3056,11 @@ class TranscriberPipeline:
                     punct_confidence = self.config.get("punctuation_confidence", 0.3)
                     case_confidence = self.config.get("case_confidence", -1.0)
                     logger.info(f"[DEBUG] Getting PunctuationRestorer (confidence={punct_confidence:.3f})")
-                    restorer = _get_cached_restorer("cpu", punct_confidence, case_confidence,
-                                                        prefer_int8=self.config.get("save_ram", False))
+                    restorer = _get_cached_restorer(
+                        "cpu", punct_confidence, case_confidence,
+                        prefer_int8=self.config.get("save_ram", False),
+                        execution_provider=execution_provider,
+                    )
                     logger.info("[DEBUG] PunctuationRestorer ready")
 
                     _punct_iter2 = [0]
@@ -3306,6 +3383,7 @@ class TranscriberPipeline:
             "punctuation": timing_details["punctuation"],
             "alignment": timing_details["alignment"],
             "diarization": timing_details["diarization"],
+            "quality": timing_details["quality"],
         }
 
         duration_sec = total_samples / 16000.0 if total_samples > 0 else 0.0
@@ -3325,6 +3403,8 @@ class TranscriberPipeline:
             "speaker_names": {},
             "asr_confidence": asr_confidence,
             "quality_info": _dnsmos_result,
+            "execution_provider": execution_provider,
+            "asr_provider_info": asr_provider_info,
             # Overlap separation results (parallel segments for vùng 2-speaker overlap).
             # Empty list nếu feature không bật hoặc không có overlap. Additive —
             # downstream cũ bỏ qua field này không ảnh hưởng.

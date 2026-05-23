@@ -55,7 +55,7 @@ def install_packages():
         "PyQt6",
         "psutil",
         "sentencepiece",
-        "onnxruntime",
+        "onnxruntime-gpu[cuda,cudnn]",
         "requests",
         "tqdm",
         "huggingface_hub",
