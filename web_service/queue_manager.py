@@ -13,7 +13,12 @@ from typing import Optional, Callable
 from web_service.config import server_config, UPLOAD_DIR
 from web_service.database import db
 from web_service.session_manager import ws_manager
-from core.audio_decode import find_ffmpeg, find_ffprobe
+from core.audio_decode import (
+    ffmpeg_error_tail,
+    ffmpeg_resample_filter_candidates,
+    find_ffmpeg,
+    find_ffprobe,
+)
 
 logger = logging.getLogger("asr.queue")
 
@@ -79,49 +84,72 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
         if progress_callback and total_duration > 0:
             # Dùng Popen + -progress pipe:1 để parse tiến độ realtime
             # stderr=DEVNULL tránh deadlock khi buffer đầy (file dài > 15 phút trên Windows)
-            cmd = [
-                ffmpeg, "-y", "-i", input_path,
-                "-vn",
-                "-af", "aresample=resampler=soxr:precision=20",
-                "-ar", "16000", "-ac", "1",
-                "-acodec", "pcm_s16le",
-                "-progress", "pipe:1",
-                output_path,
-            ]
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-            )
+            last_error = ""
+            for filter_expr in ffmpeg_resample_filter_candidates():
+                cmd = [
+                    ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+                    "-y", "-i", input_path,
+                    "-vn",
+                ]
+                if filter_expr:
+                    cmd += ["-af", filter_expr]
+                cmd += [
+                    "-ar", "16000", "-ac", "1",
+                    "-acodec", "pcm_s16le",
+                    "-progress", "pipe:1",
+                    output_path,
+                ]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False
+                )
 
-            last_pct = -1
-            for line in proc.stdout:
-                line = line.strip()
-                if line.startswith("out_time_us="):
-                    try:
-                        current_us = int(line.split("=")[1])
-                        pct = min(99, int(current_us / (total_duration * 1_000_000) * 100))
-                        if pct > last_pct:
-                            last_pct = pct
-                            progress_callback(pct)
-                    except (ValueError, ZeroDivisionError):
-                        pass
+                stdout_chunks = []
+                last_pct = -1
+                assert proc.stdout is not None
+                for raw_line in proc.stdout:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    stdout_chunks.append(line)
+                    if line.startswith("out_time_us="):
+                        try:
+                            current_us = int(line.split("=")[1])
+                            pct = min(99, int(current_us / (total_duration * 1_000_000) * 100))
+                            if pct > last_pct:
+                                last_pct = pct
+                                progress_callback(pct)
+                        except (ValueError, ZeroDivisionError):
+                            pass
 
-            proc.wait(timeout=600)
-            if proc.returncode != 0:
-                raise RuntimeError(f"ffmpeg failed with code {proc.returncode}")
+                _, stderr = proc.communicate(timeout=600)
+                if proc.returncode == 0:
+                    last_error = ""
+                    break
+                last_error = ffmpeg_error_tail(stderr, "\n".join(stdout_chunks))
+            if last_error:
+                raise RuntimeError(f"ffmpeg failed: {last_error}")
         else:
             # Fallback: blocking call không có progress (file WAV hoặc không cần)
-            cmd = [
-                ffmpeg, "-y", "-i", input_path,
-                "-vn",
-                "-af", "aresample=resampler=soxr:precision=20",
-                "-ar", "16000", "-ac", "1",
-                "-acodec", "pcm_s16le",
-                output_path,
-            ]
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0:
-                logger.error(f"ffmpeg error: {result.stderr.decode(errors='replace')[:500]}")
-                raise RuntimeError(f"ffmpeg failed with code {result.returncode}")
+            last_error = ""
+            for filter_expr in ffmpeg_resample_filter_candidates():
+                cmd = [
+                    ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+                    "-y", "-i", input_path,
+                    "-vn",
+                ]
+                if filter_expr:
+                    cmd += ["-af", filter_expr]
+                cmd += [
+                    "-ar", "16000", "-ac", "1",
+                    "-acodec", "pcm_s16le",
+                    output_path,
+                ]
+                result = subprocess.run(cmd, capture_output=True, timeout=300)
+                if result.returncode == 0:
+                    last_error = ""
+                    break
+                last_error = ffmpeg_error_tail(result.stderr, result.stdout)
+            if last_error:
+                logger.error(f"ffmpeg error: {last_error[:500]}")
+                raise RuntimeError(f"ffmpeg failed: {last_error}")
 
         logger.info(f"Converted to WAV: {output_path}")
         return output_path

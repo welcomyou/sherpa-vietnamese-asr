@@ -193,47 +193,110 @@ def detect_calibration_status() -> Dict[str, Any]:
     }
 
 
-def _ffmpeg_path() -> str:
-    for candidate in (
-        Path(BASE_DIR) / "ffmpeg.exe",
-        Path(BASE_DIR) / "ffmpeg" / "bin" / "ffmpeg.exe",
-    ):
-        if candidate.exists():
-            return str(candidate)
-    return "ffmpeg"
+def _validate_wav_16k_mono(path: Path) -> None:
+    try:
+        import soundfile as sf  # type: ignore
+
+        info = sf.info(str(path))
+        if info.samplerate == 16000 and info.channels == 1 and info.frames > 0:
+            return
+    except Exception:
+        pass
+
+    from core.audio_decode import find_ffprobe, ffmpeg_error_tail
+
+    ffprobe = find_ffprobe()
+    if not ffprobe:
+        raise RuntimeError(f"cannot validate calibration WAV; ffprobe not found: {path}")
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=sample_rate,channels,duration",
+        "-of",
+        "default=noprint_wrappers=1",
+        str(path),
+    ]
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    result = subprocess.run(cmd, capture_output=True, timeout=30, creationflags=creationflags)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe validation failed: {ffmpeg_error_tail(result.stderr, result.stdout)}")
+    text = result.stdout.decode("utf-8", errors="replace")
+    fields = {}
+    for line in text.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key.strip()] = value.strip()
+    if fields.get("sample_rate") != "16000" or fields.get("channels") != "1":
+        raise RuntimeError(f"calibration WAV validation failed: {fields}")
 
 
 def ensure_calibration_wav() -> Path:
     if CALIBRATION_SAMPLE_WAV.exists():
+        _validate_wav_16k_mono(CALIBRATION_SAMPLE_WAV)
         return CALIBRATION_SAMPLE_WAV
     if CALIBRATION_CACHE_WAV.exists():
-        return CALIBRATION_CACHE_WAV
+        try:
+            _validate_wav_16k_mono(CALIBRATION_CACHE_WAV)
+            return CALIBRATION_CACHE_WAV
+        except Exception:
+            try:
+                CALIBRATION_CACHE_WAV.unlink()
+            except OSError:
+                pass
     if not CALIBRATION_SAMPLE_MP3.exists():
         raise FileNotFoundError(f"Calibration sample not found: {CALIBRATION_SAMPLE_MP3}")
 
+    from core.audio_decode import (
+        ffmpeg_error_tail,
+        ffmpeg_resample_filter_candidates,
+        find_ffmpeg,
+    )
+
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise FileNotFoundError("ffmpeg.exe not found in app root folder")
+
     CALIBRATION_CACHE_WAV.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        _ffmpeg_path(),
-        "-y",
-        "-i",
-        str(CALIBRATION_SAMPLE_MP3),
-        "-vn",
-        "-af",
-        "aresample=resampler=soxr:precision=20",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-c:a",
-        "pcm_s16le",
-        str(CALIBRATION_CACHE_WAV),
-    ]
     creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    result = subprocess.run(cmd, capture_output=True, timeout=300, creationflags=creationflags)
-    if result.returncode != 0:
-        err = result.stderr.decode("utf-8", errors="replace")[:1000]
-        raise RuntimeError(f"ffmpeg calibration conversion failed: {err}")
-    return CALIBRATION_CACHE_WAV
+    last_error = ""
+    for filter_expr in ffmpeg_resample_filter_candidates():
+        if CALIBRATION_CACHE_WAV.exists():
+            try:
+                CALIBRATION_CACHE_WAV.unlink()
+            except OSError:
+                pass
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(CALIBRATION_SAMPLE_MP3),
+            "-vn",
+        ]
+        if filter_expr:
+            cmd += ["-af", filter_expr]
+        cmd += [
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(CALIBRATION_CACHE_WAV),
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=300, creationflags=creationflags)
+        if result.returncode == 0:
+            _validate_wav_16k_mono(CALIBRATION_CACHE_WAV)
+            return CALIBRATION_CACHE_WAV
+        last_error = ffmpeg_error_tail(result.stderr, result.stdout)
+    raise RuntimeError(f"ffmpeg calibration conversion failed: {last_error}")
 
 
 def _select_model_name(preferred: Optional[str]) -> str:

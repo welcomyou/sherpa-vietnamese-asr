@@ -114,26 +114,40 @@ class BackgroundAudioConvertThread(QThread):
 
             ffmpeg_path = self._get_ffmpeg_path()
 
-            # Convert sang WAV 16kHz mono bằng ffmpeg + soxr
-            # Dùng chung cho cả playback (QMediaPlayer seek chính xác)
-            # và pipeline ASR/diarization (load_audio sf.read trực tiếp)
-            command = [
-                ffmpeg_path,
-                '-i', self.audio_path,
-                '-vn',
-                '-af', 'aresample=resampler=soxr:precision=20',
-                '-ar', '16000',
-                '-ac', '1',
-                '-c:a', 'pcm_s16le',
-                '-loglevel', 'quiet',
-                '-y',
-                temp_path
-            ]
-
             try:
                 import subprocess
-                subprocess.run(command, check=True,
-                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+                from core.audio_decode import ffmpeg_error_tail, ffmpeg_resample_filter_candidates
+
+                last_error = ""
+                for filter_expr in ffmpeg_resample_filter_candidates():
+                    command = [
+                        ffmpeg_path,
+                        '-hide_banner',
+                        '-nostdin',
+                        '-loglevel', 'error',
+                        '-y',
+                        '-i', self.audio_path,
+                        '-vn',
+                    ]
+                    if filter_expr:
+                        command += ['-af', filter_expr]
+                    command += [
+                        '-ar', '16000',
+                        '-ac', '1',
+                        '-c:a', 'pcm_s16le',
+                        temp_path,
+                    ]
+                    result = subprocess.run(
+                        command,
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                    )
+                    if result.returncode == 0:
+                        last_error = ""
+                        break
+                    last_error = ffmpeg_error_tail(result.stderr, result.stdout)
+                if last_error:
+                    raise RuntimeError(last_error)
                 if not self._cancelled:
                     self.finished_converting.emit(temp_path)
                 else:
