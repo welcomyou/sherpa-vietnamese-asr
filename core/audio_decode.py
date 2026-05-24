@@ -36,6 +36,23 @@ def find_ffmpeg() -> str | None:
     return None
 
 
+def find_ffprobe() -> str | None:
+    path = shutil.which("ffprobe")
+    if path:
+        return path
+
+    possible = [
+        os.path.join(os.path.dirname(sys.executable), "ffprobe.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffprobe.exe"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ffmpeg", "bin", "ffprobe.exe"),
+        r"C:\ffmpeg\bin\ffprobe.exe",
+    ]
+    for candidate in possible:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def load_audio_ffmpeg_pipe(file_path: str, sample_rate: int = TARGET_SAMPLE_RATE) -> np.ndarray:
     ffmpeg = find_ffmpeg()
     if not ffmpeg:

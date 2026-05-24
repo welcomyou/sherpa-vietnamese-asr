@@ -28,6 +28,20 @@ _VERSION = get_version_short()
 VENV_DIR = PROJECT_ROOT / ".envtietkiem"
 DIST_DIR = PROJECT_ROOT / "dist" / f"desktop-portable-cpu-{_VERSION}"
 BUILD_DIR = PROJECT_ROOT / "build"
+FFMPEG_ZIP_URL = os.environ.get(
+    "FFMPEG_ZIP_URL",
+    "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-essentials_build.zip",
+)
+FFMPEG_ZIP_SHA256 = "e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673"
+FFMPEG_LOCAL_SHA256 = {
+    "ffmpeg.exe": {
+        "d1e2a156261ecc675081943197a85f08f2868784a0af499171ede89353edad31",
+    },
+    "ffprobe.exe": {
+        "192a1d6899059765ac8c39764fc3148d4e6049955956dc2029f81f4bd6a8972d",
+    },
+}
+FFMPEG_HASH_MANIFEST = PROJECT_ROOT / ".ffmpeg-tools.sha256.json"
 PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-embed-amd64.zip"
 # A08: SHA-256 pin cho Python embedded — supply chain defense-in-depth
 PYTHON_EMBED_SHA256 = "c87f000e3dae1a572e98e81daeb622f8bc6f22664093fc9c70989b5f0018d49b"
@@ -139,6 +153,139 @@ def download_python_embedded():
     except Exception as e:
         print(f"[ERROR] Failed to download: {e}")
         sys.exit(1)
+
+
+def _sha256_file(path):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_sha256(path, expected, label):
+    actual = _sha256_file(path)
+    if actual.lower() != expected.lower():
+        raise RuntimeError(
+            f"SHA-256 mismatch for {label}\n"
+            f"  Expected: {expected}\n"
+            f"  Got:      {actual}"
+        )
+    return actual
+
+
+def _local_ffmpeg_tools_are_valid():
+    manifest_hashes = {}
+    if FFMPEG_HASH_MANIFEST.exists():
+        try:
+            import json
+            manifest_hashes = json.loads(FFMPEG_HASH_MANIFEST.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"  [WARN] cannot read {FFMPEG_HASH_MANIFEST.name}: {exc}")
+
+    ok = True
+    for name, allowed_hashes in FFMPEG_LOCAL_SHA256.items():
+        path = PROJECT_ROOT / name
+        if not path.exists():
+            print(f"  [MISS] {name}")
+            ok = False
+            continue
+        allowed = set(allowed_hashes)
+        manifest_hash = str(manifest_hashes.get(name) or "").lower()
+        if manifest_hash:
+            allowed.add(manifest_hash)
+        actual = _sha256_file(path).lower()
+        if actual not in allowed:
+            print(f"  [WARN] {name} SHA-256 not recognized: {actual}")
+            ok = False
+            continue
+        print(f"  [OK] {name} SHA-256 verified: {actual[:16]}...")
+    return ok
+
+
+def ensure_ffmpeg_tools():
+    """Use local ffmpeg/ffprobe if pinned hashes match; otherwise download and verify."""
+    print("[FFMPEG] Checking ffmpeg.exe/ffprobe.exe...")
+    if _local_ffmpeg_tools_are_valid():
+        return True
+
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = BUILD_DIR / "ffmpeg-8.0.1-essentials_build.zip"
+    if zip_path.exists():
+        try:
+            _verify_sha256(zip_path, FFMPEG_ZIP_SHA256, zip_path.name)
+            print(f"  [OK] cached {zip_path.name} SHA-256 verified")
+        except RuntimeError:
+            print(f"  [DEL] cached {zip_path.name} hash mismatch; re-downloading")
+            zip_path.unlink()
+
+    if not zip_path.exists():
+        print("[DL] Downloading FFmpeg essentials...")
+        print(f"     From: {FFMPEG_ZIP_URL}")
+        import ssl
+        import tempfile
+        import urllib.request
+
+        fd, tmp_path = tempfile.mkstemp(dir=str(BUILD_DIR), suffix=".zip.tmp")
+        os.close(fd)
+        try:
+            ctx = ssl.create_default_context()
+            opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+            with opener.open(FFMPEG_ZIP_URL) as resp, open(tmp_path, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            _verify_sha256(tmp_path, FFMPEG_ZIP_SHA256, "downloaded FFmpeg archive")
+            shutil.move(tmp_path, zip_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        print(f"  [OK] downloaded {zip_path.name} SHA-256 verified")
+
+    wanted = {"ffmpeg.exe", "ffprobe.exe"}
+    extracted = set()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in wanted:
+            member = next(
+                (
+                    item
+                    for item in zf.namelist()
+                    if item.lower().replace("\\", "/").endswith(f"/bin/{name}")
+                ),
+                None,
+            )
+            if not member:
+                raise RuntimeError(f"FFmpeg archive missing {name}")
+            target = PROJECT_ROOT / name
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            extracted.add(name)
+            print(f"  [OK] extracted {name}")
+
+    if extracted != wanted:
+        missing = ", ".join(sorted(wanted - extracted))
+        raise RuntimeError(f"FFmpeg tools missing after extraction: {missing}")
+    import json
+    hashes = {name: _sha256_file(PROJECT_ROOT / name).lower() for name in sorted(wanted)}
+    FFMPEG_HASH_MANIFEST.write_text(
+        json.dumps(hashes, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def ensure_offline_models():
+    """Local-first model preparation: verify existing models or download pinned files."""
+    if os.environ.get("SKIP_PREPARE_OFFLINE_MODELS", "").lower() in {"1", "true", "yes"}:
+        print("[MODEL] Skipping model preparation (SKIP_PREPARE_OFFLINE_MODELS=1)")
+        return True
+
+    print("[MODEL] Checking offline model bundle...")
+    import prepare_offline_build
+
+    if not prepare_offline_build.main():
+        raise RuntimeError("Offline model preparation failed")
+    return True
 
 
 def setup_python(zip_file):
@@ -1065,6 +1212,8 @@ def main():
     # Check prerequisites
     if not check_venv():
         return 1
+    ensure_ffmpeg_tools()
+    ensure_offline_models()
     
     # Clean old build
     print("[CLEAN] Cleaning old build...")

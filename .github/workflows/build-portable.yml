@@ -80,11 +80,15 @@ jobs:
       - name: Build desktop portable
         if: ${{ github.event_name == 'push' || inputs.bundle == 'both' || inputs.bundle == 'desktop' }}
         shell: pwsh
+        env:
+          SKIP_PREPARE_OFFLINE_MODELS: "1"
         run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable.py
 
       - name: Build service portable
         if: ${{ github.event_name == 'push' || inputs.bundle == 'both' || inputs.bundle == 'service' }}
         shell: pwsh
+        env:
+          SKIP_PREPARE_OFFLINE_MODELS: "1"
         run: .\.envtietkiem\Scripts\python.exe build-portable/build_portable_online.py
 
       - name: Build GPU add-ons
@@ -182,6 +186,10 @@ jobs:
           )
           $releaseUrl = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
           $release = Invoke-RestMethod -Headers $headers -Uri $releaseUrl
+          $hasSplitAssets = @($release.assets | Where-Object { $_.name -match '\.zip\.\d{3}$' }).Count -gt 0
+          if (-not $hasSplitAssets) {
+            $oldAssets += "README-recombine.txt"
+          }
           foreach ($oldName in $oldAssets) {
             $asset = $release.assets | Where-Object { $_.name -eq $oldName } | Select-Object -First 1
             if (-not $asset) {

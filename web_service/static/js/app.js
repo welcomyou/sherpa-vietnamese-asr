@@ -476,19 +476,21 @@ async function runServerCalibration() {
 
     try {
         const status = await apiFetch('/api/calibration/status');
+        const addon = status.recommended_addon || null;
+        if (addon && !addon.installed && !status.provider_ready) {
+            window.appConfig.execution_provider = 'cpu';
+            updateCalibrationStatus('cpu');
+            alert(
+                'Phát hiện GPU nhưng chưa có gói tăng tốc phù hợp.\n\n' +
+                calibrationHardwareText(status) +
+                `\n\nHãy tải: ${addon.zip_name || (addon.artifact + '-<version>.zip')}` +
+                '\nGiải nén gói này vào thư mục portable, rồi mở lại ứng dụng và bấm Tối ưu thiết bị.'
+            );
+            return;
+        }
         if (!status.can_optimize) {
             window.appConfig.execution_provider = 'cpu';
             updateCalibrationStatus('cpu');
-            const addon = status.recommended_addon || null;
-            if (addon && !addon.installed && !status.provider_ready) {
-                alert(
-                    'Phát hiện GPU nhưng chưa có gói tăng tốc phù hợp.\n\n' +
-                    calibrationHardwareText(status) +
-                    `\n\nHãy tải: ${addon.zip_name || (addon.artifact + '-<version>.zip')}` +
-                    '\nGiải nén gói này vào thư mục portable, rồi mở lại ứng dụng và bấm Tối ưu thiết bị.'
-                );
-                return;
-            }
             alert('Không tìm thấy GPU/provider phù hợp. Cấu hình hiện tại đã tối ưu ở chế độ CPU-only.\n\n' + calibrationHardwareText(status));
             return;
         }

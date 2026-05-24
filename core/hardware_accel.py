@@ -85,7 +85,12 @@ def recommended_gpu_addon() -> Optional[Dict[str, Any]]:
 
     meta = dict(GPU_ADDON_DEFS[addon_id])
     meta["id"] = addon_id
-    meta["zip_name"] = f"{meta['artifact']}-<version>.zip"
+    try:
+        from core.version import get_version_short
+        version = get_version_short()
+    except Exception:
+        version = "<version>"
+    meta["zip_name"] = f"{meta['artifact']}-{version}.zip"
     meta["installed"] = (gpu_addon_site_packages(addon_id) / "onnxruntime").is_dir()
     return meta
 

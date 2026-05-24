@@ -31,7 +31,7 @@ from build_portable import (
     VENV_DIR, BUILD_DIR, PYTHON_EMBED_URL,
     check_venv, download_python_embedded, setup_python,
     copy_pyd_files, copy_dlls, copy_vcredist_dlls, cleanup_pyqt6, _create_stubs,
-    get_venv_path, clean_build, calculate_size,
+    get_venv_path, clean_build, calculate_size, ensure_ffmpeg_tools, ensure_offline_models,
 )
 
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -806,6 +806,8 @@ def main():
 
     if not check_venv():
         return 1
+    ensure_ffmpeg_tools()
+    ensure_offline_models()
 
     # Clean old build
     print("[CLEAN] Cleaning old service build...")

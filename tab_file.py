@@ -1499,7 +1499,7 @@ class FileProcessingTab(QWidget):
 
     def start_device_calibration_detect(self):
         if self.transcriber and self.transcriber.isRunning():
-            QMessageBox.information(self, "Tối ưu thiết bị", "Đang xử lý file. Vui lòng đợi xong rồi chạy tối ưu thiết bị.")
+            self._calibration_info("Đang xử lý file. Vui lòng đợi xong rồi chạy tối ưu thiết bị.")
             return
         self.btn_device_calibration.setEnabled(False)
         self.label_device_accel.setText("Đang kiểm tra phần cứng...")
@@ -1521,25 +1521,70 @@ class FileProcessingTab(QWidget):
             ram_text = f"\nRAM: {ram.get('available_mb', '?')} / {ram.get('total_mb')} MB khả dụng/tổng"
         return f"{status.get('hardware_summary', 'Không đọc được thông tin phần cứng')}{ram_text}"
 
-    def _on_device_calibration_detected(self, status):
-        if not status.get("can_optimize"):
-            self._set_execution_provider("cpu")
-            self.btn_device_calibration.setEnabled(True)
-            QMessageBox.information(
-                self,
-                "Tối ưu thiết bị",
-                "Không tìm thấy GPU/provider phù hợp. Cấu hình hiện tại đã tối ưu ở chế độ CPU-only.\n\n"
-                + self._hardware_message(status),
-            )
-            return
+    def _calibration_message_box(self, icon, title, text, buttons=None, default_button=None):
+        box = QMessageBox(self)
+        box.setIcon(icon)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStyleSheet(f"""
+            QMessageBox {{
+                background-color: {COLORS['bg_card']};
+                color: {COLORS['text_primary']};
+            }}
+            QMessageBox QLabel {{
+                color: {COLORS['text_primary']};
+                background: transparent;
+            }}
+            QMessageBox QPushButton {{
+                background-color: {COLORS['bg_input']};
+                color: {COLORS['text_primary']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+                padding: 6px 16px;
+                min-width: 72px;
+            }}
+            QMessageBox QPushButton:hover {{
+                background-color: {COLORS['accent']};
+                color: white;
+                border-color: {COLORS['accent']};
+            }}
+        """)
+        if buttons is None:
+            buttons = QMessageBox.StandardButton.Ok
+        box.setStandardButtons(buttons)
+        if default_button is not None:
+            box.setDefaultButton(default_button)
+        return box.exec()
 
+    def _calibration_info(self, text):
+        return self._calibration_message_box(
+            QMessageBox.Icon.Information,
+            "Tối ưu thiết bị",
+            text,
+        )
+
+    def _calibration_warning(self, text):
+        return self._calibration_message_box(
+            QMessageBox.Icon.Warning,
+            "Tối ưu thiết bị",
+            text,
+        )
+
+    def _calibration_question(self, text):
+        return self._calibration_message_box(
+            QMessageBox.Icon.Question,
+            "Tối ưu thiết bị",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+
+    def _on_device_calibration_detected(self, status):
         addon = status.get("recommended_addon") or {}
         if addon and not addon.get("installed") and not status.get("provider_ready"):
             self._set_execution_provider("cpu")
             self.btn_device_calibration.setEnabled(True)
-            QMessageBox.information(
-                self,
-                "Tối ưu thiết bị",
+            self._calibration_info(
                 "Phát hiện GPU nhưng chưa có gói tăng tốc phù hợp.\n\n"
                 + self._hardware_message(status)
                 + f"\n\nHãy tải: {addon.get('zip_name') or addon.get('artifact') + '-<version>.zip'}"
@@ -1547,16 +1592,21 @@ class FileProcessingTab(QWidget):
             )
             return
 
+        if not status.get("can_optimize"):
+            self._set_execution_provider("cpu")
+            self.btn_device_calibration.setEnabled(True)
+            self._calibration_info(
+                "Không tìm thấy GPU/provider phù hợp. Cấu hình hiện tại đã tối ưu ở chế độ CPU-only.\n\n"
+                + self._hardware_message(status),
+            )
+            return
+
         provider = status.get("preferred_provider", "GPU")
-        reply = QMessageBox.question(
-            self,
-            "Tối ưu thiết bị",
+        reply = self._calibration_question(
             "Phát hiện GPU có thể tăng tốc.\n\n"
             + self._hardware_message(status)
             + f"\nProvider đề xuất: {provider}\n\n"
             "Chạy tối ưu bằng file mẫu 10 phút? Quá trình này có thể mất vài phút.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
         )
         if reply != QMessageBox.StandardButton.Yes:
             self.btn_device_calibration.setEnabled(True)
@@ -1588,9 +1638,7 @@ class FileProcessingTab(QWidget):
         self.btn_device_calibration.setEnabled(True)
 
         if report.get("status") == "no_gpu":
-            QMessageBox.information(
-                self,
-                "Tối ưu thiết bị",
+            self._calibration_info(
                 "Không tìm thấy GPU/provider phù hợp. Đã giữ CPU-only.\n\n"
                 + self._hardware_message(report.get("detect") or {}),
             )
@@ -1601,9 +1649,7 @@ class FileProcessingTab(QWidget):
         stage_speedups = comparison.get("stage_speedups") or {}
         provider_text = "GPU auto" if selected == "auto" else "CPU-only"
         self.label_device_accel.setText(provider_text)
-        QMessageBox.information(
-            self,
-            "Tối ưu thiết bị",
+        self._calibration_info(
             f"Tối ưu hoàn tất. Cấu hình được chọn: {provider_text}\n"
             f"Tổng tăng tốc: {speedup or 'N/A'}x\n"
             f"ASR: {stage_speedups.get('transcription_detail', 'N/A')}x, "
@@ -1615,7 +1661,7 @@ class FileProcessingTab(QWidget):
     def _on_device_calibration_error(self, message):
         self.btn_device_calibration.setEnabled(True)
         self.label_device_accel.setText("CPU-only")
-        QMessageBox.warning(self, "Tối ưu thiết bị", f"Tối ưu thiết bị thất bại:\n{message}")
+        self._calibration_warning(f"Tối ưu thiết bị thất bại:\n{message}")
 
     def _on_save_ram_changed(self, state):
         """Cảnh báo khi tắt tiết kiệm RAM trên máy ≤ 8GB."""

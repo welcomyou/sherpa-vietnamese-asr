@@ -13,6 +13,7 @@ from typing import Optional, Callable
 from web_service.config import server_config, UPLOAD_DIR
 from web_service.database import db
 from web_service.session_manager import ws_manager
+from core.audio_decode import find_ffmpeg, find_ffprobe
 
 logger = logging.getLogger("asr.queue")
 
@@ -50,15 +51,19 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
         except Exception:
             pass  # File hỏng → convert lại
 
-    # ffmpeg được gọi trực tiếp qua subprocess (không cần import helper)
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        logger.error("ffmpeg not found!")
+        raise RuntimeError("ffmpeg not found. Please ensure ffmpeg is in PATH or bundled.")
+    ffprobe = find_ffprobe()
 
     try:
         # Lấy duration bằng ffprobe để tính % tiến độ
         total_duration = 0
-        if progress_callback:
+        if progress_callback and ffprobe:
             try:
                 probe_cmd = [
-                    "ffprobe", "-v", "error",
+                    ffprobe, "-v", "error",
                     "-show_entries", "format=duration",
                     "-of", "default=noprint_wrappers=1:nokey=1",
                     input_path,
@@ -75,7 +80,7 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
             # Dùng Popen + -progress pipe:1 để parse tiến độ realtime
             # stderr=DEVNULL tránh deadlock khi buffer đầy (file dài > 15 phút trên Windows)
             cmd = [
-                "ffmpeg", "-y", "-i", input_path,
+                ffmpeg, "-y", "-i", input_path,
                 "-vn",
                 "-af", "aresample=resampler=soxr:precision=20",
                 "-ar", "16000", "-ac", "1",
@@ -106,7 +111,7 @@ def convert_to_wav(input_path: str, progress_callback: Optional[Callable[[int], 
         else:
             # Fallback: blocking call không có progress (file WAV hoặc không cần)
             cmd = [
-                "ffmpeg", "-y", "-i", input_path,
+                ffmpeg, "-y", "-i", input_path,
                 "-vn",
                 "-af", "aresample=resampler=soxr:precision=20",
                 "-ar", "16000", "-ac", "1",
