@@ -185,8 +185,10 @@ async def shared(path: str):
 
 @app.get("/install-cert")
 async def download_cert():
-    cert_path = os.path.join(BASE_DIR, "web_service", "certs", "server.crt")
-    if not os.path.exists(cert_path):
+    from web_service.ssl_utils import get_install_cert_path
+
+    cert_path = get_install_cert_path()
+    if not cert_path:
         raise HTTPException(404, "SSL certificate not found")
     return FileResponse(
         cert_path,

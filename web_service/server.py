@@ -298,11 +298,16 @@ async def login_page():
 # Download SSL cert de cai tren dien thoai
 @app.get("/install-cert")
 async def download_cert():
-    cert_path = os.path.join(os.path.dirname(__file__), "certs", "server.crt")
-    if os.path.exists(cert_path):
-        return FileResponse(cert_path, filename="sherpa-asr-vn.crt",
-                            media_type="application/x-x509-ca-cert")
-    return {"error": "Certificate not found"}
+    from web_service.ssl_utils import get_install_cert_path
+
+    cert_path = get_install_cert_path()
+    if not cert_path:
+        raise HTTPException(404, "SSL certificate not found")
+    return FileResponse(
+        cert_path,
+        filename="sherpa-asr-vn.crt",
+        media_type="application/x-x509-ca-cert",
+    )
 
 
 # Mount shared/static AFTER specific routes

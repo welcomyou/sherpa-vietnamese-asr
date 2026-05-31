@@ -6,10 +6,79 @@ import os
 import logging
 import datetime
 import ipaddress
+import shutil
 
-from web_service.config import CERTS_DIR
+from web_service.config import CERTS_DIR, DATA_DIR
 
 logger = logging.getLogger("asr.ssl")
+
+ACTIVE_CERT_ENV = "SHERPA_ASR_ACTIVE_CERT_FILE"
+ACTIVE_KEY_ENV = "SHERPA_ASR_ACTIVE_KEY_FILE"
+ACTIVE_CERT_SNAPSHOT = os.path.join(DATA_DIR, "active_tls_cert.crt")
+
+
+def _configured_cert_pair(cert_dir: str = None) -> tuple[str | None, str | None]:
+    """Return the cert/key pair selected by runtime priority, without generating."""
+    if cert_dir is None:
+        cert_dir = CERTS_DIR
+
+    cert_file = os.path.join(cert_dir, "server.crt")
+    key_file = os.path.join(cert_dir, "server.key")
+    custom_cert = os.path.join(cert_dir, "custom.crt")
+    custom_key = os.path.join(cert_dir, "custom.key")
+
+    if os.path.exists(custom_cert) and os.path.exists(custom_key):
+        return custom_cert, custom_key
+    if os.path.exists(cert_file) and os.path.exists(key_file):
+        return cert_file, key_file
+    return None, None
+
+
+def publish_active_ssl_cert(cert_file: str | None, key_file: str | None = None) -> str | None:
+    """Expose the exact public cert loaded at server startup for /install-cert.
+
+    Uvicorn reads cert/key files only when TLS starts. If the user later imports
+    or regenerates cert files before restarting, the files on disk may no longer
+    match the live TLS certificate. Keep a public-cert snapshot so downloads
+    stay aligned with the currently running server.
+    """
+    if not cert_file:
+        os.environ.pop(ACTIVE_CERT_ENV, None)
+        os.environ.pop(ACTIVE_KEY_ENV, None)
+        return None
+
+    cert_file = os.path.abspath(cert_file)
+    active_cert = cert_file
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        shutil.copy2(cert_file, ACTIVE_CERT_SNAPSHOT)
+        active_cert = os.path.abspath(ACTIVE_CERT_SNAPSHOT)
+    except OSError as exc:
+        logger.warning("[SSL] Could not snapshot active certificate: %s", exc)
+
+    os.environ[ACTIVE_CERT_ENV] = active_cert
+    if key_file:
+        os.environ[ACTIVE_KEY_ENV] = os.path.abspath(key_file)
+    else:
+        os.environ.pop(ACTIVE_KEY_ENV, None)
+    return active_cert
+
+
+def get_install_cert_path(cert_dir: str = None, generate_if_missing: bool = False) -> str | None:
+    """Return the certificate that clients should install for the active server."""
+    active_cert = os.environ.get(ACTIVE_CERT_ENV)
+    if active_cert and os.path.exists(active_cert):
+        return active_cert
+
+    cert_file, _ = _configured_cert_pair(cert_dir)
+    if cert_file:
+        return cert_file
+
+    if generate_if_missing:
+        cert_file, key_file = ensure_ssl_certs(cert_dir)
+        return publish_active_ssl_cert(cert_file, key_file) or cert_file
+
+    return None
 
 
 def ensure_ssl_certs(cert_dir: str = None) -> tuple:
@@ -20,20 +89,16 @@ def ensure_ssl_certs(cert_dir: str = None) -> tuple:
     if cert_dir is None:
         cert_dir = CERTS_DIR
 
+    existing_cert, existing_key = _configured_cert_pair(cert_dir)
+    if existing_cert and existing_key:
+        if os.path.basename(existing_cert) == "custom.crt":
+            logger.info("[SSL] Using custom certificate")
+        else:
+            logger.info("[SSL] Using existing self-signed certificate")
+        return existing_cert, existing_key
+
     cert_file = os.path.join(cert_dir, "server.crt")
     key_file = os.path.join(cert_dir, "server.key")
-
-    # Kiem tra cert custom (admin upload)
-    custom_cert = os.path.join(cert_dir, "custom.crt")
-    custom_key = os.path.join(cert_dir, "custom.key")
-    if os.path.exists(custom_cert) and os.path.exists(custom_key):
-        logger.info("[SSL] Using custom certificate")
-        return custom_cert, custom_key
-
-    # Da co self-signed cert
-    if os.path.exists(cert_file) and os.path.exists(key_file):
-        logger.info("[SSL] Using existing self-signed certificate")
-        return cert_file, key_file
 
     # Tu sinh
     logger.info("[SSL] Generating self-signed certificate...")

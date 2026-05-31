@@ -178,7 +178,7 @@ def start_server(host=None, port=None, no_gui=False):
     setup_paths()
 
     from web_service.config import server_config, LOG_DIR
-    from web_service.ssl_utils import ensure_ssl_certs
+    from web_service.ssl_utils import ensure_ssl_certs, publish_active_ssl_cert
 
     # --- File log handler: setup SOM (truoc moi thu co the crash) ---
     from logging.handlers import RotatingFileHandler
@@ -221,7 +221,12 @@ def start_server(host=None, port=None, no_gui=False):
 
         # SSL certs (skip if HTTP mode)
         use_http = server_config.http_mode
-        cert_file, key_file = (None, None) if use_http else ensure_ssl_certs()
+        if use_http:
+            cert_file, key_file = None, None
+            publish_active_ssl_cert(None, None)
+        else:
+            cert_file, key_file = ensure_ssl_certs()
+            publish_active_ssl_cert(cert_file, key_file)
 
         protocol = "http" if use_http else "https"
         logger.info(f"Starting server on {protocol}://{actual_host}:{actual_port}")
