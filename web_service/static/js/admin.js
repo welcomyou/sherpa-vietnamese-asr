@@ -103,7 +103,7 @@ async function renderAdminStats(el) {
         html += '<div class="admin-section admin-section-warn">';
         html += '<div class="admin-section-header">';
         html += '<strong>IP bi khoa dang nhap (' + locks.length + ')</strong>';
-        html += '<button class="btn btn-sm" onclick="adminClearRateLimits()">Mo khoa tat ca</button>';
+        html += '<button class="btn btn-sm" data-action="admin-clear-rate-limits">Mo khoa tat ca</button>';
         html += '</div>';
         html += '<div class="admin-table-wrap"><table class="admin-table">';
         html += '<tr><th>IP</th><th>So lan sai</th><th>Mo khoa sau</th></tr>';
@@ -142,7 +142,7 @@ async function renderAdminSessions(el) {
 
     let html = '<div class="admin-toolbar">';
     html += '<div class="admin-toolbar-left">';
-    html += '<button class="btn btn-sm" onclick="adminCleanupSessions()">Don dep het han</button>';
+    html += '<button class="btn btn-sm" data-action="admin-cleanup-sessions">Don dep het han</button>';
     html += '</div>';
     html += '<span class="admin-count">' + sessions.length + ' phien</span>';
     html += '</div>';
@@ -165,7 +165,7 @@ async function renderAdminSessions(el) {
         html += '<td>' + escapeHtml(s.ip_address || '-') + '</td>';
         html += '<td>' + type + '</td>';
         html += '<td class="admin-mono">' + _fmtTime(s.last_heartbeat) + '</td>';
-        html += '<td><button class="btn btn-sm btn-danger" data-sid="' + escapeHtml(fullSid) + '" onclick="adminKillSession(this.dataset.sid)">Kick</button></td>';
+        html += '<td><button class="btn btn-sm btn-danger" data-sid="' + escapeHtml(fullSid) + '" data-action="admin-kill-session">Kick</button></td>';
         html += '</tr>';
     }
     html += '</table></div>';
@@ -193,8 +193,8 @@ async function renderAdminQueue(el) {
 
     let html = '<div class="admin-toolbar">';
     html += '<div class="admin-toolbar-left">';
-    html += '<button class="btn btn-sm" onclick="adminPauseQueue()">Tam dung</button>';
-    html += '<button class="btn btn-sm btn-primary" onclick="adminResumeQueue()">Tiep tuc</button>';
+    html += '<button class="btn btn-sm" data-action="admin-pause-queue">Tam dung</button>';
+    html += '<button class="btn btn-sm btn-primary" data-action="admin-resume-queue">Tiep tuc</button>';
     html += '</div>';
     html += '<span class="admin-count">' + items.length + ' muc</span>';
     html += '</div>';
@@ -219,7 +219,7 @@ async function renderAdminQueue(el) {
         html += '<td class="admin-ellipsis" title="' + escapeHtml(q.original_filename || '') + '">' + escapeHtml(q.original_filename || '-') + '</td>';
         html += '<td>' + statusBadge + '</td>';
         html += '<td class="admin-ellipsis">' + escapeHtml(q.progress_message || '-') + '</td>';
-        html += '<td><button class="btn btn-sm btn-danger" onclick="adminCancelQueue(' + q.file_id + ')">Huy</button></td>';
+        html += '<td><button class="btn btn-sm btn-danger" data-action="admin-cancel-queue" data-file-id="' + q.file_id + '">Huy</button></td>';
         html += '</tr>';
     }
     html += '</table></div>';
@@ -251,7 +251,7 @@ async function renderAdminUsers(el) {
 
     let html = '<div class="admin-toolbar">';
     html += '<div class="admin-toolbar-left">';
-    html += '<button class="btn btn-sm btn-primary" onclick="adminShowCreateUser()">Tao nguoi dung</button>';
+    html += '<button class="btn btn-sm btn-primary" data-action="admin-show-create-user">Tao nguoi dung</button>';
     html += '</div>';
     html += '<span class="admin-count">' + users.length + ' nguoi dung</span>';
     html += '</div>';
@@ -274,9 +274,9 @@ async function renderAdminUsers(el) {
         html += '<td>' + active + '</td>';
         html += '<td class="admin-actions">';
         if (!isAdmin) {
-            html += '<button class="btn btn-sm" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" onclick="adminResetPassword(parseInt(this.dataset.uid), this.dataset.uname)" title="Doi mat khau">MK</button>';
-            html += '<button class="btn btn-sm" onclick="adminToggleActive(' + u.id + ',' + (u.is_active ? 0 : 1) + ')" title="' + (u.is_active ? 'Khoa' : 'Mo khoa') + '">' + (u.is_active ? 'Khoa' : 'Mo') + '</button>';
-            html += '<button class="btn btn-sm btn-danger" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" onclick="adminDeleteUser(parseInt(this.dataset.uid), this.dataset.uname)" title="Xoa">Xoa</button>';
+            html += '<button class="btn btn-sm" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" data-action="admin-reset-password" title="Doi mat khau">MK</button>';
+            html += '<button class="btn btn-sm" data-action="admin-toggle-active" data-uid="' + u.id + '" data-active="' + (u.is_active ? 0 : 1) + '" title="' + (u.is_active ? 'Khoa' : 'Mo khoa') + '">' + (u.is_active ? 'Khoa' : 'Mo') + '</button>';
+            html += '<button class="btn btn-sm btn-danger" data-uid="' + u.id + '" data-uname="' + escapeHtml(u.username) + '" data-action="admin-delete-user" title="Xoa">Xoa</button>';
         }
         html += '</td>';
         html += '</tr>';
@@ -296,8 +296,8 @@ function adminShowCreateUser() {
         '<div class="form-group"><label>Gioi han luu tru (GB, 0 = khong gioi han)</label><input id="adm-new-storage" type="number" value="5" min="0" step="0.5"></div>' +
         '<div id="adm-create-err" class="error-msg"></div>' +
         '<div class="admin-form-actions">' +
-        '<button class="btn btn-primary" onclick="adminDoCreateUser()">Tao nguoi dung</button>' +
-        '<button class="btn" onclick="switchAdminTab(\'users\')">Huy</button>' +
+        '<button class="btn btn-primary" data-action="admin-create-user">Tao nguoi dung</button>' +
+        '<button class="btn" data-action="switch-admin-tab" data-tab="users">Huy</button>' +
         '</div>' +
         '</div>';
     document.getElementById('adm-new-user').focus();
@@ -408,8 +408,8 @@ async function renderAdminConfig(el) {
     // Backend radio
     html += '<div class="form-group">';
     html += '<label>Backend:</label><br>';
-    html += '<label class="form-check" style="margin-bottom:4px"><input type="radio" name="cfg-summ-backend" value="llama" ' + (!isOllama ? 'checked' : '') + ' onchange="adminToggleSummBackend()"> llama.cpp (GGUF local — nhanh, chinh xac)</label><br>';
-    html += '<label class="form-check"><input type="radio" name="cfg-summ-backend" value="ollama" ' + (isOllama ? 'checked' : '') + ' onchange="adminToggleSummBackend()"> Ollama (goi API server)</label>';
+    html += '<label class="form-check" style="margin-bottom:4px"><input type="radio" name="cfg-summ-backend" value="llama" ' + (!isOllama ? 'checked' : '') + ' data-change-action="admin-toggle-summ-backend"> llama.cpp (GGUF local — nhanh, chinh xac)</label><br>';
+    html += '<label class="form-check"><input type="radio" name="cfg-summ-backend" value="ollama" ' + (isOllama ? 'checked' : '') + ' data-change-action="admin-toggle-summ-backend"> Ollama (goi API server)</label>';
     html += '</div>';
 
     // llama.cpp section
@@ -419,7 +419,7 @@ async function renderAdminConfig(el) {
     html += '<input type="text" id="cfg-summ-path" value="' + escapeHtml(isOllama ? '' : summPath) + '" placeholder="Duong dan file .gguf" style="width:100%">';
     html += '</div>';
     html += '<div class="admin-form-actions">';
-    html += '<button class="btn" id="btn-dl-model" onclick="adminDownloadModel()">Tai model Qwen3.5-4B (~2.7 GB)</button>';
+    html += '<button class="btn" id="btn-dl-model" data-action="admin-download-model">Tai model Qwen3.5-4B (~2.7 GB)</button>';
     html += '</div>';
     html += '</div>';
 
@@ -437,7 +437,7 @@ async function renderAdminConfig(el) {
 
     // Save
     html += '<div class="admin-form-actions" style="margin-top:12px">';
-    html += '<button class="btn btn-primary" onclick="adminSaveConfig()">Luu cau hinh</button>';
+    html += '<button class="btn btn-primary" data-action="admin-save-config">Luu cau hinh</button>';
     html += '</div>';
 
     html += '<div id="cfg-summ-msg" class="form-hint" style="margin-top:8px"></div>';
@@ -466,7 +466,7 @@ async function renderAdminConfig(el) {
     }
 
     html += '<div class="admin-form-actions">';
-    html += '<button class="btn btn-primary" onclick="adminSaveGeneralConfig()">Luu cau hinh chung</button>';
+    html += '<button class="btn btn-primary" data-action="admin-save-general-config">Luu cau hinh chung</button>';
     html += '</div>';
     html += '</div></div>';
 

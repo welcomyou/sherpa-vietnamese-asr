@@ -12,7 +12,7 @@ WASM threading.
 import json
 import logging
 import os
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import FastAPI, HTTPException, Request
@@ -26,6 +26,7 @@ logger = logging.getLogger("asr.offline_pwa")
 
 app = FastAPI(title="Sherpa Vietnamese ASR Offline PWA", docs_url=None, redoc_url=None, openapi_url=None)
 SHARED_STATIC_DIR = os.path.join(BASE_DIR, "shared_ui", "static")
+_ALLOWED_REMOTE_MODEL_HOSTS = {"huggingface.co", "github.com", "raw.githubusercontent.com"}
 
 
 class OfflinePWASecurityMiddleware(BaseHTTPMiddleware):
@@ -45,7 +46,11 @@ class OfflinePWASecurityMiddleware(BaseHTTPMiddleware):
             "img-src 'self' data:; "
             "connect-src 'self'; "
             "media-src 'self' blob:; "
-            "font-src 'self'"
+            "font-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'; "
+            "form-action 'self'"
         )
         return response
 
@@ -124,14 +129,41 @@ def _resolve_local_path(item: dict) -> str | None:
     return status["path"] if status["ready"] else None
 
 
-def _iter_hf_file(url: str):
+def _validate_remote_model_url(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in _ALLOWED_REMOTE_MODEL_HOSTS:
+        raise HTTPException(400, "Remote model URL is not allowed")
+    return url
+
+
+def _iter_hf_file(url: str, expected_bytes: int | None = None):
     req = UrlRequest(url, headers={"User-Agent": "asr-vn-offline-pwa/1.0"})
     with urlopen(req, timeout=60) as resp:
+        max_bytes = offline_pwa_config.max_model_download_bytes
+        header_size = resp.headers.get("Content-Length")
+        if header_size:
+            try:
+                remote_size = int(header_size)
+                if remote_size > max_bytes:
+                    raise RuntimeError("Remote model file exceeds configured size limit")
+                if expected_bytes and remote_size != expected_bytes:
+                    raise RuntimeError("Remote model file size does not match manifest")
+            except ValueError:
+                pass
+        downloaded = 0
         while True:
             chunk = resp.read(1024 * 1024)
             if not chunk:
                 break
+            downloaded += len(chunk)
+            if downloaded > max_bytes:
+                raise RuntimeError("Remote model file exceeds configured size limit")
+            if expected_bytes and downloaded > expected_bytes:
+                raise RuntimeError("Remote model file exceeds manifest size")
             yield chunk
+        if expected_bytes and downloaded != expected_bytes:
+            raise RuntimeError("Remote model file size does not match manifest")
 
 
 def _find_manifest_item(file_id: str) -> dict:
@@ -290,16 +322,23 @@ async def model_file(file_id: str):
     path = item.get("path")
     if not repo or not path:
         raise HTTPException(404, "No HuggingFace repo/path for model file")
+    if not item.get("bytes") or not item.get("sha256"):
+        raise HTTPException(500, "Remote model manifest must include bytes and sha256")
+    if int(item["bytes"]) > offline_pwa_config.max_model_download_bytes:
+        raise HTTPException(413, "Model file exceeds configured size limit")
 
-    remote_url = item.get("url") or f"https://huggingface.co/{repo}/resolve/main/{quote(path)}"
+    remote_url = _validate_remote_model_url(
+        item.get("url") or f"https://huggingface.co/{repo}/resolve/main/{quote(path)}"
+    )
     if not offline_pwa_config.model_proxy_enabled:
         return RedirectResponse(remote_url)
     logger.info("[OfflinePWA] Proxying model file %s from %s", file_id, remote_url)
-    headers = {}
-    if item.get("bytes"):
-        headers["Content-Length"] = str(item["bytes"])
+    headers = {
+        "Content-Length": str(item["bytes"]),
+        "X-Content-SHA256": str(item["sha256"]),
+    }
     return StreamingResponse(
-        _iter_hf_file(remote_url),
+        _iter_hf_file(remote_url, int(item["bytes"])),
         media_type="application/octet-stream",
         headers=headers,
     )

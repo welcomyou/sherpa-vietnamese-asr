@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Sherpa ASR Offline",
   "short_name": "ASR Offline",
-  "description": "Offline-first PWA shell for browser-side Vietnamese ASR",
+  "description": "Ứng dụng nhận dạng giọng nói tiếng Việt chạy offline trên trình duyệt",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
@@ -24,4 +24,3 @@
     }
   ]
 }
-

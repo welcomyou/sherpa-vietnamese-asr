@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey)
-![Version](https://img.shields.io/badge/Version-2.6.2-orange)
+![Version](https://img.shields.io/badge/Version-2.6.3-orange)
 ![Runtime](https://img.shields.io/badge/Runtime-ONNX%20Runtime-success)
 
 ## Gói phát hành
@@ -14,11 +14,11 @@ Tải đúng các file cùng version trong [GitHub Releases](https://github.com/
 
 | File | Dùng cho | Ghi chú |
 |---|---|---|
-| `sherpa-vietnamese-asr-2.6.2.zip` | Desktop app | Base CPU-only, có GUI PyQt6, ffmpeg/ffprobe và model CPU |
-| `sherpa-vietnamese-asr-service-2.6.2.zip` | Web Service + PWA offline | Base CPU-only, có FastAPI, Web UI, PWA offline, ffmpeg/ffprobe |
-| `gpu-addon-directml-win64-2.6.2.zip` | GPU NVIDIA hoặc AMD | ONNX Runtime DirectML, app-local add-on |
-| `gpu-addon-intel-openvino-win64-2.6.2.zip` | Intel GPU / Intel iGPU | ONNX Runtime OpenVINO, app-local add-on |
-| `gpu-models-win64-2.6.2.zip` | Model cần cho GPU | Hiện chứa `models/vibert-capu/vibert-capu.onnx`; CAM++ GPU graph tự sinh khi cần |
+| `sherpa-vietnamese-asr-2.6.3.zip` | Desktop app | Base CPU-only, có GUI PyQt6, ffmpeg/ffprobe và model CPU |
+| `sherpa-vietnamese-asr-service-2.6.3.zip` | Web Service + PWA offline | Base CPU-only, có FastAPI, Web UI, PWA offline, ffmpeg/ffprobe |
+| `gpu-addon-directml-win64-2.6.3.zip` | GPU NVIDIA hoặc AMD | ONNX Runtime DirectML, app-local add-on |
+| `gpu-addon-intel-openvino-win64-2.6.3.zip` | Intel GPU / Intel iGPU | ONNX Runtime OpenVINO, app-local add-on |
+| `gpu-models-win64-2.6.3.zip` | Model cần cho GPU | Hiện chứa `models/vibert-capu/vibert-capu.onnx`; CAM++ GPU graph tự sinh khi cần |
 
 Base zip là gói cần tải đầu tiên. GPU add-on và GPU models chỉ cần tải khi màn hình **Tối ưu thiết bị** báo máy có GPU phù hợp và cần cài thêm.
 
@@ -27,13 +27,13 @@ Base zip là gói cần tải đầu tiên. GPU add-on và GPU models chỉ cầ
 Desktop:
 
 ```text
-sherpa-vietnamese-asr-2.6.2\sherpa-vietnamese-asr.bat
+sherpa-vietnamese-asr-2.6.3\sherpa-vietnamese-asr.bat
 ```
 
 Web Service:
 
 ```text
-sherpa-vietnamese-asr-service-2.6.2\sherpa-vietnamese-asr-service.bat
+sherpa-vietnamese-asr-service-2.6.3\sherpa-vietnamese-asr-service.bat
 ```
 
 Web Service mặc định chạy HTTPS tại `https://<IP-may-chu>:8443`. Tài khoản admin mặc định: `admin` / `admin`.
@@ -43,26 +43,26 @@ Web Service mặc định chạy HTTPS tại `https://<IP-may-chu>:8443`. Tài k
 Ví dụ bạn đã giải nén desktop vào:
 
 ```text
-D:\Apps\sherpa-vietnamese-asr-2.6.2\
+D:\Apps\sherpa-vietnamese-asr-2.6.3\
 ```
 
 Khi cài add-on, hãy giải nén zip vào đúng thư mục gốc này, tức là sau khi giải nén phải có các đường dẫn sau:
 
 ```text
-D:\Apps\sherpa-vietnamese-asr-2.6.2\gpu_addons\directml\Lib\site-packages\onnxruntime\
-D:\Apps\sherpa-vietnamese-asr-2.6.2\models\vibert-capu\vibert-capu.onnx
+D:\Apps\sherpa-vietnamese-asr-2.6.3\gpu_addons\directml\Lib\site-packages\onnxruntime\
+D:\Apps\sherpa-vietnamese-asr-2.6.3\models\vibert-capu\vibert-capu.onnx
 ```
 
 Với Intel OpenVINO, đường dẫn add-on phải là:
 
 ```text
-D:\Apps\sherpa-vietnamese-asr-2.6.2\gpu_addons\intel-openvino\Lib\site-packages\onnxruntime\
+D:\Apps\sherpa-vietnamese-asr-2.6.3\gpu_addons\intel-openvino\Lib\site-packages\onnxruntime\
 ```
 
 Không giải nén kiểu tạo thêm một lớp thư mục như:
 
 ```text
-D:\Apps\sherpa-vietnamese-asr-2.6.2\gpu-addon-directml-win64-2.6.2\gpu_addons\...
+D:\Apps\sherpa-vietnamese-asr-2.6.3\gpu-addon-directml-win64-2.6.3\gpu_addons\...
 ```
 
 Sau khi cài add-on, đóng hẳn app, mở lại, bấm **Tối ưu thiết bị**. Nếu muốn quay về CPU, chọn **CPU-only** trong hộp thoại tối ưu. Kết quả calibration đã lưu sẽ không bị xóa khi chuyển qua lại giữa CPU-only và GPU auto.
@@ -72,9 +72,9 @@ Sau khi cài add-on, đóng hẳn app, mở lại, bấm **Tối ưu thiết b�
 | Phần cứng | Provider ưu tiên | Gói cần tải |
 |---|---|---|
 | Không có GPU | CPUExecutionProvider | Không cần gói GPU |
-| NVIDIA GPU | DirectML | `gpu-addon-directml-win64-2.6.2.zip` + `gpu-models-win64-2.6.2.zip` nếu app báo thiếu |
-| AMD GPU / AMD iGPU | DirectML | `gpu-addon-directml-win64-2.6.2.zip` + `gpu-models-win64-2.6.2.zip` nếu app báo thiếu |
-| Intel GPU / Intel iGPU | OpenVINO | `gpu-addon-intel-openvino-win64-2.6.2.zip` + `gpu-models-win64-2.6.2.zip` nếu app báo thiếu |
+| NVIDIA GPU | DirectML | `gpu-addon-directml-win64-2.6.3.zip` + `gpu-models-win64-2.6.3.zip` nếu app báo thiếu |
+| AMD GPU / AMD iGPU | DirectML | `gpu-addon-directml-win64-2.6.3.zip` + `gpu-models-win64-2.6.3.zip` nếu app báo thiếu |
+| Intel GPU / Intel iGPU | OpenVINO | `gpu-addon-intel-openvino-win64-2.6.3.zip` + `gpu-models-win64-2.6.3.zip` nếu app báo thiếu |
 | AMD CPU, không có GPU | CPUExecutionProvider | Không cần gói GPU |
 
 Calibration chỉ chọn GPU khi inference nhanh hơn CPU ít nhất 20% và sai khác số học nằm trong ngưỡng cho phép. Nếu GPU không đạt, stage đó vẫn chạy CPU.

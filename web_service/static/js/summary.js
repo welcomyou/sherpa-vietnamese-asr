@@ -102,7 +102,7 @@ function renderSummaryEmpty() {
     container.innerHTML = `
         <div class="summary-empty">
             <p>Chưa có tóm tắt cho file này.</p>
-            <button class="btn-summarize" onclick="triggerSummarize()">📝 Tạo tóm tắt</button>
+            <button class="btn-summarize" data-action="trigger-summarize">📝 Tạo tóm tắt</button>
             <p class="summary-hint">Quá trình tóm tắt mất khoảng 1-2 phút. Bạn có thể nghe lại audio trong lúc đợi.</p>
         </div>`;
 }
@@ -179,7 +179,7 @@ function renderSummary(summary) {
 
     // Re-summarize button
     html += `<div class="summary-actions">
-        <button class="btn-resummarize" onclick="triggerSummarize()">🔄 Tóm tắt lại</button>
+        <button class="btn-resummarize" data-action="trigger-summarize">🔄 Tóm tắt lại</button>
     </div>`;
 
     html += '</div>';
@@ -198,7 +198,7 @@ function renderCitations(refs, segments) {
             const ss = String(Math.floor(t % 60)).padStart(2, '0');
             timeStr = `${mm}:${ss}`;
         }
-        html += `<a class="citation-link" onclick="citationSeek(${ref})" title="Nghe đoạn gốc">▶${timeStr}</a> `;
+        html += `<a class="citation-link" data-action="citation-seek" data-ref="${ref}" title="Nghe đoạn gốc">▶${timeStr}</a> `;
     }
     html += '</span>';
     return html;
@@ -251,7 +251,7 @@ function onSummaryError(data) {
             <div class="summary-error">
                 ❌ Lỗi tóm tắt: ${esc(data.error)}
                 <br><br>
-                <button class="btn-summarize" onclick="triggerSummarize()">🔄 Thử lại</button>
+                <button class="btn-summarize" data-action="trigger-summarize">🔄 Thử lại</button>
             </div>`;
     }
 }

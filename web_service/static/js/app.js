@@ -47,6 +47,159 @@ function isAppInstalled() {
     return isInStandaloneMode();
 }
 
+function setupCspSafeEventDelegation() {
+    const closestEventTarget = (event, selector) => {
+        const target = event.target;
+        if (target && typeof target.closest === 'function') return target.closest(selector);
+        return target?.parentElement?.closest(selector) || null;
+    };
+
+    const clickActions = {
+        'show-about': () => showAboutDialog(),
+        'show-login': () => showLoginModal(),
+        'toggle-admin-panel': () => toggleAdminPanel(),
+        'toggle-meetings-panel': () => toggleMeetingsPanel(),
+        'toggle-user-menu': (event) => toggleUserMenu(event),
+        'show-change-password': () => showChangePasswordModal(),
+        logout: () => logout(),
+        'toggle-panel': (_event, target) => togglePanel(target.dataset.panel),
+        'show-cert-guide': () => showCertGuide(),
+        'install-pwa': () => installPWA(),
+        'run-server-calibration': () => runServerCalibration(),
+        'clear-file': () => clearFile(),
+        'process-file': () => processFile(),
+        'cancel-process': () => cancelProcess(),
+        'load-json': () => loadJSON(),
+        'save-json': () => saveJSON(),
+        'copy-text': () => copyText(),
+        'switch-tab': (_event, target) => switchTab(target.dataset.tab),
+        'search-nav': (_event, target) => searchNav(parseInt(target.dataset.dir, 10)),
+        'clear-search': () => clearSearch(),
+        'toggle-play': () => togglePlay(),
+        'save-edits': () => saveEdits(),
+        'scroll-top': () => scrollToTop(),
+        'resolve-calibration-mode': (_event, target) => resolveCalibrationModeChoice(target.dataset.choice),
+        'hide-login': () => hideLoginModal(),
+        'login-submit': () => doLogin(),
+        'hide-split-speaker': () => hideSplitSpeakerModal(),
+        'split-speaker-submit': () => doSplitSpeaker(),
+        'hide-change-password': () => hideChangePasswordModal(),
+        'change-password-submit': () => doChangePassword(),
+        'ctx-split-speaker': () => ctxSplitSpeaker(),
+        'ctx-merge-up': () => ctxMergeUp(),
+        'ctx-merge-down': () => ctxMergeDown(),
+        'ctx-rename-speaker': () => ctxRenameSpeaker(),
+        'ctx-copy': () => ctxCopy(),
+        'hide-rename': () => hideRenameModal(),
+        'rename-speaker': (_event, target) => doRenameSpeaker(target.dataset.all === 'true'),
+        'hide-meeting-name': () => hideMeetingNameModal(),
+        'confirm-meeting-name': () => confirmMeetingName(),
+        'close-meetings-panel': () => closeMeetingsPanel(),
+        'delete-selected-meetings': () => deleteSelectedMeetings(),
+        'close-admin-panel': () => closeAdminPanel(),
+        'switch-admin-tab': (_event, target) => switchAdminTab(
+            target.dataset.tab,
+            target.closest('.admin-tabs') ? target : null
+        ),
+        'load-meeting': (_event, target) => loadMeeting(parseInt(target.dataset.meetingId, 10)),
+        'meetings-page-prev': () => meetingsPagePrev(),
+        'meetings-page-next': () => meetingsPageNext(),
+        'trigger-summarize': () => triggerSummarize(),
+        'citation-seek': (_event, target) => citationSeek(parseInt(target.dataset.ref, 10)),
+        'admin-clear-rate-limits': () => adminClearRateLimits(),
+        'admin-cleanup-sessions': () => adminCleanupSessions(),
+        'admin-kill-session': (_event, target) => adminKillSession(target.dataset.sid),
+        'admin-pause-queue': () => adminPauseQueue(),
+        'admin-resume-queue': () => adminResumeQueue(),
+        'admin-cancel-queue': (_event, target) => adminCancelQueue(parseInt(target.dataset.fileId, 10)),
+        'admin-show-create-user': () => adminShowCreateUser(),
+        'admin-reset-password': (_event, target) => adminResetPassword(parseInt(target.dataset.uid, 10), target.dataset.uname),
+        'admin-toggle-active': (_event, target) => adminToggleActive(parseInt(target.dataset.uid, 10), parseInt(target.dataset.active, 10)),
+        'admin-delete-user': (_event, target) => adminDeleteUser(parseInt(target.dataset.uid, 10), target.dataset.uname),
+        'admin-create-user': () => adminDoCreateUser(),
+        'admin-download-model': () => adminDownloadModel(),
+        'admin-save-config': () => adminSaveConfig(),
+        'admin-save-general-config': () => adminSaveGeneralConfig(),
+        'switch-cert-tab': (_event, target) => switchCertTab(target.dataset.deviceId),
+        'remove-closest': (_event, target) => target.closest(target.dataset.closest)?.remove(),
+    };
+
+    const inputActions = {
+        'search-input': () => onSearchInput(),
+        'seek-audio': (_event, target) => seekAudio(target.value),
+        'search-meetings': () => searchMeetings(),
+    };
+
+    const changeActions = {
+        'sync-split-speaker': (_event, target) => {
+            document.getElementById('split-speaker-input').value = target.value;
+        },
+        'sync-rename-speaker': (_event, target) => {
+            document.getElementById('rename-input').value = target.value;
+        },
+        'toggle-select-all': () => toggleSelectAll(),
+        'json-selected': (_event, target) => onJSONSelected(target),
+        'admin-toggle-summ-backend': () => adminToggleSummBackend(),
+    };
+
+    const enterKeyActions = {
+        'login-submit': () => doLogin(),
+        'split-speaker-submit': () => doSplitSpeaker(),
+        'change-password-submit': () => doChangePassword(),
+        'confirm-meeting-name': () => confirmMeetingName(),
+    };
+
+    document.addEventListener('click', (event) => {
+        if (closestEventTarget(event, '[data-stop-click]')) {
+            event.stopPropagation();
+            return;
+        }
+        const target = closestEventTarget(event, '[data-action]');
+        if (!target) return;
+        const handler = clickActions[target.dataset.action];
+        if (!handler) return;
+        event.preventDefault();
+        handler(event, target);
+    });
+
+    document.addEventListener('input', (event) => {
+        const target = closestEventTarget(event, '[data-input-action]');
+        if (!target) return;
+        const handler = inputActions[target.dataset.inputAction];
+        if (handler) handler(event, target);
+    });
+
+    document.addEventListener('change', (event) => {
+        const target = closestEventTarget(event, '[data-change-action]');
+        if (!target) return;
+        const handler = changeActions[target.dataset.changeAction];
+        if (handler) handler(event, target);
+    });
+
+    document.addEventListener('keydown', (event) => {
+        const target = closestEventTarget(event, '[data-key-action]');
+        if (!target) return;
+        if (target.dataset.keyAction === 'search-keydown') {
+            onSearchKeydown(event);
+            return;
+        }
+        if (event.key !== 'Enter') return;
+        const handler = enterKeyActions[target.dataset.keyAction];
+        if (!handler) return;
+        event.preventDefault();
+        handler(event, target);
+    });
+
+    document.addEventListener('dblclick', (event) => {
+        const target = closestEventTarget(event, '[data-dbl-action]');
+        if (!target || target.dataset.dblAction !== 'rename-meeting') return;
+        event.stopPropagation();
+        startRenameMeeting(parseInt(target.dataset.meetingId, 10), target);
+    });
+}
+
+setupCspSafeEventDelegation();
+
 // Hien/an install panel
 window.addEventListener('DOMContentLoaded', () => {
     const panel = document.getElementById('install-panel');
@@ -133,7 +286,7 @@ function showIOSInstallGuide() {
                 '<li><strong>Vuốt lên</strong> trong menu chia sẻ để tìm mục <strong>"Thêm vào Màn hình chính"</strong></li>' +
                 '<li>Nhấn <strong>"Thêm"</strong> (góc phải)</li>' +
             '</ol>' +
-            '<button class="btn btn-sm" style="width:100%" onclick="this.closest(\'.ios-install-overlay\').remove()">Đã hiểu</button>' +
+            '<button class="btn btn-sm" style="width:100%" data-action="remove-closest" data-closest=".ios-install-overlay">Đã hiểu</button>' +
         '</div>';
     document.body.appendChild(overlay);
 }
@@ -216,7 +369,7 @@ function buildCertGuideHTML(activeDevice) {
     html += '<div class="cert-device-tabs">';
     devices.forEach((d) => {
         const active = d.id === activeDevice ? ' active' : '';
-        html += '<button class="cert-tab' + active + '" onclick="switchCertTab(\'' + d.id + '\')">' + d.icon + ' ' + d.label + '</button>';
+        html += '<button class="cert-tab' + active + '" data-action="switch-cert-tab" data-device-id="' + d.id + '">' + d.icon + ' ' + d.label + '</button>';
     });
     html += '</div>';
 
@@ -237,12 +390,8 @@ function switchCertTab(deviceId) {
     document.querySelectorAll('.cert-tab').forEach((el) => el.classList.remove('active'));
     const tab = document.getElementById('cert-tab-' + deviceId);
     if (tab) tab.style.display = '';
-    document.querySelectorAll('.cert-tab').forEach((el) => {
-        if (el.onclick && el.textContent.toLowerCase().includes(deviceId)) el.classList.add('active');
-    });
-    // Dung data attribute de match chinh xac
     document.querySelectorAll('.cert-tab').forEach((btn) => {
-        if (btn.getAttribute('onclick') === "switchCertTab('" + deviceId + "')") btn.classList.add('active');
+        if (btn.dataset.deviceId === deviceId) btn.classList.add('active');
     });
 }
 
@@ -322,19 +471,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('diarization-options').style.display = e.target.checked ? '' : 'none';
     });
 
-    // Check stored auth
-    const storedToken = localStorage.getItem('authToken');
-    if (storedToken) {
-        window.authToken = storedToken;
-        try {
-            const me = await apiFetch('/api/auth/me');
-            showLoggedIn(me);
-        } catch {
-            localStorage.removeItem('authToken');
-            window.authToken = null;
-            updateHeaderTitle(false);
-        }
-    } else {
+    // Check auth via HttpOnly cookie; do not persist JWT in localStorage.
+    try {
+        const me = await apiFetch('/api/auth/me');
+        window.authToken = '__cookie__';
+        showLoggedIn(me);
+    } catch {
+        window.authToken = null;
         updateHeaderTitle(false);
     }
 
@@ -939,6 +1082,8 @@ async function doProcessFile(meetingName) {
 
         if (result.position > 0) {
             showQueuePosition(result.position, result.total);
+            showProcessProgress('File đã được đưa vào hàng đợi. Vui lòng đợi tới lượt xử lý.', 0, '');
+            showToast('File đã vào hàng đợi. Vui lòng đợi tới lượt xử lý.', 'success');
         }
 
     } catch (e) {
@@ -1633,8 +1778,7 @@ async function doLogin() {
             body: JSON.stringify({ username, password }),
         });
 
-        window.authToken = resp.token;
-        localStorage.setItem('authToken', resp.token);
+        window.authToken = '__cookie__';
         showLoggedIn(resp.user);
         hideLoginModal();
         showToast(`Xin chào, ${resp.user.username}!`, 'success');
@@ -1669,7 +1813,6 @@ async function logout() {
     }
 
     window.authToken = null;
-    localStorage.removeItem('authToken');
 
     // Reset toàn bộ UI về trạng thái anonymous ban đầu
     document.getElementById('auth-anonymous').style.display = 'flex';
@@ -1861,7 +2004,7 @@ async function apiFetch(url, options = {}) {
         headers['Authorization'] = 'Bearer ' + window.authToken;
     }
 
-    const fetchOptions = { method: options.method || 'GET', headers };
+    const fetchOptions = { method: options.method || 'GET', headers, credentials: 'same-origin' };
 
     if (options.body) {
         if (options.rawBody) {
@@ -1879,7 +2022,6 @@ async function apiFetch(url, options = {}) {
         // Token hết hạn → tự động logout
         if (resp.status === 401 && window.authToken) {
             window.authToken = null;
-            localStorage.removeItem('authToken');
             document.getElementById('auth-anonymous').style.display = 'flex';
             document.getElementById('auth-loggedin').style.display = 'none';
             updateHeaderTitle(false);

@@ -51,6 +51,135 @@ def _stage_execution_provider_config(value=None):
         return {}
 
 
+_EXECUTION_PROVIDER_VALUES = {
+    "cpu", "auto", "cuda", "nvidia", "openvino", "intel",
+    "directml", "dml", "amd", "rocm", "none", "off",
+}
+_STAGE_PROVIDER_KEYS = {
+    "asr", "audio_decode", "vad", "diarization", "diarization_campp",
+    "diarization_pyannote", "speaker_postprocess", "dnsmos", "punctuation",
+}
+_PROCESS_CONFIG_MAX_BYTES = 64 * 1024
+_SAFE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
+
+
+async def _read_limited_json(request: Request, max_bytes: int = _PROCESS_CONFIG_MAX_BYTES) -> dict:
+    body = await request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(413, "Request config qua lon")
+    if not body:
+        return {}
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "JSON khong hop le")
+    if not isinstance(parsed, dict):
+        raise HTTPException(400, "Request body phai la JSON object")
+    return parsed
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
+def _bounded_int(value, default: int, low: int, high: int, field: str) -> int:
+    if value is None or value == "":
+        value = default
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"Gia tri khong hop le cho {field}")
+    return max(low, min(high, ivalue))
+
+
+def _validate_provider(value, field: str) -> str:
+    provider = str(value or "cpu").strip().lower()
+    if provider not in _EXECUTION_PROVIDER_VALUES:
+        raise HTTPException(400, f"Execution provider khong hop le cho {field}")
+    return provider
+
+
+def _validate_stage_providers(value) -> dict:
+    raw = _stage_execution_provider_config(value)
+    cleaned = {}
+    for key, provider in raw.items():
+        stage = str(key).strip()
+        if stage not in _STAGE_PROVIDER_KEYS:
+            raise HTTPException(400, f"Stage provider khong hop le: {stage}")
+        cleaned[stage] = _validate_provider(provider, stage)
+    return cleaned
+
+
+def _validate_model_id(model_id: str, allowed_ids: set[str], field: str) -> str:
+    value = str(model_id or "").strip()
+    if not value or not _SAFE_MODEL_ID_RE.match(value):
+        raise HTTPException(400, f"{field} khong hop le")
+    if allowed_ids and value not in allowed_ids:
+        raise HTTPException(400, f"{field} khong nam trong danh sach model kha dung")
+    return value
+
+
+def _available_model_ids() -> tuple[set[str], set[str]]:
+    try:
+        models = _get_models_sync()
+    except Exception as exc:
+        logger.warning("Model allowlist unavailable, falling back to format-only validation: %s", exc)
+        return set(), set()
+    asr_ids = {m["id"] for m in models.get("asr_models", []) if m.get("id")}
+    speaker_ids = {m["id"] for m in models.get("speaker_models", []) if m.get("id")}
+    return asr_ids, speaker_ids
+
+
+def _build_process_config(body: dict) -> dict:
+    asr_ids, speaker_ids = _available_model_ids()
+    model_id = _validate_model_id(
+        body.get("model", server_config.get("default_asr_model")),
+        asr_ids,
+        "model",
+    )
+
+    speaker_diarization = _as_bool(body.get("speaker_diarization", True), True)
+    speaker_model = str(body.get("speaker_model", server_config.get("default_speaker_model"))).strip()
+    if speaker_diarization:
+        speaker_model = _validate_model_id(speaker_model, speaker_ids, "speaker_model")
+    elif speaker_model and not _SAFE_MODEL_ID_RE.match(speaker_model):
+        raise HTTPException(400, "speaker_model khong hop le")
+
+    return {
+        "model": model_id,
+        "speaker_diarization": speaker_diarization,
+        "speaker_model": speaker_model,
+        "num_speakers": _bounded_int(body.get("num_speakers", 0), 0, 0, 20, "num_speakers"),
+        "punctuation_confidence": _bounded_int(
+            body.get("punctuation_confidence", int(server_config.get("default_punctuation_confidence"))),
+            int(server_config.get("default_punctuation_confidence")), 1, 10, "punctuation_confidence"
+        ),
+        "case_confidence": _bounded_int(
+            body.get("case_confidence", int(server_config.get("default_case_confidence"))),
+            int(server_config.get("default_case_confidence")), 1, 10, "case_confidence"
+        ),
+        "diarization_threshold": _bounded_int(
+            body.get("diarization_threshold", int(server_config.get("default_diarization_threshold"))),
+            int(server_config.get("default_diarization_threshold")), 0, 100, "diarization_threshold"
+        ),
+        "execution_provider": _validate_provider(
+            body.get("execution_provider", server_config.get("execution_provider") or "cpu"),
+            "execution_provider",
+        ),
+        "stage_execution_providers": _validate_stage_providers(body.get("stage_execution_providers")),
+        "rms_normalize": _as_bool(body.get("rms_normalize", False), False),
+        "bypass_vad": _as_bool(body.get("bypass_vad", False), False),
+    }
+
+
 def _revoke_token(token: str, exp: float):
     """Thêm token vào danh sách bị thu hồi."""
     _revoked_tokens[token] = exp
@@ -194,18 +323,22 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        # A05: 'unsafe-inline' giữ cho scripts vì PWA dùng inline handlers.
+        # A05: inline JS handlers have been moved to delegated listeners.
         # connect-src giới hạn về 'self' thay vì wss:/ws: mở toàn bộ.
         host = request.headers.get("host", "").split(":")[0] or "localhost"
         _ws_scheme = "ws" if server_config.http_mode else "wss"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "img-src 'self' data:; "
             f"connect-src 'self' {_ws_scheme}://{host} {_ws_scheme}://{host}:*; "
             "media-src 'self' blob:; "
-            "font-src 'self' https://fonts.gstatic.com"
+            "font-src 'self' https://fonts.gstatic.com; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "frame-ancestors 'none'; "
+            "form-action 'self'"
         )
         if not server_config.http_mode:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -243,9 +376,11 @@ def get_session_id(request: Request) -> str:
 def get_current_user(request: Request) -> Optional[dict]:
     """Lấy user từ JWT token (nếu có). Trả về None nếu anonymous, deactivated, hoặc token bị revoke."""
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
+    token = auth[7:] if auth.startswith("Bearer ") else request.cookies.get("auth_token", "")
+    if token == "__cookie__":
+        token = request.cookies.get("auth_token", "")
+    if not token:
         return None
-    token = auth[7:]
     # A07: Kiểm tra token đã bị revoke (logout)
     if is_token_revoked(token):
         return None
@@ -859,29 +994,8 @@ async def process_file(
     if file_record["status"] in ("processing", "queued"):
         raise HTTPException(400, "File đang được xử lý")
 
-    # Lấy config từ request body
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    config = {
-        "model": body.get("model", server_config.get("default_asr_model")),
-        "speaker_diarization": body.get("speaker_diarization", True),
-        "speaker_model": body.get("speaker_model", server_config.get("default_speaker_model")),
-        "num_speakers": body.get("num_speakers", 0),
-        "punctuation_confidence": body.get("punctuation_confidence",
-                                           int(server_config.get("default_punctuation_confidence"))),
-        "case_confidence": body.get("case_confidence",
-                                    int(server_config.get("default_case_confidence"))),
-        "diarization_threshold": body.get("diarization_threshold",
-                                          int(server_config.get("default_diarization_threshold"))),
-
-        "execution_provider": body.get("execution_provider", server_config.get("execution_provider") or "cpu"),
-        "stage_execution_providers": _stage_execution_provider_config(body.get("stage_execution_providers")),
-        "rms_normalize": body.get("rms_normalize", False),
-        "bypass_vad": body.get("bypass_vad", False),
-    }
+    body = await _read_limited_json(request)
+    config = _build_process_config(body)
 
     # Tạo meeting record cho user đã login (skip nếu đã có)
     if user and not db.get_meeting_by_file_id(file_id):
@@ -898,7 +1012,12 @@ async def process_file(
             file_size=file_record["file_size_bytes"],
         )
 
-    result = queue_manager.add_to_queue(file_id, session_id, config)
+    result = queue_manager.add_to_queue(
+        file_id,
+        session_id,
+        config,
+        allow_multiple_session_items=bool(user),
+    )
     if "error" in result:
         raise HTTPException(400, result["error"])
 
@@ -978,7 +1097,11 @@ async def summarize_file(
     if not is_summarizer_available():
         raise HTTPException(404, "Model tóm tắt chưa được cấu hình hoặc không tồn tại")
 
-    result = queue_manager.add_summarize_to_queue(file_id, session_id)
+    result = queue_manager.add_summarize_to_queue(
+        file_id,
+        session_id,
+        allow_multiple_session_items=bool(user),
+    )
     if "error" in result:
         raise HTTPException(400, result["error"])
 
@@ -1425,6 +1548,12 @@ async def login(request: Request, session_id: str = Depends(get_session_id)):
         httponly=True, samesite="lax", max_age=86400,
         secure=not server_config.http_mode,
     )
+    response.set_cookie(
+        "auth_token", token,
+        httponly=True, samesite="lax",
+        max_age=server_config.jwt_expire_minutes * 60,
+        secure=not server_config.http_mode,
+    )
     return response
 
 
@@ -1472,8 +1601,15 @@ async def auth_logout(request: Request):
 
     # A07: Revoke JWT token hiện tại để không còn dùng được sau khi logout
     auth_header = request.headers.get("authorization", "")
+    tokens_to_revoke = []
     if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
+        tokens_to_revoke.append(auth_header[7:])
+    cookie_token = request.cookies.get("auth_token", "")
+    if cookie_token:
+        tokens_to_revoke.append(cookie_token)
+    for token in set(tokens_to_revoke):
+        if token == "__cookie__":
+            continue
         payload = decode_token(token)
         if payload and "exp" in payload:
             _revoke_token(token, float(payload["exp"]))
@@ -1489,6 +1625,7 @@ async def auth_logout(request: Request):
         httponly=True, samesite="lax", max_age=86400,
         secure=not server_config.http_mode,
     )
+    response.delete_cookie("auth_token")
     return response
 
 
@@ -2015,7 +2152,8 @@ async def websocket_endpoint(
     if not session_id:
         session_id = ws.cookies.get("session_id", "")
 
-    if not session_id or not db.get_session(session_id):
+    session = db.get_session(session_id) if session_id else None
+    if not session:
         await ws.close(code=4001, reason="Invalid session")
         return
 
@@ -2033,11 +2171,37 @@ async def websocket_endpoint(
             elif msg_type == "subscribe_queue":
                 file_id = data.get("file_id")
                 if file_id:
-                    pos = db.get_queue_position(file_id)
+                    try:
+                        file_id_int = int(file_id)
+                    except (TypeError, ValueError):
+                        await ws.send_json({
+                            "type": "queue_position",
+                            "file_id": file_id,
+                            "position": -1,
+                            "total": 0,
+                        })
+                        continue
+
+                    file_record = db.get_file(file_id_int)
+                    user = None
+                    if session.get("user_id"):
+                        user = db.get_user_by_id(int(session["user_id"]))
+                    try:
+                        check_file_access(file_record, session_id, user)
+                    except HTTPException:
+                        await ws.send_json({
+                            "type": "queue_position",
+                            "file_id": file_id_int,
+                            "position": -1,
+                            "total": 0,
+                        })
+                        continue
+
+                    pos = db.get_queue_position(file_id_int)
                     total = db.get_queue_total_waiting()
                     await ws.send_json({
                         "type": "queue_position",
-                        "file_id": file_id,
+                        "file_id": file_id_int,
                         "position": pos,
                         "total": total,
                     })

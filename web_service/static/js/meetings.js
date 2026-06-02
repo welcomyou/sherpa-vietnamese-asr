@@ -92,12 +92,12 @@ function renderMeetingsPage() {
 
         html += `
         <div class="mg-item${clickable ? ' mg-clickable' : ''}" data-id="${m.id}"
-             ${clickable ? `onclick="loadMeeting(${m.id})"` : ''}>
-            <div class="mg-check" onclick="event.stopPropagation()">
+             ${clickable ? `data-action="load-meeting" data-meeting-id="${m.id}"` : ''}>
+            <div class="mg-check" data-stop-click="true">
                 ${m.status !== 'processing' ? `<input type="checkbox" class="mg-cb" value="${m.id}">` : ''}
             </div>
             <div class="mg-info">
-                <div class="mg-name" ondblclick="event.stopPropagation(); startRenameMeeting(${m.id}, this)">${escapeHtml(m.meeting_name)}</div>
+                <div class="mg-name" data-dbl-action="rename-meeting" data-meeting-id="${m.id}">${escapeHtml(m.meeting_name)}</div>
                 <div class="mg-meta">
                     <span class="mg-file">${escapeHtml(m.original_filename)}</span>
                     <span>${size}</span>
@@ -113,9 +113,9 @@ function renderMeetingsPage() {
     // Pagination
     if (totalPages > 1) {
         html += '<div class="mg-pager">';
-        html += `<button class="btn btn-sm" onclick="meetingsPagePrev()" ${_meetingsPage <= 1 ? 'disabled' : ''}>&laquo;</button>`;
+        html += `<button class="btn btn-sm" data-action="meetings-page-prev" ${_meetingsPage <= 1 ? 'disabled' : ''}>&laquo;</button>`;
         html += `<span class="mg-page-info">Trang ${_meetingsPage}/${totalPages} (${total} cuộc họp)</span>`;
-        html += `<button class="btn btn-sm" onclick="meetingsPageNext()" ${_meetingsPage >= totalPages ? 'disabled' : ''}>&raquo;</button>`;
+        html += `<button class="btn btn-sm" data-action="meetings-page-next" ${_meetingsPage >= totalPages ? 'disabled' : ''}>&raquo;</button>`;
         html += '</div>';
     }
 

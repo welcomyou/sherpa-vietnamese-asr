@@ -34,7 +34,7 @@ def _load_version_module():
 def _load_version_short() -> str:
     module = _load_version_module()
     if module is None:
-        return "2.6.2"
+        return "2.6.3"
     return module.get_version_short()
 
 

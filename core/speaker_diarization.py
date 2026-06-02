@@ -30,6 +30,8 @@ import re
 _sherpa_onnx = None
 SHERPA_AVAILABLE = False  # Default to False, will be set to True on successful import
 WORD_ASSIGN_MAX_DURATION = 0.40  # seconds; cap word interval so pauses are not treated as speech
+WORD_TURN_PREFIX_PAUSE = 0.45  # seconds; isolated prefix before a new diarization turn
+WORD_TURN_PREFIX_EDGE_GAP = 0.15  # seconds; ignore raw-boundary rounding noise
 
 def get_sherpa_onnx():
     """Lazy import sherpa_onnx to ensure DLL paths are set up first."""
@@ -857,6 +859,14 @@ class SpeakerDiarizer:
                 return True
         return False
 
+    def _word_overlaps_any_speaker(self, word: Dict,
+                                   speaker_segments: List[Segment]) -> bool:
+        w_start, w_end = self._word_interval(word)
+        return any(
+            self._interval_overlap(w_start, w_end, seg.start, seg.end) > 0
+            for seg in speaker_segments
+        )
+
     def _speaker_for_word_by_time(self, word: Dict,
                                   speaker_segments: List[Segment],
                                   fallback_speaker: Optional[int] = None) -> int:
@@ -912,6 +922,69 @@ class SpeakerDiarizer:
         if next_seg:
             return next_seg.speaker
         return fallback_speaker if fallback_speaker is not None else speaker_segments[0].speaker
+
+    def _speaker_labels_for_words_by_time(
+        self,
+        words: List[Dict],
+        speaker_segments: List[Segment],
+        fallback_speaker: Optional[int] = None,
+    ) -> List[int]:
+        """
+        Gán speaker labels cho một chuỗi word chỉ bằng timeline diarization.
+
+        CAM++ đôi khi bỏ lọt word mở đầu ngắn của turn mới nếu speaker nói một
+        word rồi ngừng trước khi nói tiếp. Word đó nằm trong gap giữa hai raw
+        speaker segments và phép chọn biên gần nhất có thể kéo nó về speaker
+        trước. Nếu word kế tiếp đã overlap turn sau và có pause rõ ràng sau
+        prefix mồ côi, chuyển prefix đó sang turn sau.
+        """
+        labels = [
+            self._speaker_for_word_by_time(
+                word, speaker_segments, fallback_speaker=fallback_speaker
+            )
+            for word in words
+        ]
+
+        for i in range(len(words) - 1):
+            if labels[i] == labels[i + 1]:
+                continue
+
+            word = words[i]
+            next_word = words[i + 1]
+            word_end = float(word.get("end", word.get("start", 0)) or 0)
+            next_start = float(next_word.get("start", 0) or 0)
+            if next_start - word_end < WORD_TURN_PREFIX_PAUSE:
+                continue
+            if self._word_overlaps_any_speaker(word, speaker_segments):
+                continue
+            if not self._word_overlaps_speaker(
+                next_word, speaker_segments, labels[i + 1]
+            ):
+                continue
+
+            w_start, w_end = self._word_interval(word)
+            w_mid = (w_start + w_end) / 2.0
+            prev_seg = None
+            next_seg = None
+            for seg in speaker_segments:
+                if seg.end <= w_mid:
+                    if prev_seg is None or seg.end > prev_seg.end:
+                        prev_seg = seg
+                elif seg.start >= w_mid:
+                    if next_seg is None or seg.start < next_seg.start:
+                        next_seg = seg
+
+            if (
+                prev_seg is not None
+                and next_seg is not None
+                and prev_seg.speaker == labels[i]
+                and next_seg.speaker == labels[i + 1]
+                and prev_seg.speaker != next_seg.speaker
+                and w_start - prev_seg.end >= WORD_TURN_PREFIX_EDGE_GAP
+            ):
+                labels[i] = labels[i + 1]
+
+        return labels
 
     def process_with_transcription(self,
                                    audio_file: str,
@@ -985,15 +1058,16 @@ class SpeakerDiarizer:
             word_groups = []
             current_speaker_id = None
             current_group = []
+            fallback_speaker = None
+            if speaker_votes:
+                fallback_speaker = max(speaker_votes, key=speaker_votes.get)
+            word_speaker_labels = self._speaker_labels_for_words_by_time(
+                raw_words,
+                speaker_segments,
+                fallback_speaker=fallback_speaker,
+            )
 
-            for w in raw_words:
-                fallback = current_speaker_id
-                if fallback is None and speaker_votes:
-                    fallback = max(speaker_votes, key=speaker_votes.get)
-                w_spk_id = self._speaker_for_word_by_time(
-                    w, speaker_segments, fallback_speaker=fallback
-                )
-
+            for w, w_spk_id in zip(raw_words, word_speaker_labels):
                 if w_spk_id != current_speaker_id:
                     if current_group:
                         word_groups.append((current_speaker_id, current_group))
@@ -1394,7 +1468,124 @@ def _remap_speakers_to_sentences(original_segments, word_speaker_map):
                 })
                 results.append(seg_copy)
 
-    return results
+    return smooth_speaker_boundary_fragments(results)
+
+
+def smooth_speaker_boundary_fragments(segments):
+    """
+    Clean up tiny word-level speaker fragments around sentence boundaries.
+
+    Long-form diarization can place a boundary a second or two inside a short
+    ASR phrase. Word-level mapping is correct in principle, but tiny edge
+    fragments create visibly wrong speaker separators. This pass only
+    reassigns very small edge/island fragments; it does not merge unrelated
+    speaker turns or change timestamps.
+    """
+    if not segments:
+        return segments
+
+    smoothed = [dict(seg) for seg in segments]
+
+    def _speaker_id(seg):
+        return seg.get("speaker_id")
+
+    def _speaker_name(seg):
+        spk = seg.get("speaker")
+        if spk:
+            return spk
+        sid = _speaker_id(seg)
+        if isinstance(sid, int):
+            return f"Người nói {sid + 1}"
+        return "Người nói 1"
+
+    def _set_speaker(seg, src):
+        sid = _speaker_id(src)
+        seg["speaker_id"] = sid
+        seg["speaker"] = _speaker_name(src)
+
+    def _word_count(seg):
+        raw_words = seg.get("raw_words") or []
+        if raw_words:
+            return len(raw_words)
+        return len([w for w in str(seg.get("text", "")).split() if w.strip()])
+
+    def _duration(seg):
+        try:
+            return float(seg.get("end", 0)) - float(seg.get("start", 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _gap(a, b):
+        try:
+            return float(b.get("start", 0)) - float(a.get("end", 0))
+        except (TypeError, ValueError):
+            return 999.0
+
+    def _ends_sentence(seg):
+        return str(seg.get("text", "")).strip().endswith((".", "?", "!", "…"))
+
+    # 1) Short speaker island between the same speaker on both sides.
+    # Example: A ... / B(1s) / A ... is usually a clustering blip in this app's
+    # ASR word mapping, especially on long CAM++ runs.
+    for i in range(1, len(smoothed) - 1):
+        prev_seg = smoothed[i - 1]
+        cur_seg = smoothed[i]
+        next_seg = smoothed[i + 1]
+        prev_id = _speaker_id(prev_seg)
+        cur_id = _speaker_id(cur_seg)
+        next_id = _speaker_id(next_seg)
+        if prev_id is None or cur_id is None:
+            continue
+        if prev_id == next_id and cur_id != prev_id:
+            if _duration(cur_seg) <= 1.5 or _word_count(cur_seg) <= 4:
+                _set_speaker(cur_seg, prev_seg)
+
+    # 2) Leading singleton after a long pause belongs to the following turn.
+    # This fixes cases where a short opening word starts before the raw
+    # diarization boundary.
+    for i in range(len(smoothed) - 1):
+        cur_seg = smoothed[i]
+        next_seg = smoothed[i + 1]
+        if _speaker_id(cur_seg) == _speaker_id(next_seg):
+            continue
+        prev_seg = smoothed[i - 1] if i > 0 else None
+        prev_gap = _gap(prev_seg, cur_seg) if prev_seg is not None else 999.0
+        next_gap = _gap(cur_seg, next_seg)
+        if (
+            _word_count(cur_seg) <= 1
+            and _duration(cur_seg) <= 0.8
+            and not _ends_sentence(cur_seg)
+            and _word_count(next_seg) >= 2
+            and prev_gap >= 1.2
+            and next_gap <= 2.5
+        ):
+            _set_speaker(cur_seg, next_seg)
+
+    # 3) Tiny trailing particles after a continuous previous turn stay with
+    # that turn. This prevents an ending fragment from being moved to the next
+    # speaker just because the raw boundary fires a fraction early.
+    for i in range(len(smoothed) - 1):
+        cur_seg = smoothed[i]
+        next_seg = smoothed[i + 1]
+        if _speaker_id(cur_seg) == _speaker_id(next_seg):
+            continue
+        prev_seg = smoothed[i - 1] if i > 0 else None
+        has_prev_context = (
+            prev_seg is not None
+            and _speaker_id(prev_seg) == _speaker_id(cur_seg)
+            and _gap(prev_seg, cur_seg) <= 1.0
+        )
+        if (
+            has_prev_context
+            and _word_count(next_seg) <= 2
+            and _duration(next_seg) <= 0.9
+            and not _ends_sentence(cur_seg)
+            and _ends_sentence(next_seg)
+            and _gap(cur_seg, next_seg) <= 0.25
+        ):
+            _set_speaker(next_seg, cur_seg)
+
+    return smoothed
 
 
 def _diarize_and_remap(diarizer_instance, audio_file, segments, raw_segments):
@@ -1464,6 +1655,9 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
     is_cancelled = cancel_check or (lambda: False)
 
     start_time = _time.time()
+    all_asr_words = []
+    for seg in segments or []:
+        all_asr_words.extend(seg.get("raw_words", []) or [])
 
     try:
         _setup_ffmpeg_path()
@@ -1508,7 +1702,9 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
 
         raw_segments = [Segment(s['start'], s['end'], s['speaker']) for s in raw_dict_segments]
         merger = SpeakerDiarizer()
-        raw_segments = merger._post_process_diarization_segments(raw_segments)
+        raw_segments = merger._post_process_diarization_segments(
+            raw_segments, asr_words=all_asr_words or None
+        )
 
         speaker_segments_raw = [
             {
@@ -1551,7 +1747,11 @@ def run_diarization(audio_file, segments, speaker_model_id, num_speakers, num_th
             _time.sleep(0.001)
         return 1 if is_cancelled() else 0
 
-    raw_segments = diarizer.process(audio_file, progress_callback=internal_progress_callback)
+    raw_segments = diarizer.process(
+        audio_file,
+        progress_callback=internal_progress_callback,
+        asr_words=all_asr_words or None,
+    )
 
     speaker_segments_raw = [
         {

@@ -27,7 +27,7 @@
       </button>
     </div>
     <div class="header-right app-only">
-      <button id="btn-recalibration" class="btn btn-sm btn-secondary" type="button">Re-Calibration</button>
+      <button id="btn-recalibration" class="btn btn-sm btn-secondary" type="button">Tối ưu lại thiết bị</button>
       <button id="btn-offline-files" class="btn btn-sm" type="button">Quản lý tập tin</button>
     </div>
   </header>
@@ -84,9 +84,9 @@
             <small>Hotwords và import/export cấu hình.</small>
           </summary>
           <div class="actions config-actions">
-            <button id="btn-export-config" type="button">Export config</button>
-            <button id="btn-import-config" type="button">Import config</button>
-            <button id="btn-reset-config" type="button">Reset config</button>
+            <button id="btn-export-config" type="button">Xuất cấu hình</button>
+            <button id="btn-import-config" type="button">Nhập cấu hình</button>
+            <button id="btn-reset-config" type="button">Đặt lại cấu hình</button>
             <input id="config-input" type="file" accept=".json,application/json" hidden>
           </div>
           </details>
@@ -127,8 +127,8 @@
     <section class="technical-internals model-details-panel" hidden>
       <details id="model-details">
         <summary>
-          <span>Model pack details</span>
-          <small id="model-details-summary">Open only for troubleshooting.</small>
+          <span>Chi tiết dữ liệu model</span>
+          <small id="model-details-summary">Chỉ mở khi cần kiểm tra lỗi.</small>
         </summary>
         <div id="model-packs" class="pack-list"></div>
       </details>
@@ -300,8 +300,8 @@
     <section class="technical-internals utility-panel" hidden>
       <details id="diagnostics-details" class="utility-details">
         <summary>
-          <span>Diagnostics</span>
-          <small>Open only when troubleshooting browser/offline support.</small>
+          <span>Chẩn đoán kỹ thuật</span>
+          <small>Chỉ mở khi cần kiểm tra trình duyệt hoặc chế độ offline.</small>
         </summary>
         <dl class="stats diagnostics-stats">
           <div><dt>Secure context</dt><dd id="secure-context">-</dd></div>

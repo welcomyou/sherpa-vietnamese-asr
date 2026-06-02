@@ -18,30 +18,30 @@
     <header id="app-header">
         <div class="header-title">
             Sherpa Vietnamese ASR
-            <button class="btn-about" onclick="showAboutDialog()" title="Thông tin ứng dụng">
+            <button class="btn-about" data-action="show-about" title="Thông tin ứng dụng">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             </button>
         </div>
         <div class="header-right">
             <div id="auth-anonymous" class="auth-section">
-                <button id="btn-login" class="btn btn-sm" onclick="showLoginModal()">Đăng nhập</button>
+                <button id="btn-login" class="btn btn-sm" data-action="show-login">Đăng nhập</button>
             </div>
             <div id="auth-loggedin" class="auth-section" style="display:none">
-                <button class="btn btn-sm" id="btn-admin" onclick="toggleAdminPanel()" style="display:none">Quản trị</button>
-                <button class="btn btn-sm" onclick="toggleMeetingsPanel()">Quản lý tập tin</button>
+                <button class="btn btn-sm" id="btn-admin" data-action="toggle-admin-panel" style="display:none">Quản trị</button>
+                <button class="btn btn-sm" data-action="toggle-meetings-panel">Quản lý tập tin</button>
                 <div class="user-menu-wrapper">
-                    <button class="user-menu-btn" onclick="toggleUserMenu(event)" id="user-menu-btn">
+                    <button class="user-menu-btn" data-action="toggle-user-menu" id="user-menu-btn">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                         <span id="username-display"></span>
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <div id="user-dropdown" class="user-dropdown" style="display:none">
-                        <div class="user-dropdown-item" onclick="showChangePasswordModal()">
+                        <div class="user-dropdown-item" data-action="show-change-password">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                             Đổi mật khẩu
                         </div>
                         <hr class="user-dropdown-divider">
-                        <div class="user-dropdown-item user-dropdown-danger" onclick="logout()">
+                        <div class="user-dropdown-item user-dropdown-danger" data-action="logout">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                             Đăng xuất
                         </div>
@@ -55,7 +55,7 @@
     <main id="app-main">
         <!-- Install Panel (collapsible, hidden by default) -->
         <div class="panel collapsed" id="install-panel" style="display:none">
-            <div class="panel-header" onclick="togglePanel('install-panel')">
+            <div class="panel-header" data-action="toggle-panel" data-panel="install-panel">
                 <span class="panel-toggle">&#9660;</span> Cài đặt ứng dụng
             </div>
             <div class="panel-body">
@@ -70,7 +70,7 @@
                         </div>
                         <div class="install-steps">
                             <div class="install-step" id="install-step-1">
-                                <button class="btn btn-sm btn-install-cert" onclick="showCertGuide()">
+                                <button class="btn btn-sm btn-install-cert" data-action="show-cert-guide">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                                         <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
@@ -80,7 +80,7 @@
                                 <div id="cert-guide" class="install-guide" style="display:none"></div>
                             </div>
                             <div class="install-step" id="install-step-2">
-                                <button class="btn btn-sm btn-install" id="btn-install-app" disabled onclick="installPWA()">
+                                <button class="btn btn-sm btn-install" id="btn-install-app" disabled data-action="install-pwa">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                                         <polyline points="7 10 12 15 17 10"/>
@@ -120,7 +120,7 @@
 
         <!-- Config Panel (collapsible) -->
         <div class="panel" id="config-panel">
-            <div class="panel-header" onclick="togglePanel('config-panel')">
+            <div class="panel-header" data-action="toggle-panel" data-panel="config-panel">
                 <span class="panel-toggle">&#9660;</span> Cấu hình
             </div>
             <div class="panel-body" style="position:relative">
@@ -131,7 +131,7 @@
                 <div class="config-grid">
                     <div class="config-row full-width calibration-row">
                         <span id="calibration-status">Tối ưu: CPU-only</span>
-                        <button class="btn btn-sm btn-secondary" id="btn-calibration" type="button" onclick="runServerCalibration()">
+                        <button class="btn btn-sm btn-secondary" id="btn-calibration" type="button" data-action="run-server-calibration">
                             Tối ưu
                         </button>
                     </div>
@@ -205,7 +205,7 @@
                     <span class="file-icon">&#128196;</span>
                     <span id="file-name"></span>
                     <span id="file-size"></span>
-                    <button class="btn-clear" onclick="clearFile()" title="Xóa file">&times;</button>
+                    <button class="btn-clear" data-action="clear-file" title="Xóa file">&times;</button>
                 </div>
                 <input type="file" id="file-input"
                     accept=".mp3,.wav,.m4a,.flac,.aac,.wma,.ogg,.opus,.mp4,.mkv,.avi,.mov,.webm,.flv,.wmv,.json"
@@ -214,12 +214,12 @@
 
             <!-- Action Buttons -->
             <div class="action-buttons">
-                <button id="btn-process" class="btn btn-primary" onclick="processFile()" disabled>Xử lý</button>
-                <button id="btn-cancel" class="btn btn-danger" onclick="cancelProcess()" style="display:none">Kết
+                <button id="btn-process" class="btn btn-primary" data-action="process-file" disabled>Xử lý</button>
+                <button id="btn-cancel" class="btn btn-danger" data-action="cancel-process" style="display:none">Kết
                     thúc</button>
-                <button id="btn-load-json" class="btn btn-secondary" onclick="loadJSON()" disabled>&#8679; Upload JSON</button>
-                <button id="btn-save-json" class="btn btn-secondary" onclick="saveJSON()" disabled>&#8681; Tải JSON</button>
-                <button id="btn-copy" class="btn btn-secondary" onclick="copyText()" disabled>Sao chép văn bản</button>
+                <button id="btn-load-json" class="btn btn-secondary" data-action="load-json" disabled>&#8679; Upload JSON</button>
+                <button id="btn-save-json" class="btn btn-secondary" data-action="save-json" disabled>&#8681; Tải JSON</button>
+                <button id="btn-copy" class="btn btn-secondary" data-action="copy-text" disabled>Sao chép văn bản</button>
             </div>
 
             <!-- Processing Progress -->
@@ -247,15 +247,15 @@
             <div id="quality-strip" class="quality-strip" style="display:none"></div>
             <div class="result-header">
                 <div class="result-tabs">
-                    <button class="tab-btn active" onclick="switchTab('content')">Nội dung</button>
-                    <button class="tab-btn" onclick="switchTab('summary')" id="tab-summary" style="display:none">📝 Tóm tắt</button>
+                    <button class="tab-btn active" data-action="switch-tab" data-tab="content">Nội dung</button>
+                    <button class="tab-btn" data-action="switch-tab" data-tab="summary" id="tab-summary" style="display:none">📝 Tóm tắt</button>
                 </div>
                 <div class="search-widget" id="search-widget">
-                    <input type="text" id="search-input" placeholder="Tìm kiếm..." oninput="onSearchInput()" onkeydown="onSearchKeydown(event)">
+                    <input type="text" id="search-input" placeholder="Tìm kiếm..." data-input-action="search-input" data-key-action="search-keydown">
                     <span id="search-count"></span>
-                    <button class="search-btn" onclick="searchNav(-1)" title="Trước">&#9650;</button>
-                    <button class="search-btn" onclick="searchNav(1)" title="Sau">&#9660;</button>
-                    <button class="search-btn" onclick="clearSearch()" title="Đóng">&times;</button>
+                    <button class="search-btn" data-action="search-nav" data-dir="-1" title="Trước">&#9650;</button>
+                    <button class="search-btn" data-action="search-nav" data-dir="1" title="Sau">&#9660;</button>
+                    <button class="search-btn" data-action="clear-search" title="Đóng">&times;</button>
                 </div>
             </div>
             <div id="result-content" class="result-content"></div>
@@ -266,18 +266,18 @@
 
         <!-- Audio Player -->
         <div id="player-panel" class="player-panel" style="display:none">
-            <button id="btn-play" class="btn-play" onclick="togglePlay()">
+            <button id="btn-play" class="btn-play" data-action="toggle-play">
                 <svg class="play-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6,3 20,12 6,21"/></svg>
                 <svg class="pause-icon" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="4" x2="7" y2="20"/><line x1="17" y1="4" x2="17" y2="20"/></svg>
             </button>
             <input type="range" id="player-seek" class="player-seek" min="0" max="100" value="0" step="0.1"
-                oninput="seekAudio(this.value)">
+                data-input-action="seek-audio">
             <span id="player-time">00:00 / 00:00</span>
-            <button id="btn-save-edits" class="btn-save-edits" onclick="saveEdits()" style="display:none">Lưu thay đổi</button>
+            <button id="btn-save-edits" class="btn-save-edits" data-action="save-edits" style="display:none">Lưu thay đổi</button>
         </div>
 
         <!-- Scroll to top -->
-        <button id="btn-scroll-top" class="btn-scroll-top" onclick="scrollToTop()" title="Lên đầu trang">
+        <button id="btn-scroll-top" class="btn-scroll-top" data-action="scroll-top" title="Lên đầu trang">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18,15 12,9 6,15"/></svg>
         </button>
     </main>
@@ -286,17 +286,17 @@
         <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3>Tối ưu thiết bị</h3>
-                <button class="modal-close" onclick="resolveCalibrationModeChoice('cancel')">&times;</button>
+                <button class="modal-close" data-action="resolve-calibration-mode" data-choice="cancel">&times;</button>
             </div>
             <div class="modal-body">
                 <p id="calibration-mode-text">Thiết bị hiện đang dùng cấu hình GPU Auto sau tối ưu.</p>
                 <p id="calibration-mode-subtext">Bạn có thể tối ưu lại hoặc chuyển về CPU-only.</p>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-outline" onclick="resolveCalibrationModeChoice('cancel')">Hủy</button>
-                <button class="btn btn-secondary" id="btn-calibration-mode-cpu" onclick="resolveCalibrationModeChoice('cpu')">CPU-only</button>
-                <button class="btn btn-secondary" id="btn-calibration-mode-gpu" onclick="resolveCalibrationModeChoice('gpu')">GPU auto</button>
-                <button class="btn btn-primary" onclick="resolveCalibrationModeChoice('rerun')">Tối ưu lại</button>
+                <button class="btn btn-outline" data-action="resolve-calibration-mode" data-choice="cancel">Hủy</button>
+                <button class="btn btn-secondary" id="btn-calibration-mode-cpu" data-action="resolve-calibration-mode" data-choice="cpu">CPU-only</button>
+                <button class="btn btn-secondary" id="btn-calibration-mode-gpu" data-action="resolve-calibration-mode" data-choice="gpu">GPU auto</button>
+                <button class="btn btn-primary" data-action="resolve-calibration-mode" data-choice="rerun">Tối ưu lại</button>
             </div>
         </div>
     </div>
@@ -306,7 +306,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h3>Đăng nhập</h3>
-                <button class="modal-close" onclick="hideLoginModal()">&times;</button>
+                <button class="modal-close" data-action="hide-login">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
@@ -316,13 +316,13 @@
                 <div class="form-group">
                     <label>Mật khẩu:</label>
                     <input type="password" id="login-password" autocomplete="current-password"
-                        onkeydown="if(event.key==='Enter')doLogin()">
+                        data-key-action="login-submit">
                 </div>
                 <div id="login-error" class="error-msg" style="display:none"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="doLogin()">Đăng nhập</button>
-                <button class="btn" onclick="hideLoginModal()">Hủy</button>
+                <button class="btn btn-primary" data-action="login-submit">Đăng nhập</button>
+                <button class="btn" data-action="hide-login">Hủy</button>
             </div>
         </div>
     </div>
@@ -332,7 +332,7 @@
         <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3>Tách người nói</h3>
-                <button class="modal-close" onclick="hideSplitSpeakerModal()">&times;</button>
+                <button class="modal-close" data-action="hide-split-speaker">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
@@ -340,14 +340,14 @@
                 </div>
                 <div class="form-group">
                     <label>Chọn người nói mới:</label>
-                    <select id="split-speaker-select" onchange="document.getElementById('split-speaker-input').value=this.value">
+                    <select id="split-speaker-select" data-change-action="sync-split-speaker">
                         <option value="">-- Chọn từ danh sách --</option>
                     </select>
                 </div>
                 <div class="form-group">
                     <label>Hoặc nhập tên mới:</label>
                     <input type="text" id="split-speaker-input" placeholder="Nhập tên người nói..."
-                        onkeydown="if(event.key==='Enter')doSplitSpeaker()">
+                        data-key-action="split-speaker-submit">
                 </div>
                 <div class="form-group" style="margin-bottom:0">
                     <label style="margin-bottom:8px">Phạm vi:</label>
@@ -364,8 +364,8 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="doSplitSpeaker()">Tách</button>
-                <button class="btn" onclick="hideSplitSpeakerModal()">Hủy</button>
+                <button class="btn btn-primary" data-action="split-speaker-submit">Tách</button>
+                <button class="btn" data-action="hide-split-speaker">Hủy</button>
             </div>
         </div>
     </div>
@@ -375,7 +375,7 @@
         <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3>Đổi mật khẩu</h3>
-                <button class="modal-close" onclick="hideChangePasswordModal()">&times;</button>
+                <button class="modal-close" data-action="hide-change-password">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
@@ -389,26 +389,26 @@
                 <div class="form-group">
                     <label>Xác nhận mật khẩu mới:</label>
                     <input type="password" id="chpw-confirm" autocomplete="new-password"
-                        onkeydown="if(event.key==='Enter')doChangePassword()">
+                        data-key-action="change-password-submit">
                 </div>
                 <div id="chpw-error" class="error-msg" style="display:none"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="doChangePassword()">Đổi mật khẩu</button>
-                <button class="btn" onclick="hideChangePasswordModal()">Hủy</button>
+                <button class="btn btn-primary" data-action="change-password-submit">Đổi mật khẩu</button>
+                <button class="btn" data-action="hide-change-password">Hủy</button>
             </div>
         </div>
     </div>
 
     <!-- Context Menu -->
     <div id="context-menu" class="context-menu" style="display:none">
-        <div class="ctx-item" onclick="ctxSplitSpeaker()">Tách người nói từ câu này</div>
-        <div class="ctx-item" onclick="ctxMergeUp()">Gộp với người nói phía trước</div>
-        <div class="ctx-item" onclick="ctxMergeDown()">Gộp với người nói phía sau</div>
+        <div class="ctx-item" data-action="ctx-split-speaker">Tách người nói từ câu này</div>
+        <div class="ctx-item" data-action="ctx-merge-up">Gộp với người nói phía trước</div>
+        <div class="ctx-item" data-action="ctx-merge-down">Gộp với người nói phía sau</div>
         <hr class="ctx-divider">
-        <div class="ctx-item" onclick="ctxRenameSpeaker()">Đổi tên người nói</div>
+        <div class="ctx-item" data-action="ctx-rename-speaker">Đổi tên người nói</div>
         <hr class="ctx-divider">
-        <div class="ctx-item" onclick="ctxCopy()">Sao chép</div>
+        <div class="ctx-item" data-action="ctx-copy">Sao chép</div>
     </div>
 
     <!-- Speaker Rename Modal -->
@@ -416,7 +416,7 @@
         <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3>Đổi tên người nói</h3>
-                <button class="modal-close" onclick="hideRenameModal()">&times;</button>
+                <button class="modal-close" data-action="hide-rename">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
@@ -428,7 +428,7 @@
                 </div>
                 <div class="form-group">
                     <label>Chọn từ danh sách:</label>
-                    <select id="rename-select" onchange="document.getElementById('rename-input').value=this.value">
+                    <select id="rename-select" data-change-action="sync-rename-speaker">
                         <option value="">-- Chọn --</option>
                     </select>
                 </div>
@@ -438,9 +438,9 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="doRenameSpeaker(true)">Sửa tất cả</button>
-                <button class="btn btn-success" onclick="doRenameSpeaker(false)">Sửa tên này</button>
-                <button class="btn" onclick="hideRenameModal()">Hủy</button>
+                <button class="btn btn-primary" data-action="rename-speaker" data-all="true">Sửa tất cả</button>
+                <button class="btn btn-success" data-action="rename-speaker" data-all="false">Sửa tên này</button>
+                <button class="btn" data-action="hide-rename">Hủy</button>
             </div>
         </div>
     </div>
@@ -451,18 +451,18 @@
         <div class="modal-content modal-sm">
             <div class="modal-header">
                 <h3>Tên cuộc họp</h3>
-                <button class="modal-close" onclick="hideMeetingNameModal()">&times;</button>
+                <button class="modal-close" data-action="hide-meeting-name">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label>Tên cuộc họp (để trống sẽ dùng tên file):</label>
                     <input type="text" id="meeting-name-input" placeholder="Nhập tên cuộc họp..."
-                        onkeydown="if(event.key==='Enter')confirmMeetingName()">
+                        data-key-action="confirm-meeting-name">
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" onclick="confirmMeetingName()">Xử lý</button>
-                <button class="btn" onclick="hideMeetingNameModal()">Hủy</button>
+                <button class="btn btn-primary" data-action="confirm-meeting-name">Xử lý</button>
+                <button class="btn" data-action="hide-meeting-name">Hủy</button>
             </div>
         </div>
     </div>
@@ -472,15 +472,15 @@
         <div class="meetings-header">
             <h3>Quản lý tập tin</h3>
             <div class="meetings-header-right">
-                <input type="text" id="meetings-search" placeholder="Tìm kiếm..." oninput="searchMeetings()">
-                <button class="modal-close" onclick="closeMeetingsPanel()">&times;</button>
+                <input type="text" id="meetings-search" placeholder="Tìm kiếm..." data-input-action="search-meetings">
+                <button class="modal-close" data-action="close-meetings-panel">&times;</button>
             </div>
         </div>
         <div id="meetings-toolbar" class="meetings-toolbar" style="display:none">
             <label class="mg-select-label">
-                <input type="checkbox" id="mg-select-all" onchange="toggleSelectAll()"> Chọn tất cả
+                <input type="checkbox" id="mg-select-all" data-change-action="toggle-select-all"> Chọn tất cả
             </label>
-            <button class="btn btn-sm btn-danger" onclick="deleteSelectedMeetings()">Xóa đã chọn</button>
+            <button class="btn btn-sm btn-danger" data-action="delete-selected-meetings">Xóa đã chọn</button>
         </div>
         <div id="meetings-list" class="meetings-list"></div>
     </div>
@@ -489,20 +489,20 @@
     <div id="admin-panel" class="meetings-panel" style="display:none">
         <div class="meetings-header">
             <h3>Quan tri he thong</h3>
-            <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
+            <button class="modal-close" data-action="close-admin-panel">&times;</button>
         </div>
         <div class="admin-tabs">
-            <button class="tab-btn active" onclick="switchAdminTab('stats',this)">Tong quan</button>
-            <button class="tab-btn" onclick="switchAdminTab('sessions',this)">Phien</button>
-            <button class="tab-btn" onclick="switchAdminTab('queue',this)">Hang doi</button>
-            <button class="tab-btn" onclick="switchAdminTab('users',this)">Nguoi dung</button>
-            <button class="tab-btn" onclick="switchAdminTab('config',this)">Cau hinh</button>
+            <button class="tab-btn active" data-action="switch-admin-tab" data-tab="stats">Tong quan</button>
+            <button class="tab-btn" data-action="switch-admin-tab" data-tab="sessions">Phien</button>
+            <button class="tab-btn" data-action="switch-admin-tab" data-tab="queue">Hang doi</button>
+            <button class="tab-btn" data-action="switch-admin-tab" data-tab="users">Nguoi dung</button>
+            <button class="tab-btn" data-action="switch-admin-tab" data-tab="config">Cau hinh</button>
         </div>
         <div id="admin-content" class="meetings-list" style="padding:12px"></div>
     </div>
 
     <!-- JSON upload (hidden input) -->
-    <input type="file" id="json-input" accept=".json" style="display:none" onchange="onJSONSelected(this)">
+    <input type="file" id="json-input" accept=".json" style="display:none" data-change-action="json-selected">
 
     <script src="/shared/js/about.js"></script>
     <script src="/shared/js/status.js"></script>

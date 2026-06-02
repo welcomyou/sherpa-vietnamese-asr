@@ -23,7 +23,7 @@ import os
 import subprocess
 
 # Fallback nếu không có git và không có VERSION file
-_FALLBACK_VERSION = "2.6.2"
+_FALLBACK_VERSION = "2.6.3"
 
 _cached_version = None
 

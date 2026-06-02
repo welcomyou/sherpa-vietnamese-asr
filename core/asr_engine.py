@@ -2605,7 +2605,7 @@ class TranscriberPipeline:
 
         if self.config.get("speaker_diarization", False) and all_words:
             try:
-                from core.speaker_diarization import SpeakerDiarizer
+                from core.speaker_diarization import SpeakerDiarizer, smooth_speaker_boundary_fragments
                 DIARIZATION_AVAILABLE = True
             except ImportError:
                 DIARIZATION_AVAILABLE = False
@@ -2875,13 +2875,11 @@ class TranscriberPipeline:
                 time_word_speaker_name = None
                 if raw_segments and all_words:
                     time_mapper = SpeakerDiarizer()
-                    time_word_speaker = []
+                    time_word_speaker = time_mapper._speaker_labels_for_words_by_time(
+                        all_words, raw_segments
+                    )
                     time_word_speaker_name = []
-                    for w in all_words:
-                        spk_id = time_mapper._speaker_for_word_by_time(
-                            w, raw_segments
-                        )
-                        time_word_speaker.append(spk_id)
+                    for spk_id in time_word_speaker:
                         time_word_speaker_name.append(f"Người nói {spk_id + 1}")
 
                 pause_hints = None
@@ -3063,6 +3061,7 @@ class TranscriberPipeline:
 
                 # Fix overlapping timestamps
                 if final_segments:
+                    final_segments = smooth_speaker_boundary_fragments(final_segments)
                     for i in range(len(final_segments) - 1):
                         next_start = final_segments[i+1]['start']
                         if final_segments[i]['end'] > next_start:

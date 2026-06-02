@@ -238,10 +238,11 @@ class QueueManager:
                 "total": total,
             })
 
-    def add_to_queue(self, file_id: int, session_id: str, config: dict) -> dict:
+    def add_to_queue(self, file_id: int, session_id: str, config: dict,
+                     allow_multiple_session_items: bool = False) -> dict:
         """Them file vao queue. Tra ve thong tin vi tri."""
         # Kiểm tra session đã có file trong queue chưa
-        if db.has_session_in_queue(session_id):
+        if not allow_multiple_session_items and db.has_session_in_queue(session_id):
             return {"error": "Bạn đã có 1 file đang chờ xử lý. Vui lòng đợi."}
 
         db.add_to_queue(file_id, session_id, config)
@@ -593,9 +594,10 @@ class QueueManager:
             self.broadcast_queue_positions()
             self.process_next()
 
-    def add_summarize_to_queue(self, file_id: int, session_id: str) -> dict:
+    def add_summarize_to_queue(self, file_id: int, session_id: str,
+                               allow_multiple_session_items: bool = False) -> dict:
         """Thêm summarization job vào queue chung (cùng priority với ASR)."""
-        if db.has_session_in_queue(session_id):
+        if not allow_multiple_session_items and db.has_session_in_queue(session_id):
             return {"error": "Bạn đã có 1 tác vụ đang chờ xử lý. Vui lòng đợi."}
 
         config = {"job_type": "summarize"}

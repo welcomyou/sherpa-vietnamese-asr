@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "offline-pwa-";
-const CACHE_VERSION = "offline-pwa-v141";
+const CACHE_VERSION = "offline-pwa-v142";
 const NETWORK_TIMEOUT_MS = 1500;
 const INSTALL_CORE_TIMEOUT_MS = 15000;
 const CORE_SHELL = [
@@ -104,7 +104,7 @@ async function localFirst(event, cacheKey) {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
-  return new Response("Offline asset is not cached yet.", { status: 503 });
+  return new Response("File offline này chưa được lưu vào bộ nhớ trình duyệt.", { status: 503 });
 }
 
 self.addEventListener("install", (event) => {

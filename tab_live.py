@@ -44,6 +44,7 @@ class LiveProcessingTab(QWidget):
         self.current_partial_text = ""
         self.pending_speaker_preview = None
         self.current_temp_file = None
+        self.recording_finalized = False
         self.hotkey_config = self.load_hotkey_config()
         
         # Recording thread
@@ -1294,16 +1295,117 @@ class LiveProcessingTab(QWidget):
     def export_streaming_audio(self):
         """Export recorded audio to user selected location"""
         self.export_audio()
-    
+
+    def _has_live_content(self):
+        """Return True when the current live session has transcript or audio."""
+        return bool(getattr(self, 'recorded_audio', [])) or \
+            bool(getattr(self, 'transcribed_text', '').strip()) or \
+            bool(getattr(self, 'current_partial_text', '').strip()) or \
+            bool(getattr(self, 'clickable_segments', []))
+
+    def _has_resumable_recording_session(self):
+        """A paused session keeps the ASR worker alive and can continue without reset."""
+        if getattr(self, 'recording_finalized', False):
+            return False
+        worker = getattr(getattr(self, 'asr_thread', None), 'worker', None)
+        return worker is not None
+
+    def _confirm_start_new_recording(self):
+        msg = QMessageBox(self.window())
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setWindowTitle("Bắt đầu ghi âm mới?")
+        msg.setText("Phiên ghi âm trước đã kết thúc và vẫn còn nội dung.")
+        msg.setInformativeText(
+            "Nếu bắt đầu ghi âm mới, toàn bộ văn bản và audio hiện tại sẽ bị xóa. "
+            "Bạn có muốn xóa nội dung hiện tại không?"
+        )
+        btn_new = msg.addButton("Xóa và ghi âm mới", QMessageBox.ButtonRole.AcceptRole)
+        btn_keep = msg.addButton("Giữ nội dung hiện tại", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_keep)
+        msg.exec()
+        return msg.clickedButton() == btn_new
+
+    def _set_record_button_active(self):
+        self.btn_record.setText("⏸️ Dừng")
+        self.btn_record.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['warning']};
+                color: {COLORS['text_dark']};
+                font-size: 14px;
+                font-weight: bold;
+                padding: 12px 24px;
+                border-radius: 6px;
+                border: none;
+                min-width: 120px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['warning']};
+            }}
+        """)
+
+    def _set_record_button_idle(self, resume=False):
+        self.btn_record.setText("▶️ Ghi âm tiếp" if resume else "🔴 Ghi âm")
+        self.btn_record.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['success']};
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 12px 24px;
+                border-radius: 6px;
+                border: none;
+                min-width: 120px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['success']};
+            }}
+        """)
+
+    def _start_microphone_recording(self, device_index):
+        self.is_recording = True
+        self._set_record_button_active()
+        self.btn_stop.setEnabled(True)
+        self.btn_export.setEnabled(False)
+        self.combo_microphone.setEnabled(False)
+        self.btn_refresh_mic.setEnabled(False)
+        self.combo_model.setEnabled(False)
+
+        self.status_label.setText("🔴 Đang ghi âm... Nói vào microphone.")
+        self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold;")
+
+        self.record_thread = MicrophoneRecordThread(device_index=device_index)
+        self.record_thread.volume_changed.connect(self.on_volume_changed)
+        self.record_thread.chunk_ready.connect(self.on_audio_chunk)
+        self.record_thread.error.connect(self.on_record_error)
+        self.record_thread.start()
+
+    def _resume_recording(self, device_index):
+        """Resume microphone capture for the current live session."""
+        worker = getattr(getattr(self, 'asr_thread', None), 'worker', None)
+        if worker is not None and not getattr(worker, 'is_recording_active', False):
+            self.asr_thread.start_recording()
+        self.recording_finalized = False
+        print("[start_recording] Resuming existing recording session")
+        self._start_microphone_recording(device_index)
+
     def start_recording(self):
         """Bắt đầu ghi âm"""
         device_index = self.combo_microphone.currentData()
         if device_index is None or device_index < 0:
             QMessageBox.warning(self.window(), "Lỗi", "Vui lòng chọn microphone trước khi ghi âm!")
             return
-        
+
+        resume_existing = self._has_resumable_recording_session()
+        if not resume_existing and self.recording_finalized and self._has_live_content():
+            if not self._confirm_start_new_recording():
+                return
+
         self.stop_preview()
-        
+
+        if resume_existing:
+            self._resume_recording(device_index)
+            return
+
         self.transcribed_text = ""
         self.current_partial_text = ""
         self.pending_speaker_preview = None
@@ -1313,6 +1415,7 @@ class LiveProcessingTab(QWidget):
         # Reset saved flags for new recording
         self.has_recorded_audio = False
         self.wav_saved = False
+        self.recording_finalized = False
         
         self.current_segment_partials = []
         self.clickable_segments = []
@@ -1381,61 +1484,13 @@ class LiveProcessingTab(QWidget):
             self.is_recording = False
             return
         
-        self.is_recording = True
-        self.btn_record.setText("⏸️ Dừng")
-        self.btn_record.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['warning']};
-                color: {COLORS['text_dark']};
-                font-size: 14px;
-                font-weight: bold;
-                padding: 12px 24px;
-                border-radius: 6px;
-                border: none;
-                min-width: 120px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['warning']};
-            }}
-        """)
-        self.btn_stop.setEnabled(True)
-        self.btn_export.setEnabled(False)
-        self.combo_microphone.setEnabled(False)
-        self.btn_refresh_mic.setEnabled(False)
-        self.combo_model.setEnabled(False)
-        
-        self.status_label.setText("🔴 Đang ghi âm... Nói vào microphone.")
-        self.status_label.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold;")
-        
-        if not self.recorded_audio:
-            self.text_output.clear()
-        
-        self.record_thread = MicrophoneRecordThread(device_index=device_index)
-        self.record_thread.volume_changed.connect(self.on_volume_changed)
-        self.record_thread.chunk_ready.connect(self.on_audio_chunk)
-        self.record_thread.error.connect(self.on_record_error)
-        self.record_thread.start()
+        self._start_microphone_recording(device_index)
     
     def pause_recording(self):
         """Tạm dừng ghi âm"""
         self.is_recording = False
-        self.btn_record.setText("🔴 Ghi âm")
-        self.btn_record.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['success']};
-                color: white;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 12px 24px;
-                border-radius: 6px;
-                border: none;
-                min-width: 120px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['success']};
-            }}
-        """)
-        self.status_label.setText("⏸️ Đã tạm dừng ghi âm. Bấm 'Ghi âm' để tiếp tục hoặc 'Kết thúc' để dừng.")
+        self._set_record_button_idle(resume=self._has_resumable_recording_session())
+        self.status_label.setText("⏸️ Đã tạm dừng ghi âm. Bấm 'Ghi âm tiếp' để tiếp tục hoặc 'Kết thúc' để dừng hẳn.")
         self.status_label.setStyleSheet(f"color: {COLORS['warning']};")
         
         if self.record_thread:
@@ -1461,22 +1516,8 @@ class LiveProcessingTab(QWidget):
             self.asr_thread.wait()
             self.asr_thread = None
         
-        self.btn_record.setText("🔴 Ghi âm")
-        self.btn_record.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['success']};
-                color: white;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 12px 24px;
-                border-radius: 6px;
-                border: none;
-                min-width: 120px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['success']};
-            }}
-        """)
+        self.recording_finalized = True
+        self._set_record_button_idle(resume=False)
         self.btn_stop.setEnabled(False)
         self.btn_export.setEnabled(True)
         self.combo_microphone.setEnabled(True)

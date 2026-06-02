@@ -180,7 +180,7 @@ function ensureBuf(current, needed) {
 }
 
 const VAD_SAMPLE_RATE = 16000;
-const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js?app=offline-pwa-v141";
+const AUDIO_DECODER_WORKER = "/js/ffmpeg-decode-worker.js?app=offline-pwa-v142";
 // FFmpeg WASM must not force soxr/swr: some browser builds do not expose those engine names.
 const AUDIO_DECODER_RESAMPLER = "ffmpeg-default";
 const VAD_WINDOW_SIZE = 512;
@@ -225,7 +225,7 @@ const USER_CONFIG_SCHEMA = 8;
 const CALIBRATION_PROFILE_KEY = "asr-vn-offline-calibration-v1";
 const CALIBRATION_LAST_REPORT_KEY = "asr-vn-offline-calibration-report-v1";
 const MANIFEST_STORAGE_KEY = "asr-vn-offline-model-manifest-v1";
-const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v141";
+const OFFLINE_PWA_CODE_VERSION = "offline-pwa-v142";
 window.__OFFLINE_PWA_CODE_VERSION = OFFLINE_PWA_CODE_VERSION;
 const OFFLINE_RUNTIME_CACHE_NAME = OFFLINE_PWA_CODE_VERSION;
 const CALIBRATION_CODE_VERSION = "calibration-v2-provider-stage-tolerance-20pct";
@@ -1231,7 +1231,7 @@ function readStoredCalibrationProfile() {
     const raw = window.localStorage?.getItem(CALIBRATION_PROFILE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch (error) {
-    log(`Read calibration profile failed: ${error.message}`);
+    log(`[Tối ưu thiết bị] Không đọc được cấu hình đã lưu: ${error.message}`);
     return null;
   }
 }
@@ -1290,7 +1290,7 @@ async function loadCalibrationProfileForCurrentDevice() {
     return null;
   }
   calibrationProfile = stored;
-  log(`Device calibration profile loaded (${stored.createdAt || "unknown"}). Re-Calibration is manual only.`);
+  log(`Đã tải cấu hình tối ưu của thiết bị (${stored.createdAt || "không rõ thời điểm"}). Chỉ đo lại khi người dùng bấm tối ưu lại.`);
   return calibrationProfile;
 }
 
@@ -1306,7 +1306,7 @@ function saveCalibrationProfile(profile, report = null) {
       window.localStorage?.setItem(CALIBRATION_LAST_REPORT_KEY, JSON.stringify(slimReport));
     }
   } catch (error) {
-    log(`Save calibration profile failed: ${error.message}`);
+    log(`[Tối ưu thiết bị] Không lưu được cấu hình: ${error.message}`);
   }
 }
 
@@ -1459,7 +1459,7 @@ async function buildDefaultCalibrationProfile(signature = null, environment = nu
     stages: {},
     comparison: {
       source: "default_skip",
-      note: "User skipped device calibration; using conservative defaults from prior local tests.",
+      note: "Người dùng bỏ qua bước đo thiết bị; ứng dụng dùng cấu hình mặc định an toàn.",
       webgpuDefaultEnabled: webgpuAvailable,
     },
   };
@@ -1469,7 +1469,7 @@ async function saveDefaultCalibrationProfile(reason = "skip") {
   const environment = await collectBenchmarkEnvironment().catch(() => null);
   const signature = await currentCalibrationSignature(environment).catch(() => null);
   if (!signature) {
-    throw new Error("Cannot build calibration signature for this device.");
+    throw new Error("Không thể nhận diện cấu hình thiết bị để lưu cấu hình tối ưu.");
   }
   const profile = await buildDefaultCalibrationProfile(signature, environment);
   saveCalibrationProfile(profile, {
@@ -1484,7 +1484,7 @@ async function saveDefaultCalibrationProfile(reason = "skip") {
     },
   });
   log(
-    `[Calibration] Default profile saved: ` +
+    `[Tối ưu thiết bị] Đã lưu cấu hình mặc định: ` +
     `CAM++=${profile.selectedProviders["CAM++ speaker embedding"] || "wasm"}, ` +
     `pyannoteEmb=${profile.selectedProviders["Pyannote Community-1 embedding encoder"] || "wasm"}, ` +
     `dnsmos=${profile.selectedProviders["DNSMOS quality"] || "wasm"}, ` +
@@ -1943,7 +1943,7 @@ function screenWakeLockSupported() {
 }
 
 function wakeLockReasonLabel(reason) {
-  if (reason === "calibration") return "Calibrate thiết bị";
+  if (reason === "calibration") return "Tối ưu thiết bị";
   if (reason === "benchmark") return "Benchmark";
   if (reason === "processing") return "Xử lý file";
   if (reason === "bootstrap") return "Tải dữ liệu lần đầu";
@@ -2056,14 +2056,14 @@ function setCalibrationSetupProgress(stage = "", pct = 0) {
   const bounded = Math.max(0, Math.min(100, Number(pct) || 0));
   const badge = $("offline-bootstrap-status");
   if (badge) {
-    badge.textContent = "Đang Calibrate thiết bị";
+    badge.textContent = "Đang tối ưu thiết bị";
     badge.classList.add("warn");
     badge.classList.remove("ok");
   }
   const message = $("offline-bootstrap-message");
   if (message) {
     const stageText = stage ? ` ${stage}.` : "";
-    message.textContent = `Ứng dụng đang Calibrate để chọn cấu hình xử lý tối ưu cho thiết bị này.${stageText} ${screenWakeLockMessage()}`;
+    message.textContent = `Ứng dụng đang đo để chọn cấu hình xử lý phù hợp nhất cho thiết bị này.${stageText} ${screenWakeLockMessage()}`;
   }
   setProgress($("offline-bootstrap-progress-bar"), bounded, 100);
 }
@@ -2078,7 +2078,7 @@ function syncCalibrationSetupUi(stage = "", pct = 0) {
   document.body.classList.toggle("calibration-pending", pending);
   document.body.classList.toggle("calibration-busy", Boolean(standalone && calibrationBusy));
   if (standalone && calibrationBusy) {
-    setCalibrationSetupProgress(stage || "Đang Calibrate cấu hình tối ưu", pct);
+    setCalibrationSetupProgress(stage || "Đang tối ưu cấu hình", pct);
   } else if (pending) {
     const badge = $("offline-bootstrap-status");
     if (badge) {
@@ -2088,7 +2088,7 @@ function syncCalibrationSetupUi(stage = "", pct = 0) {
     }
     const message = $("offline-bootstrap-message");
     if (message) {
-      message.textContent = `Đã tải đủ dữ liệu offline. Ứng dụng sẽ Calibrate cấu hình tối ưu trước khi mở giao diện xử lý. ${screenWakeLockMessage()}`;
+      message.textContent = `Đã tải đủ dữ liệu offline. Ứng dụng sẽ tối ưu cấu hình cho thiết bị trước khi mở giao diện xử lý. ${screenWakeLockMessage()}`;
     }
     setProgress($("offline-bootstrap-progress-bar"), 0, 100);
   } else if (!calibrationBusy) {
@@ -2351,14 +2351,14 @@ async function updateRuntimeStatus() {
   }
 
   const status = $("runtime-status");
-  status.textContent = offlineBootstrapReady ? "Offline ready" : (navigator.onLine ? "Bootstrap needed" : "Offline incomplete");
+  status.textContent = offlineBootstrapReady ? "Sẵn sàng chạy offline" : (navigator.onLine ? "Cần tải dữ liệu offline" : "Chưa đủ dữ liệu offline");
   status.classList.toggle("ok", offlineBootstrapReady);
   status.classList.toggle("warn", !offlineBootstrapReady);
 }
 
 async function requestPersistentStorage(noisy = false) {
   if (!navigator.storage?.persist || !navigator.storage?.persisted) {
-    if (noisy) log("Persistent storage API is not supported.");
+    if (noisy) log("Trình duyệt không hỗ trợ lưu trữ bền vững.");
     return false;
   }
   if (await navigator.storage.persisted()) {
@@ -2367,7 +2367,7 @@ async function requestPersistentStorage(noisy = false) {
   }
   const ok = await navigator.storage.persist();
   if (noisy) {
-    log(ok ? "Persistent storage granted." : "Persistent storage was not granted by the browser.");
+    log(ok ? "Trình duyệt đã cho phép lưu dữ liệu lâu dài." : "Trình duyệt chưa cho phép lưu dữ liệu lâu dài.");
   }
   await updateRuntimeStatus();
   return ok;
@@ -2390,7 +2390,7 @@ async function readStreamChunkWithTimeout(reader, label, timeoutMs = MODEL_DOWNL
       reader.read(),
       new Promise((_, reject) => {
         timer = window.setTimeout(() => {
-          reject(new Error(`${label} stalled for ${Math.round(timeoutMs / 1000)}s.`));
+          reject(new Error(`Tải ${label} bị đứng hơn ${Math.round(timeoutMs / 1000)} giây.`));
         }, timeoutMs);
       }),
     ]);
@@ -2553,7 +2553,7 @@ function runtimeAssetRequest(url) {
 
 async function runtimeAssetCache() {
   if (!window.caches) {
-    throw new Error("Cache Storage is required for full offline PWA runtime assets.");
+    throw new Error("Trình duyệt cần hỗ trợ Cache Storage để lưu dữ liệu chạy offline.");
   }
   return caches.open(OFFLINE_RUNTIME_CACHE_NAME);
 }
@@ -2593,7 +2593,7 @@ async function cacheRequiredRuntimeAsset(url, progress = null) {
     return { url, cached: true };
   }
   if (!navigator.onLine) {
-    throw new Error(`Cannot cache offline runtime asset while offline: ${url}`);
+    throw new Error(`Không thể tải mã chạy offline khi đang mất kết nối: ${url}`);
   }
   const response = await fetchWithTimeout(
     url,
@@ -2601,7 +2601,7 @@ async function cacheRequiredRuntimeAsset(url, progress = null) {
     DOWNLOAD_RESPONSE_TIMEOUT_MS
   );
   if (!response.ok || !response.body) {
-    throw new Error(`runtime asset download failed for ${url}: ${response.status}`);
+    throw new Error(`Không tải được mã chạy offline ${url}: lỗi ${response.status}`);
   }
   const request = runtimeAssetRequest(url);
   try {
@@ -2629,7 +2629,7 @@ async function cacheRequiredRuntimeAsset(url, progress = null) {
       statusText: response.statusText,
     }));
     const stored = await runtimeAssetStatus(url, cache);
-    if (!stored.ready) throw new Error(`runtime asset did not persist in Cache Storage: ${url}`);
+    if (!stored.ready) throw new Error(`Mã chạy offline chưa được lưu vào bộ nhớ trình duyệt: ${url}`);
     if (progress) progress.done += 1;
     return { url, cached: false };
   } catch (error) {
@@ -2651,7 +2651,7 @@ async function ensureRequiredRuntimeAssetsCached(options = {}) {
   for (const url of OFFLINE_RUNTIME_ASSET_URLS) {
     const status = await runtimeAssetStatus(url);
     if (status.ready) continue;
-    log(`Caching offline runtime asset: ${url}`);
+    log(`Đang lưu mã chạy offline: ${url}`);
     await cacheRequiredRuntimeAsset(url, progress);
     setProgress(progressEl, progress.done, progress.total || 1);
     if (onProgress) onProgress(progress.done, progress.total);
@@ -2659,9 +2659,9 @@ async function ensureRequiredRuntimeAssetsCached(options = {}) {
 
   const finalStatus = await requiredRuntimeAssetsStatus();
   if (finalStatus.ready !== finalStatus.total) {
-    throw new Error(`Offline runtime cache is incomplete: ${finalStatus.ready}/${finalStatus.total}. Missing: ${finalStatus.missing.slice(0, 5).join(", ")}`);
+    throw new Error(`Chưa tải đủ mã chạy offline: ${finalStatus.ready}/${finalStatus.total}. Thiếu: ${finalStatus.missing.slice(0, 5).join(", ")}`);
   }
-  log("Required PWA runtime assets are ready in Cache Storage.");
+  log("Đã lưu đủ mã chạy offline vào trình duyệt.");
   return finalStatus;
 }
 
@@ -2792,7 +2792,7 @@ function updateProcessButtonState() {
   if (recalibrationButton) {
     recalibrationButton.disabled = !offlineBootstrapReady || offlineBootstrapBusy || calibrationBusy;
     recalibrationButton.title = calibrationBusy
-      ? "Đang chạy Re-Calibration."
+      ? "Đang tối ưu lại thiết bị."
       : (offlineBootstrapReady ? "Đo lại cấu hình tối ưu cho thiết bị này." : "Cần tải đủ model trước.");
   }
 }
@@ -3042,9 +3042,9 @@ async function refreshOfflineBootstrapState() {
     } else if (offlineBootstrapBusy) {
       message.textContent = "Vui lòng giữ kết nối và đợi tải dữ liệu lần đầu. Không đóng ứng dụng cho đến khi thanh tiến trình hoàn tất.";
     } else if (!status.serverReady) {
-      message.textContent = `Server thiếu bundle dữ liệu: ${status.missingPacks.join(", ") || "model files"}.`;
+      message.textContent = `Server thiếu gói dữ liệu: ${status.missingPacks.join(", ") || "file model"}.`;
     } else if (status.runtimeAssets?.ready !== status.runtimeAssets?.total) {
-      message.textContent = `Vui lòng giữ kết nối để tải đủ mã chạy offline. Đã có ${status.runtimeAssets.ready}/${status.runtimeAssets.total} file runtime.`;
+      message.textContent = `Vui lòng giữ kết nối để tải đủ mã chạy offline. Đã có ${status.runtimeAssets.ready}/${status.runtimeAssets.total} file mã chạy.`;
     } else if (isStandaloneApp()) {
       message.textContent = `Vui lòng giữ kết nối để tải model lần đầu. Đã có ${status.ready}/${status.total} file cần thiết.`;
     } else {
@@ -3057,8 +3057,8 @@ async function refreshOfflineBootstrapState() {
   const detailSummary = $("model-details-summary");
   if (detailSummary) {
     detailSummary.textContent = offlineBootstrapReady
-      ? "All required models are stored."
-      : `${status.ready}/${status.total} required file(s) ready.`;
+      ? "Đã lưu đủ dữ liệu model cần thiết."
+      : `Đã có ${status.ready}/${status.total} file cần thiết.`;
   }
   if (details && offlineBootstrapReady && !offlineBootstrapBusy) {
     details.open = false;
@@ -3075,10 +3075,18 @@ async function refreshOfflineBootstrapState() {
   updateInstallButtonState();
   if (offlineBootstrapReady && !offlineBootstrapBusy) {
     window.setTimeout(() => {
-      runDeviceCalibrationIfNeeded("offline ready").catch((error) => log(`[Calibration] Auto-run failed: ${error.message}`));
+      runDeviceCalibrationIfNeeded("offline ready").catch((error) => log(`[Tối ưu thiết bị] Không chạy tự động được: ${error.message}`));
     }, 1200);
   }
   return status;
+}
+
+function modelStatusReasonLabel(reason = "") {
+  if (!reason || reason === "missing") return "chưa tải";
+  if (reason === "cache-storage-unavailable") return "trình duyệt không hỗ trợ bộ nhớ cache";
+  if (/sha256 mismatch/i.test(reason)) return "file lỗi, cần tải lại";
+  if (/size mismatch/i.test(reason)) return `sai dung lượng ${reason.match(/\(([^)]+)\)/)?.[0] || ""}`.trim();
+  return reason;
 }
 
 async function renderPacks() {
@@ -3093,15 +3101,15 @@ async function renderPacks() {
     header.className = "pack-header";
     const serverReady = pack.server_ready !== false;
     const serverText = serverReady
-      ? `${pack.files.length}/${pack.files.length} on server`
-      : `${pack.server_available || 0}/${pack.files.length} on server`;
+      ? `${pack.files.length}/${pack.files.length} có trên server`
+      : `${pack.server_available || 0}/${pack.files.length} có trên server`;
     header.innerHTML = `
       <div>
         <strong>${pack.name}</strong>
         <p>${pack.description || ""}</p>
       </div>
       <div class="pack-actions">
-        <div class="pack-status">${status.ready}/${status.total} ready - ${serverText} - ${formatBytes(packSize(pack))}</div>
+        <div class="pack-status">${status.ready}/${status.total} đã sẵn sàng - ${serverText} - ${formatBytes(packSize(pack))}</div>
       </div>
     `;
     section.appendChild(header);
@@ -3115,12 +3123,13 @@ async function renderPacks() {
       const itemStatus = status.statuses[index];
       const row = document.createElement("div");
       row.className = "file-row";
-      const serverLabel = file.available_local ? "server bundle" : file.server_status || "missing on server";
+      const serverLabel = file.available_local ? "có trong gói server" : file.server_status || "server đang thiếu";
+      const itemStatusLabel = itemStatus.ready ? "sẵn sàng" : modelStatusReasonLabel(itemStatus.reason);
       row.innerHTML = `
         <span>${file.id}</span>
         <span>${formatBytes(file.bytes)}</span>
         <span>${serverLabel}</span>
-        <span class="${itemStatus.ready ? "ready" : "missing"}">${itemStatus.ready ? "ready" : itemStatus.reason}</span>
+        <span class="${itemStatus.ready ? "ready" : "missing"}">${itemStatusLabel}</span>
       `;
       section.appendChild(row);
     }
@@ -4427,7 +4436,7 @@ function findManifestFile(fileId) {
       if (file.id === fileId) return file;
     }
   }
-  throw new Error(`Model id not found in manifest: ${fileId}`);
+  throw new Error(`Không tìm thấy model trong danh sách dữ liệu: ${fileId}`);
 }
 
 async function ensureModelFile(fileId) {
@@ -4435,12 +4444,12 @@ async function ensureModelFile(fileId) {
   const status = await fileStatus(file);
   if (status.ready) return file;
   if (file.available_local === false) {
-    throw new Error(`Required model is not bundled on server: ${file.id} (${file.server_status || "missing on server"}).`);
+    throw new Error(`Server chưa có model cần thiết: ${file.id} (${file.server_status || "server đang thiếu"}).`);
   }
 
-  log(`Required model is missing; downloading ${file.id}.`);
+  log(`Thiếu model cần thiết; đang tải ${file.id}.`);
   if (!navigator.onLine) {
-    throw new Error(`Required model is missing locally while offline: ${file.id}. Reconnect once to finish the offline model pack.`);
+    throw new Error(`Thiếu model ${file.id} trong trình duyệt khi đang offline. Hãy kết nối mạng một lần để tải nốt dữ liệu offline.`);
   }
   const response = await fetchWithTimeout(
     file.download_url,
@@ -4448,7 +4457,7 @@ async function ensureModelFile(fileId) {
     DOWNLOAD_RESPONSE_TIMEOUT_MS
   );
   if (!response.ok || !response.body) {
-    throw new Error(`download failed for ${file.id}: ${response.status}`);
+    throw new Error(`Không tải được ${file.id}: lỗi ${response.status}`);
   }
   await writeModelFile(
     file,
@@ -16311,7 +16320,7 @@ async function writeModelFile(file, response, progressEl, progressOffset, progre
 async function downloadPack(packId, options = {}) {
   const pack = manifest.packs.find((item) => item.id === packId);
   if (!pack) return;
-  log(`Downloading pack: ${pack.name}`);
+  log(`Đang tải gói dữ liệu: ${pack.name}`);
 
   const progressEl = $(options.progressId || `progress-${pack.id}`);
   const totalBytes = options.progressTotal || packSize(pack);
@@ -16321,16 +16330,16 @@ async function downloadPack(packId, options = {}) {
   for (const file of pack.files) {
     const status = await fileStatus(file);
     if (status.ready) {
-      log(`Skip ${file.id}; already stored.`);
+      log(`Bỏ qua ${file.id}; file đã có trong trình duyệt.`);
       completedBytes += file.bytes || status.size || 0;
       setProgress(progressEl, completedBytes, totalBytes);
       if (onProgress) onProgress(completedBytes, totalBytes);
       continue;
     }
 
-    log(`Fetching ${file.id}`);
+    log(`Đang tải ${file.id}`);
     if (!navigator.onLine) {
-      throw new Error(`Cannot download ${file.id} while offline. Reconnect once to finish the offline model pack.`);
+      throw new Error(`Không thể tải ${file.id} khi đang mất kết nối. Hãy kết nối mạng một lần để tải nốt dữ liệu offline.`);
     }
     const response = await fetchWithTimeout(
       file.download_url,
@@ -16338,15 +16347,15 @@ async function downloadPack(packId, options = {}) {
       DOWNLOAD_RESPONSE_TIMEOUT_MS
     );
     if (!response.ok || !response.body) {
-      throw new Error(`download failed for ${file.id}: ${response.status}`);
+      throw new Error(`Không tải được ${file.id}: lỗi ${response.status}`);
     }
     await writeModelFile(file, response, progressEl, completedBytes, totalBytes, onProgress);
     completedBytes += file.bytes || Number(response.headers.get("Content-Length")) || 0;
-    log(`Stored ${file.id}`);
+    log(`Đã lưu ${file.id}`);
     await updateRuntimeStatus();
   }
 
-  log(`Pack ready: ${pack.name}`);
+  log(`Gói dữ liệu đã sẵn sàng: ${pack.name}`);
   if (options.refresh !== false) {
     await renderPacks();
     await refreshOfflineBootstrapState();
@@ -16358,7 +16367,7 @@ function scheduleBootstrapReload() {
   bootstrapReloadScheduled = true;
   const message = $("offline-bootstrap-message");
   if (message) {
-    message.textContent = "Đã tải xong dữ liệu offline. Ứng dụng sẽ mở lại để Calibrate cấu hình tối ưu cho thiết bị này.";
+    message.textContent = "Đã tải xong dữ liệu offline. Ứng dụng sẽ mở lại để tối ưu cấu hình cho thiết bị này.";
   }
   setProgress($("offline-bootstrap-progress-bar"), 1, 1);
   window.setTimeout(() => {
@@ -16371,7 +16380,7 @@ async function downloadRequiredOfflinePack() {
   if (!manifest) await loadManifest();
   const packs = requiredOfflinePacks();
   if (packs.length !== REQUIRED_OFFLINE_PACK_IDS.length) {
-    throw new Error("Required offline pack is missing from the model manifest.");
+    throw new Error("Không tìm thấy gói dữ liệu offline cần thiết trong danh sách model.");
   }
   await requestPersistentStorage(true);
 
@@ -16434,7 +16443,7 @@ async function downloadRequiredOfflinePack() {
     const finalStatus = await refreshOfflineBootstrapState();
     completed = finalStatus.complete;
     await updateRuntimeStatus();
-    log("Required PWA offline model pack is ready in browser storage.");
+    log("Đã lưu đủ dữ liệu model offline vào trình duyệt.");
     if (showBootstrapProgress) setPipelineProgress("Dữ liệu offline đã sẵn sàng", 100);
   } finally {
     await releaseScreenWakeLockFor("bootstrap");
@@ -16450,20 +16459,22 @@ async function autoDownloadAfterInstall(reason = "install") {
   if (offlineBootstrapReady || offlineBootstrapBusy || autoBootstrapAttempted) return;
   autoBootstrapAttempted = true;
   try {
-    log(`Preparing offline models after ${reason}.`);
+    log(`Đang chuẩn bị dữ liệu offline sau bước ${reason}.`);
     await downloadRequiredOfflinePack();
   } catch (error) {
     autoBootstrapAttempted = false;
     let errorMsg = error.message;
     let detail = `${error.name || 'Error'}: ${error.message}\n${error.stack || ''}`;
     console.error("Offline bootstrap failed:", detail);
-    if (errorMsg === "Load failed" || errorMsg === "Internal error" || errorMsg === "Failed to fetch") {
-      errorMsg = `${errorMsg} (Hệ điều hành ngắt do mạng kém hoặc bộ nhớ đầy)`;
+    if (errorMsg === "Load failed" || errorMsg === "Failed to fetch") {
+      errorMsg = "Tải dữ liệu bị gián đoạn do mạng yếu hoặc server chưa phản hồi";
+    } else if (errorMsg === "Internal error") {
+      errorMsg = "Trình duyệt gặp lỗi nội bộ, thường do thiếu bộ nhớ hoặc dữ liệu tải bị ngắt";
     }
-    offlineBootstrapError = `Không tải được dữ liệu offline: ${errorMsg}. [Chi tiết: ${error.name}] Vui lòng giữ kết nối, để màn hình luôn sáng rồi mở lại ứng dụng để tải tiếp.`;
+    offlineBootstrapError = `Không tải được dữ liệu offline: ${errorMsg}. Mã lỗi: ${error.name || "không rõ"}. Vui lòng giữ kết nối, để màn hình luôn sáng rồi mở lại ứng dụng để tải tiếp.`;
     await refreshOfflineBootstrapState();
     if (isStandaloneApp()) setPipelineProgress("Tải dữ liệu offline thất bại", 100);
-    log(`Automatic offline model download failed: ${error.message}`);
+    log(`Tải dữ liệu model offline tự động thất bại: ${error.message}`);
   }
 }
 
@@ -16810,7 +16821,7 @@ async function doProcessSelectedAudioFile() {
   }
   if (!offlineBootstrapReady) {
     const message = "Thiếu dữ liệu offline cần thiết. Mở app đã cài và chờ tải đủ model trước khi xử lý.";
-    log("Required PWA offline model pack is required before processing.");
+    log("Cần tải đủ dữ liệu model offline trước khi xử lý.");
     setPipelineProgress(message, 100);
     showToast(message, "error");
     await finishProcessingNotification(false, message);
@@ -16877,7 +16888,7 @@ async function fetchCalibrationSampleFile() {
     );
   }
   if (!response.ok) {
-    throw new Error(`Calibration sample not available: ${response.status}`);
+    throw new Error(`Không tải được file mẫu để tối ưu thiết bị: lỗi ${response.status}`);
   }
   const blob = await response.blob();
   return new File([blob], CALIBRATION_SAMPLE_NAME, {
@@ -16892,7 +16903,7 @@ function benchmarkReportTemplate(kind, mode, file, baseOptions) {
     kind,
     benchmarkMode: "per_stage_wasm_webgpu",
     mode,
-    note: "Per-device calibration/benchmark runs the pipeline once. ASR stays on the full WASM path. Only selected WebGPU-sensitive stages are measured with WASM then WebGPU on the same intermediate input; WebGPU is selected only when output hash matches or an explicit tolerance/downstream check accepts it.",
+    note: "Bước tối ưu/benchmark chạy pipeline một lần trên file mẫu. ASR luôn dùng WASM đầy đủ. Chỉ các bước nhạy với WebGPU được đo bằng WASM rồi WebGPU trên cùng dữ liệu trung gian; WebGPU chỉ được chọn khi kết quả khớp hoặc đạt ngưỡng sai khác cho phép.",
     createdAt: new Date().toISOString(),
     file: {
       name: file.name,
@@ -16946,16 +16957,16 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     const stored = readStoredCalibrationProfile();
     if (stored) {
       calibrationProfile = stored;
-      log("[Calibration] Stored profile loaded; app update does not trigger automatic calibration.");
+      log("[Tối ưu thiết bị] Đã có cấu hình phù hợp; không tự đo lại sau khi cập nhật app.");
       syncCalibrationSetupUi();
       updateProcessButtonState();
       return;
     }
     try {
       await saveDefaultCalibrationProfile("startup-default-no-auto-calibration");
-      log("[Calibration] Default profile saved. Device measurement will run only from Re-Calibration.");
+      log("[Tối ưu thiết bị] Đã lưu cấu hình mặc định. Chỉ đo lại khi người dùng bấm tối ưu lại thiết bị.");
     } catch (error) {
-      log(`[Calibration] Default profile save skipped: ${error.message || String(error)}`);
+      log(`[Tối ưu thiết bị] Không lưu được cấu hình mặc định: ${error.message || String(error)}`);
     }
     syncCalibrationSetupUi();
     updateProcessButtonState();
@@ -16967,12 +16978,12 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
   const stored = readStoredCalibrationProfile();
   if (stored?.signature && signature && stored.signature === signature) {
     calibrationProfile = stored;
-    log("Device calibration profile is current.");
+    log("[Tối ưu thiết bị] Cấu hình thiết bị hiện tại vẫn còn phù hợp.");
     syncCalibrationSetupUi();
     return;
   }
   if (!signature) {
-    log("Device calibration skipped: cannot build calibration signature.");
+    log("[Tối ưu thiết bị] Bỏ qua vì không nhận diện được cấu hình thiết bị.");
     syncCalibrationSetupUi();
     return;
   }
@@ -16993,10 +17004,11 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     resetPipelineLog();
     syncCalibrationSetupUi("Đang tính toán cấu hình tối ưu", 1);
     setPipelineProgress("Tối ưu thiết bị", 1);
-    log(`[Calibration] Starting device calibration after ${reason}.`);
-    log("[Calibration] User library data will not be touched.");
+    const reasonLabel = manualCalibration ? "người dùng bấm tối ưu lại" : reason;
+    log(`[Tối ưu thiết bị] Bắt đầu đo cấu hình sau bước ${reasonLabel}.`);
+    log("[Tối ưu thiết bị] Dữ liệu tập tin đã lưu sẽ không bị thay đổi.");
     await unloadModelsAfterStep("all", baseOptions).catch((error) => {
-      log(`[Calibration] Pre-run unload failed: ${error.message}`);
+      log(`[Tối ưu thiết bị] Không giải phóng được model trước khi đo: ${error.message}`);
     });
 
     const file = await fetchCalibrationSampleFile();
@@ -17005,7 +17017,7 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     setPipelineProgress("Tối ưu thiết bị", 3);
     const runStarted = performance.now();
     const result = await runAudioImport(file, {
-      benchmarkLabel: "Device calibration: per-stage WASM/WebGPU",
+      benchmarkLabel: "Tối ưu thiết bị: đo từng bước WASM/WebGPU",
       resetLog: false,
       clearEditor: false,
       saveLibraryResult: false,
@@ -17019,7 +17031,7 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     report.totalSeconds = Number(((performance.now() - started) / 1000).toFixed(3));
     report.pipelineLog = pipelineLogLines.slice();
     if (calibrationSkipRequested) {
-      log("[Calibration] Measured profile ignored because the user selected the default profile.");
+      log("[Tối ưu thiết bị] Bỏ qua kết quả đo vì người dùng đã chọn cấu hình mặc định.");
       return;
     }
 
@@ -17028,7 +17040,7 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     syncCalibrationSetupUi("Đã tối ưu thiết bị", 100);
     setPipelineProgress("Đã tối ưu thiết bị", 100);
     log(
-      `[Calibration] Saved provider profile: ASR=wasm, ` +
+      `[Tối ưu thiết bị] Đã lưu cấu hình xử lý: ASR=wasm, ` +
       `camppEmb=${profile.selectedProviders["CAM++ speaker embedding"] || "wasm"}, ` +
       `pyannoteEmb=${profile.selectedProviders["Pyannote Community-1 embedding encoder"] || "wasm"}, ` +
       `dnsmos=${profile.selectedProviders["DNSMOS quality"] || "wasm"}, ` +
@@ -17045,13 +17057,13 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
       } catch (_) {}
     }
     setPipelineProgress("Tối ưu thiết bị thất bại", 100);
-    log(`[Calibration] Failed: ${error.message || String(error)}`);
+    log(`[Tối ưu thiết bị] Tối ưu thất bại: ${error.message || String(error)}`);
     if (!calibrationSkipRequested && !calibrationProfile) {
       try {
         await saveDefaultCalibrationProfile("auto-calibration-failed");
-        log("[Calibration] Saved default profile after calibration failure so the offline app can open.");
+        log("[Tối ưu thiết bị] Đã lưu cấu hình mặc định sau lỗi để ứng dụng vẫn mở được.");
       } catch (fallbackError) {
-        log(`[Calibration] Default fallback profile failed: ${fallbackError.message || String(fallbackError)}`);
+        log(`[Tối ưu thiết bị] Không lưu được cấu hình mặc định dự phòng: ${fallbackError.message || String(fallbackError)}`);
       }
     }
   } finally {
@@ -17059,7 +17071,7 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
     calibrationBusy = false;
     syncCalibrationSetupUi();
     await unloadModelsAfterStep("all", baseOptions).catch((error) => {
-      log(`[Calibration] Final unload failed: ${error.message}`);
+      log(`[Tối ưu thiết bị] Không giải phóng được model sau khi đo: ${error.message}`);
     });
     setPipelineControlsDisabled(false);
     syncPipelineControls();
@@ -17070,7 +17082,7 @@ async function runDeviceCalibrationIfNeeded(reason = "startup") {
 async function rerunDeviceCalibrationFromButton() {
   if (calibrationBusy) return;
   const ok = window.confirm(
-    "Chạy Re-Calibration sẽ dùng file mẫu 10 phút để đo lại WASM/WebGPU và cập nhật cấu hình tối ưu cho máy này. Dữ liệu tập tin/kết quả đã lưu sẽ không bị xóa. Tiếp tục?"
+    "Tối ưu lại thiết bị sẽ dùng file mẫu 10 phút để đo WASM/WebGPU và cập nhật cấu hình xử lý phù hợp cho máy này. Dữ liệu tập tin/kết quả đã lưu sẽ không bị xóa. Tiếp tục?"
   );
   if (!ok) return;
   autoCalibrationAttempted = false;
@@ -17089,7 +17101,7 @@ async function skipDeviceCalibrationFromButton() {
   calibrationSkipRequested = true;
   if (wasBusy) {
     const ok = window.confirm(
-      "Calibration đang chạy. Ứng dụng sẽ lưu cấu hình mặc định và mở lại để dừng bước đo hiện tại. Dữ liệu đã lưu không bị xóa. Tiếp tục?"
+      "Đang tối ưu thiết bị. Ứng dụng sẽ lưu cấu hình mặc định và mở lại để dừng bước đo hiện tại. Dữ liệu đã lưu không bị xóa. Tiếp tục?"
     );
     if (!ok) return;
   }
@@ -17112,7 +17124,7 @@ async function skipDeviceCalibrationFromButton() {
   } catch (error) {
     calibrationSkipRequested = false;
     showToast(`Không thể lưu cấu hình mặc định: ${error.message}`, "error");
-    log(`[Calibration] Save default profile failed: ${error.message || String(error)}`);
+    log(`[Tối ưu thiết bị] Không lưu được cấu hình mặc định: ${error.message || String(error)}`);
   } finally {
     if (skipButton) skipButton.disabled = false;
   }
@@ -17143,7 +17155,7 @@ async function runBenchmarkSelectedAudioFile() {
   }
   if (!offlineBootstrapReady) {
     const message = "Thiếu dữ liệu offline cần thiết. Mở app đã cài và chờ tải đủ model trước khi benchmark.";
-    log("Required PWA offline model pack is required before benchmark.");
+    log("Cần tải đủ dữ liệu model offline trước khi benchmark.");
     setPipelineProgress(message, 100);
     showToast(message, "error");
     await finishProcessingNotification(false, message);
@@ -17471,7 +17483,7 @@ function setupEvents() {
     $("config-input").value = "";
   });
   $("btn-reset-config")?.addEventListener("click", async () => {
-    if (!window.confirm("Reset PWA config to defaults?")) return;
+    if (!window.confirm("Đưa cấu hình PWA về mặc định?")) return;
     const defaults = normalizeUserConfig(DEFAULT_USER_CONFIG);
     const defaultHotwords = await loadDefaultHotwords();
     if (defaultHotwords.length) defaults.hotwords = defaultHotwords;
@@ -17484,7 +17496,7 @@ function setupEvents() {
     try {
       await downloadRequiredOfflinePack();
     } catch (error) {
-      log(`Required PWA offline model pack download failed: ${error.message}`);
+      log(`Tải dữ liệu model offline thất bại: ${error.message}`);
     }
   });
 
@@ -17932,7 +17944,7 @@ async function runAudioImportInternal(file, options = {}) {
   throwIfProcessingCancelled(options);
   const bootstrap = await refreshOfflineBootstrapState();
   if (!bootstrap.complete) {
-    throw new Error("Required PWA offline model pack is not ready in this browser.");
+    throw new Error("Trình duyệt chưa có đủ dữ liệu model offline cần thiết.");
   }
   throwIfProcessingCancelled(options);
   if (options.resetLog !== false) resetPipelineLog();

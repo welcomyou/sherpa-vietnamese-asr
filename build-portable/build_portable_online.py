@@ -39,7 +39,7 @@ from build_portable import (
 def _load_version_short() -> str:
     spec = importlib.util.spec_from_file_location("_asr_vn_version", PROJECT_ROOT / "core" / "version.py")
     if spec is None or spec.loader is None:
-        return "2.6.2"
+        return "2.6.3"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.get_version_short()
