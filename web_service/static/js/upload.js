@@ -44,6 +44,10 @@ function initUpload() {
 }
 
 function selectFile(file) {
+    if (typeof stopActiveFileStatusPolling === 'function') {
+        stopActiveFileStatusPolling();
+    }
+
     const allowedExts = ['mp3', 'wav', 'm4a', 'flac', 'aac', 'wma', 'ogg', 'opus',
         'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv'];
     const ext = file.name.split('.').pop().toLowerCase();
@@ -120,6 +124,10 @@ function selectFile(file) {
 }
 
 function clearFile() {
+    if (typeof stopActiveFileStatusPolling === 'function') {
+        stopActiveFileStatusPolling();
+    }
+
     uploadedFile = null;
     currentFileId = null;
 

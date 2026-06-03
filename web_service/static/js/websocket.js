@@ -3,6 +3,7 @@
 let ws = null;
 let wsReconnectTimer = null;
 let heartbeatTimer = null;
+let subscribedQueueFileId = null;
 
 function connectWebSocket() {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -22,6 +23,9 @@ function connectWebSocket() {
                 ws.send(JSON.stringify({ type: 'heartbeat' }));
             }
         }, 30000);
+        if (subscribedQueueFileId) {
+            wsSend({ type: 'subscribe_queue', file_id: subscribedQueueFileId });
+        }
     };
 
     // Mobile browser: reconnect ngay khi user quay lai app
@@ -134,7 +138,10 @@ function wsSend(data) {
 }
 
 function subscribeQueue(fileId) {
-    wsSend({ type: 'subscribe_queue', file_id: fileId });
+    subscribedQueueFileId = fileId || null;
+    if (subscribedQueueFileId) {
+        wsSend({ type: 'subscribe_queue', file_id: subscribedQueueFileId });
+    }
 }
 
 function reconnectWebSocket() {

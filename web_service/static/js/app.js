@@ -403,6 +403,9 @@ window.authToken = null;
 window.appConfig = null;
 let _dirty = false;
 let currentProcessStartedAt = null;
+let activeFileStatusPollTimer = null;
+let activeFileStatusPollFileId = null;
+let activeFileStatusPollInFlight = false;
 const SPEAKER_EDIT_HISTORY_LIMIT = 100;
 let speakerUndoStack = [];
 let speakerRedoStack = [];
@@ -1081,6 +1084,8 @@ async function doProcessFile(meetingName) {
             body: JSON.stringify(config),
         });
 
+        startActiveFileStatusPolling(currentFileId);
+
         if (result.position > 0) {
             showQueuePosition(result.position, result.total);
             showProcessProgress('File đã được đưa vào hàng đợi. Vui lòng đợi tới lượt xử lý.', 0, '');
@@ -1120,12 +1125,98 @@ async function cancelProcess() {
     }
 }
 
+function startActiveFileStatusPolling(fileId) {
+    if (!fileId) return;
+    if (activeFileStatusPollTimer && activeFileStatusPollFileId === fileId) return;
+    stopActiveFileStatusPolling();
+    activeFileStatusPollFileId = fileId;
+    activeFileStatusPollTimer = setInterval(() => {
+        pollActiveFileStatus(fileId);
+    }, 2000);
+    pollActiveFileStatus(fileId);
+}
+
+function stopActiveFileStatusPolling(fileId) {
+    if (fileId && activeFileStatusPollFileId && activeFileStatusPollFileId !== fileId) return;
+    if (activeFileStatusPollTimer) {
+        clearInterval(activeFileStatusPollTimer);
+    }
+    activeFileStatusPollTimer = null;
+    activeFileStatusPollFileId = null;
+    activeFileStatusPollInFlight = false;
+}
+
+async function pollActiveFileStatus(fileId) {
+    if (!fileId || fileId !== currentFileId || activeFileStatusPollInFlight) return;
+    activeFileStatusPollInFlight = true;
+    try {
+        const status = await apiFetch(`/api/files/${fileId}/status`);
+        await applyActiveFileStatus(status);
+    } catch (e) {
+        console.debug('Status poll failed:', e);
+    } finally {
+        activeFileStatusPollInFlight = false;
+    }
+}
+
+async function applyActiveFileStatus(status) {
+    if (!status || status.file_id !== currentFileId) return;
+
+    if (status.status === 'queued') {
+        if (status.queue_position > 0) {
+            showQueuePosition(status.queue_position, status.queue_total);
+        }
+        showProcessProgress('File đã được đưa vào hàng đợi. Vui lòng đợi tới lượt xử lý.', 0, '');
+        return;
+    }
+
+    if (status.status === 'processing') {
+        const queue = document.getElementById('queue-info');
+        const progress = document.getElementById('process-progress');
+        const msgEl = document.getElementById('process-message');
+        const msg = msgEl ? msgEl.textContent : '';
+        if (queue) queue.style.display = 'none';
+        if (!progress || progress.style.display === 'none' || msg.includes('hàng đợi') || msg.includes('gửi yêu cầu')) {
+            showProcessProgress('Đang xử lý...', 0, '');
+        }
+        return;
+    }
+
+    if (status.status === 'completed') {
+        stopActiveFileStatusPolling(status.file_id);
+        const result = await apiFetch(`/api/files/${status.file_id}/result`);
+        onASRComplete({ file_id: status.file_id, result });
+        return;
+    }
+
+    if (status.status === 'error') {
+        stopActiveFileStatusPolling(status.file_id);
+        onASRError({
+            file_id: status.file_id,
+            error: 'Lỗi xử lý file. Vui lòng thử lại.',
+        });
+        return;
+    }
+
+    if (status.status === 'cancelled') {
+        stopActiveFileStatusPolling(status.file_id);
+        onASRCancelled({ file_id: status.file_id });
+        return;
+    }
+
+    if (status.status === 'uploaded') {
+        stopActiveFileStatusPolling(status.file_id);
+        resetProcessUI();
+    }
+}
+
 // === WS event handlers ===
 
 function onQueuePosition(data) {
     if (data.file_id !== currentFileId) return;
     if (data.position > 0) {
         showQueuePosition(data.position, data.total);
+        startActiveFileStatusPolling(currentFileId);
     } else if (data.position === 0) {
         document.getElementById('queue-info').style.display = 'none';
     }
@@ -1133,6 +1224,7 @@ function onQueuePosition(data) {
 
 function onProcessingStarted(data) {
     if (data.file_id !== currentFileId) return;
+    startActiveFileStatusPolling(currentFileId);
     document.getElementById('queue-info').style.display = 'none';
     showProcessProgress('Bắt đầu xử lý...', 0, '');
 }
@@ -1149,6 +1241,7 @@ function onProgress(data) {
 
 function onASRComplete(data) {
     if (data.file_id !== currentFileId) return;
+    stopActiveFileStatusPolling(data.file_id);
     if (currentProcessStartedAt) {
         data.result.timing = data.result.timing || {};
         data.result.timing.total = (performance.now() - currentProcessStartedAt) / 1000;
@@ -1171,6 +1264,7 @@ function onASRComplete(data) {
 
 function onASRError(data) {
     if (data.file_id !== currentFileId) return;
+    stopActiveFileStatusPolling(data.file_id);
     currentProcessStartedAt = null;
     showToast('Lỗi xử lý: ' + data.error, 'error');
     resetProcessUI();
@@ -1178,6 +1272,7 @@ function onASRError(data) {
 
 function onASRCancelled(data) {
     if (data.file_id !== currentFileId) return;
+    stopActiveFileStatusPolling(data.file_id);
     currentProcessStartedAt = null;
     showToast('Đã hủy xử lý', 'success');
     resetProcessUI();
@@ -2017,10 +2112,12 @@ async function restoreSessionState() {
                     status.queue_item.progress_message || 'Đang xử lý...',
                     status.queue_item.progress_percent || 0, '');
                 subscribeQueue(currentFileId);
+                startActiveFileStatusPolling(currentFileId);
             } else if (status.queue_item.status === 'waiting') {
                 document.getElementById('btn-process').disabled = true;
                 document.getElementById('btn-cancel').style.display = '';
                 subscribeQueue(currentFileId);
+                startActiveFileStatusPolling(currentFileId);
             }
             return;
         }
