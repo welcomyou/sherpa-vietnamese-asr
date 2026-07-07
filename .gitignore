@@ -98,6 +98,11 @@ amthanhhoitruong.asr.json
 amthanhhoitruong.txt
 *.bak
 *.dll
+# ICU shim DLLs are REQUIRED build inputs — Qt6Core.dll imports icuuc.dll,
+# and target machines (Windows Server 2016 / slim images) lack a system ICU.
+# Without these, PyQt6 fails with "DLL load failed while importing QtWidgets".
+!build-portable/icu-shim/
+!build-portable/icu-shim/*.dll
 generate_bpe_vocab.py
 *.db
 *.db-shm

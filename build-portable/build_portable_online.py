@@ -15,6 +15,7 @@ import re
 import sys
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 # Fix stdout encoding on Windows (cp1252 -> utf-8) de print Unicode khong bi crash
@@ -432,20 +433,31 @@ def copy_server_extras():
     """Copy ICU shim (cho Windows Server 2016), nssm.exe, bat files"""
     print("[EXTRA] Copying server extras...")
 
-    # ICU shim DLLs (Qt6Core.dll can ICU, Windows Server 2016 khong co)
+    # ICU shim DLLs (Qt6Core.dll imports icuuc.dll; Windows Server 2016 / slim
+    # images lack a system ICU, so PyQt6 crashes with
+    # "DLL load failed while importing QtWidgets" unless we ship the shim).
+    # icuuc.dll is a forwarder -> icuuc73.dll -> needs icudt73.dll + icuin73.dll.
     icu_shim_dir = SCRIPT_DIR / "icu-shim"
     qt6_bin = DIST_DIR_ONLINE / "python" / "Lib" / "site-packages" / "PyQt6" / "Qt6" / "bin"
     qt6_bin.mkdir(parents=True, exist_ok=True)
-    icu_copied = 0
-    for icu_name in ['icuuc.dll', 'icuuc73.dll', 'icuin73.dll', 'icudt73.dll']:
+    required_icu = ['icuuc.dll', 'icuuc73.dll', 'icuin73.dll', 'icudt73.dll']
+    missing_icu = []
+    for icu_name in required_icu:
         src = icu_shim_dir / icu_name
         if src.exists():
             shutil.copy2(src, qt6_bin)
-            icu_copied += 1
-    if icu_copied >= 4:
-        print("  [OK] ICU shim + ICU 73 (Windows Server compatible)")
-    else:
-        print(f"  [WARN] ICU shim khong day du ({icu_copied}/4) trong {icu_shim_dir}")
+        else:
+            missing_icu.append(icu_name)
+    if missing_icu:
+        # Hard fail: shipping without ICU produces a build that silently breaks
+        # PyQt6 on any machine without a system ICU (Windows Server / slim OS).
+        raise RuntimeError(
+            f"ICU shim missing {len(missing_icu)}/4 in {icu_shim_dir}: "
+            f"{', '.join(missing_icu)}. "
+            "These are committed under build-portable/icu-shim/ — run "
+            "`git checkout build-portable/icu-shim/` or restore them before rebuilding."
+        )
+    print("  [OK] ICU shim + ICU 73 (Windows Server compatible)")
 
     # nssm.exe (cai Windows Service)
     nssm_src = SCRIPT_DIR / "nssm.exe"
@@ -1103,12 +1115,49 @@ def main():
             if not (pkg_dir / pkg).exists():
                 missing.append(f"  [MISS] package: {pkg}")
 
+        # ICU shim must be present in the shipped Qt6/bin. Without it PyQt6
+        # crashes on any machine lacking a system ICU (Windows Server 2016 /
+        # slim Windows). This is a hard error, not a warning.
+        qt6_bin_shipped = pkg_dir / "PyQt6" / "Qt6" / "bin"
+        for icu in ("icuuc.dll", "icuuc73.dll", "icuin73.dll", "icudt73.dll"):
+            if not (qt6_bin_shipped / icu).is_file():
+                missing.append(f"  [MISS] PyQt6/Qt6/bin/{icu} (PyQt6 will fail to load)")
+
         if missing:
             print("[WARN] Missing files/packages:")
             for m in missing:
                 print(m)
         else:
             print("[OK] All critical files and packages present")
+
+        # Smoke-test PyQt6 import with the shipped python + Qt6/bin on PATH.
+        # Catches a broken ICU forwarder DLL or missing VC++ runtime that a
+        # file-list check cannot. NOTE: on a Win10/11 build host the system
+        # ICU in System32 can mask a missing shim, so the file-list check
+        # above (not this smoke test) is the authoritative ICU guard.
+        print("[CHECK] Smoke-testing PyQt6 import...")
+        smoke_env = os.environ.copy()
+        qt6_bin_abs = str(qt6_bin_shipped.resolve())
+        smoke_env["PATH"] = os.pathsep.join([
+            qt6_bin_abs,
+            str((DIST_DIR_ONLINE / "python").resolve()),
+            str(pkg_dir.resolve()),
+            str(DIST_DIR_ONLINE.resolve()),
+            smoke_env.get("PATH", ""),
+        ])
+        smoke = subprocess.run(
+            [str(DIST_DIR_ONLINE / "python" / "python.exe"), "-c",
+             "from PyQt6.QtWidgets import QApplication; print('OK PyQt6.QtWidgets')"],
+            cwd=str(DIST_DIR_ONLINE.resolve()),
+            env=smoke_env,
+            capture_output=True, text=True,
+        )
+        if smoke.returncode != 0 or "OK PyQt6.QtWidgets" not in smoke.stdout:
+            print("[ERR] PyQt6 smoke test FAILED — build is broken:")
+            print("  stdout:", smoke.stdout.strip())
+            print("  stderr:", smoke.stderr.strip())
+            raise RuntimeError("PyQt6 smoke test failed; do not ship this build")
+        print("[OK] PyQt6.QtWidgets imports cleanly with shipped runtime")
 
         # Report
         total = sum(f.stat().st_size for f in DIST_DIR_ONLINE.rglob("*") if f.is_file())
